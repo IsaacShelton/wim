@@ -67,8 +67,9 @@ made where a request was open to interpretation.
      windows, e.g. between the file tree and the editor.
 5.2  Key bindings follow the user's Neovim 0.10.4 configuration in
      ~/.config/nvim wherever Wim has the feature they use.
-     Decided: mappings for plugins Wim doesn't have (Telescope, LSP,
-     gitsigns, nvim-spider, theme toggle, Rust auto-import) are left out.
+     Decided: mappings for plugins Wim doesn't have (gitsigns, nvim-spider,
+     theme toggle, Rust auto-import) are left out. Telescope's LSP and
+     diagnostic pickers become Wim's own picker (see 7).
 
 
 6. macOS text editing in Insert mode
@@ -80,3 +81,29 @@ made where a request was open to interpretation.
      Option+fn+Delete (⌦) deletes the word after it.
      Decided: on Windows, Alt stands in for Option, both for these keys and
      for the Option mappings in 5.2; Cmd shortcuts are Ctrl+Shift there.
+
+
+7. Language servers
+-------------------
+7.1  LSP support for Rust and TypeScript (and JavaScript).
+     Decided: rust-analyzer and typescript-language-server, found in
+     Neovim's Mason directory first, then on the PATH, since that is how
+     the user's Neovim finds them. A command that fails to start (such as
+     a rustup proxy with no rust-analyzer installed) falls through to the
+     next one found.
+     Decided: features and mappings follow the Neovim config's LspAttach
+     mappings, diagnostic settings, nvim-cmp and conform.nvim setup:
+     diagnostics (underline, virtual text, signs, update in Insert mode),
+     completion, hover (`K`), go to definition/declaration/implementation/
+     type definition, references, rename, code actions, document and
+     workspace symbols, formatting (`,f` and on save), diagnostic jumps and
+     lists, and highlighting other uses of the symbol under the cursor.
+     Decided: the sign column is shown for files a language server handles
+     (`signcolumn=yes` there), and not for other files.
+     Decided: completion items are inserted as plain text (the client does
+     not advertise snippet support), since Wim has no snippet tab stops to
+     jump between.
+     Decided: formatting on save happens after the write: the formatted
+     text is written again if the buffer hasn't changed meanwhile.
+     Decided: `<C-Space>` with no completion menu open asks for
+     completions.

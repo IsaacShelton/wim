@@ -154,6 +154,11 @@ export class Editor {
     alternate: number | undefined;
     /** The most recent yank, for the UI to flash. */
     yankFlash: Range | undefined;
+    /** Called after a buffer is written to `path`. */
+    onWrite: ((path: string) => void) | undefined;
+    /** Runs a user command (`:Name args`, a name starting with a capital).
+     * Throws an `EditorError` to report a problem. */
+    userCommand: ((name: string, args: string, bang: boolean) => void) | undefined;
 
     constructor(clipboard?: Clipboard) {
         this.registers = new Registers(clipboard);

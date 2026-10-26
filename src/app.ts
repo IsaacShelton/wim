@@ -5,8 +5,9 @@
 import * as path from 'node:path';
 
 import { Clipboard, SystemClipboard } from './clipboard';
-import { Pos, isWhitespace, pos } from './editor/buffer';
+import { Pos, isWhitespace, pos, posCmp } from './editor/buffer';
 import { Editor } from './editor/editor';
+import { fail } from './editor/errors';
 import { KeyInput, ch, charOf, ctrl, isNamedKey, keyEq, keyNew, keyToString, parseKeys, plain } from './editor/keys';
 import { isCmdLine } from './editor/mode';
 import { Range } from './editor/range';
@@ -15,40 +16,15 @@ import { FileTree } from './filetree';
 import * as highlight from './highlight';
 import { Token } from './highlight';
 import * as icons from './icons';
-import { Command, Keymap, MapMode, Rhs, TIMEOUT } from './keymap';
+import { Command, Keymap, LspAction, MapMode, Rhs, TIMEOUT } from './keymap';
+import { Completion } from './lsp/completion';
+import { LspFeatures, severityColor } from './lsp/features';
+import { BufferDiagnostic, LspManager } from './lsp/manager';
+import { ServerSpec, defaultServers } from './lsp/servers';
 import { baseName, currentDir } from './paths';
+import { Float, Overlay, Picker } from './popup';
 import { ClientMessage, DrawCmd } from './protocol';
-
-const theme = {
-    BG: '#282c34',
-    FG: '#abb2bf',
-    CURSOR_LINE: '#2c313c',
-    GUTTER: '#4b5263',
-    GUTTER_CURRENT: '#e5c07b',
-    TILDE: '#3b4048',
-    SELECTION: '#3e4451',
-    SEARCH: '#5c4f2e',
-    CURSOR: '#528bff',
-    STATUS_BG: '#21252b',
-    ERROR: '#e06c75',
-    /** Yank flash, as `[r, g, b]`; the alpha fades over time. */
-    FLASH: [0xe5, 0xc0, 0x7b],
-
-    KEYWORD: '#c678dd',
-    TYPE: '#e5c07b',
-    CONSTANT: '#d19a66',
-    STRING: '#98c379',
-    COMMENT: '#7f848e',
-    FUNCTION: '#61afef',
-    MACRO: '#56b6c2',
-
-    MODE_NORMAL: '#61afef',
-    MODE_INSERT: '#98c379',
-    MODE_VISUAL: '#c678dd',
-    MODE_REPLACE: '#e06c75',
-    MODE_COMMAND: '#e5c07b',
-    MODE_TREE: '#56b6c2',
-} as const;
+import { theme } from './theme';
 
 const TEXT_PADDING = 6;
 /** Width of the file tree, in characters. */
@@ -56,6 +32,13 @@ const SIDEBAR_COLS = 30;
 const FLASH_DURATION = 300;
 /** How far the mouse must move before a press becomes a drag, in pixels. */
 const DRAG_THRESHOLD = 4;
+/** Width of the sign column for diagnostics, in characters (shown for files
+ * a language server handles, like Neovim's `signcolumn=yes`). */
+const SIGN_COLS = 2;
+/** Diagnostic signs by severity, from the Neovim config, and without a Nerd
+ * Font. */
+const SIGNS = ['', '\u{f0159}', '\u{f071}', '\u{f02fc}', '\u{f0335}'];
+const PLAIN_SIGNS = ['', 'E', 'W', 'I', 'H'];
 
 interface Rect {
     left: number;
@@ -108,6 +91,9 @@ export interface AppOptions {
     /** Whether a Nerd Font is available, so file icons can be drawn. */
     icons: boolean;
     clipboard?: Clipboard;
+    /** Language servers to use (by default rust-analyzer and
+     * typescript-language-server). */
+    servers?: ServerSpec[];
     /** Called whenever the window should be repainted. */
     onFrame: (title: string, dirty: boolean, cmds: DrawCmd[]) => void;
     /** Called once when Wim should exit. */
@@ -146,6 +132,14 @@ export class WimApp {
     /** The press that may become a drag in the text area. */
     private press: { x: number; y: number; dragging: boolean } | undefined;
     private quitting = false;
+    readonly lsp: LspManager;
+    private readonly features: LspFeatures;
+    private readonly completion: Completion;
+    /** A picker (references, symbols, code actions...) has the keyboard. */
+    private picker: Picker<never> | undefined;
+    /** Hover documentation or diagnostics next to the cursor. */
+    private float: Float | undefined;
+    private refreshQueued = false;
 
     constructor(private readonly opts: AppOptions) {
         this.icons = opts.icons;
@@ -163,6 +157,19 @@ export class WimApp {
             }
         }
         this.editor = new Editor(this.clipboard);
+        const refresh = (): void => this.refresh();
+        this.lsp = new LspManager(this.editor, opts.servers ?? defaultServers(), { refresh });
+        this.features = new LspFeatures(this.editor, this.lsp, {
+            openPicker: (picker) => {
+                this.picker = picker;
+            },
+            showFloat: (float) => {
+                this.float = float;
+            },
+            refresh,
+        });
+        this.completion = new Completion(this.editor, this.lsp, refresh);
+        this.editor.userCommand = (name, args) => this.userCommand(name, args);
         if (opts.path !== undefined) this.editor.openFile(opts.path);
         const root = currentDir();
         this.tree = new FileTree(root);
@@ -215,7 +222,10 @@ export class WimApp {
                 this.editor.copySelection(name === 'cut');
                 break;
             case 'paste':
-                if (this.focus === 'Editor') {
+                if (this.picker) {
+                    const text = this.clipboard.getText();
+                    if (text !== undefined) this.picker.paste(text);
+                } else if (this.focus === 'Editor') {
                     const text = this.clipboard.getText();
                     if (text !== undefined) this.editor.pasteText(text);
                 }
@@ -235,6 +245,24 @@ export class WimApp {
 
     private key(key: KeyInput): void {
         this.closeWarned = false;
+        if (this.picker) {
+            if (!this.picker.key(key)) {
+                this.picker = undefined;
+                if (key.key === 'Enter') this.focus = 'Editor';
+            }
+            return;
+        }
+        if (this.float?.focused) {
+            if (!this.float.key(key)) this.float = undefined;
+            return;
+        }
+        if (this.focus === 'Editor' && this.completion.key(key)) return;
+        const before = this.completion.snapshot();
+        this.typeKey(key);
+        if (before.mode === 'Insert') this.completion.afterKey(key, before);
+    }
+
+    private typeKey(key: KeyInput): void {
         if (this.awaitingChar !== undefined) {
             const command = this.awaitingChar;
             this.awaitingChar = undefined;
@@ -320,6 +348,10 @@ export class WimApp {
             this.editor.handleKeys(rhs.keys);
             return;
         }
+        if (rhs.t === 'Lsp') {
+            this.lspAction(rhs.action);
+            return;
+        }
         switch (rhs.command) {
             case 'WindowLeft':
                 if (this.treeVisible) {
@@ -342,6 +374,57 @@ export class WimApp {
                 this.awaitingChar = rhs.command;
                 break;
         }
+    }
+
+    private lspAction(action: LspAction): void {
+        // Asking for hover again moves into it, to scroll it.
+        const f = this.float;
+        if (action.t === 'Hover' && f && f.bufferId === this.editor.bufferId() && this.focus === 'Editor') {
+            f.focused = true;
+            return;
+        }
+        this.features.run(action);
+    }
+
+    /** `:LspInfo`, `:LspRestart`. */
+    private userCommand(name: string, args: string): void {
+        switch (name) {
+            case 'LspInfo':
+                this.editor.setMessage(this.lsp.info());
+                return;
+            case 'LspRestart':
+                this.lsp.restart();
+                this.editor.setMessage('Restarting language servers');
+                return;
+            case 'LspFormatOnSave':
+                if (args === 'on' || args === 'off') this.lsp.formatOnSave = args === 'on';
+                this.editor.setMessage(`Format on save is ${this.lsp.formatOnSave ? 'on' : 'off'}`);
+                return;
+            default:
+                fail(`E492: Not an editor command: ${name}${args ? ' ' + args : ''}`);
+        }
+    }
+
+    /** Repaint soon, for something that happened outside of input (a server
+     * answering). Several requests make one frame. */
+    private refresh(): void {
+        if (this.refreshQueued || this.quitting) return;
+        this.refreshQueued = true;
+        setImmediate(() => {
+            this.refreshQueued = false;
+            try {
+                this.render();
+            } catch (e) {
+                process.stderr.write(`wim: internal error: ${(e as Error).stack ?? String(e)}\n`);
+            }
+        });
+    }
+
+    /** Stop the language servers (Wim is exiting). */
+    dispose(): void {
+        this.completion.close();
+        this.features.dispose();
+        this.lsp.dispose();
     }
 
     /** Send an (unmapped) key to whichever pane has focus. */
@@ -434,6 +517,11 @@ export class WimApp {
     }
 
     private mouse(layout: Layout, kind: 'down' | 'move' | 'up', x: number, y: number): void {
+        if (kind === 'down') {
+            this.picker = undefined;
+            this.float = undefined;
+            this.completion.close();
+        }
         if (kind === 'up') {
             this.press = undefined;
             return;
@@ -522,6 +610,7 @@ export class WimApp {
             this.quitting = true;
             this.clearMapTimer();
             if (this.flashTimer) clearTimeout(this.flashTimer);
+            this.dispose();
             this.opts.onQuit();
             return;
         }
@@ -529,6 +618,13 @@ export class WimApp {
         const layout = this.prepare();
         this.editor.scrollToCursor();
         this.syncTree(layout);
+        this.lsp.sync();
+        this.features.cursorMoved();
+        const f = this.float;
+        const ed = this.editor;
+        if (f && !f.focused && (f.bufferId !== ed.bufferId() || posCmp(f.anchor, ed.cursor) !== 0 || ed.mode !== 'Normal' || this.focus !== 'Editor')) {
+            this.float = undefined;
+        }
         if (this.updateFlash() && !this.flashTimer) {
             this.flashTimer = setTimeout(() => {
                 this.flashTimer = undefined;
@@ -541,6 +637,14 @@ export class WimApp {
         const painter = new Painter(this.editor, layout, {
             metrics: this.metrics,
             gutterCols: this.gutterCols(),
+            signCols: this.signCols(),
+            diagnostics: this.features.diagnostics(),
+            references: this.features.highlights(),
+            diagnosticCounts: this.lsp.counts(this.editor.filePath),
+            lspProgress: this.lsp.progressText(),
+            completion: this.completion.visible && this.focus === 'Editor' ? this.completion : undefined,
+            float: this.float,
+            picker: this.picker,
             focus: this.focus,
             icons: this.icons,
             tree: this.tree,
@@ -576,10 +680,15 @@ export class WimApp {
         };
     }
 
+    private signCols(): number {
+        return this.lsp.handles(this.editor.filePath) ? SIGN_COLS : 0;
+    }
+
+    /** The sign column and line numbers. */
     private gutterCols(): number {
         const o = this.editor.options;
-        if (!o.number && !o.relativenumber) return 0;
-        return Math.max(String(this.editor.buffer.lineCount()).length, 3) + 1;
+        if (!o.number && !o.relativenumber) return this.signCols();
+        return this.signCols() + Math.max(String(this.editor.buffer.lineCount()).length, 3) + 1;
     }
 }
 
@@ -627,6 +736,17 @@ interface PaintState {
     flash: Flash | undefined;
     mapPending: KeyInput[];
     highlightCache: highlight.Cache;
+    signCols: number;
+    /** The active buffer's diagnostics, sorted by position. */
+    diagnostics: BufferDiagnostic[];
+    /** Other uses of the symbol under the cursor. */
+    references: [Pos, Pos][];
+    /** Diagnostics by severity (1 to 4). */
+    diagnosticCounts: number[];
+    lspProgress: string | undefined;
+    completion: Completion | undefined;
+    float: Float | undefined;
+    picker: Picker<never> | undefined;
 }
 
 /** Paints one frame. */
@@ -696,6 +816,19 @@ class Painter {
             if (to > from) this.rect(rect(colX(from), y, colX(to), y + lh), color);
         };
 
+        // Diagnostics by line, most severe first.
+        const lineDiagnostics = new Map<number, BufferDiagnostic[]>();
+        for (const d of this.st.diagnostics) {
+            for (let l = Math.max(d.start.line, ed.scrollTop); l <= Math.min(d.end.line, ed.scrollTop + layout.rows); l++) {
+                const list = lineDiagnostics.get(l) ?? [];
+                list.push(d);
+                lineDiagnostics.set(l, list);
+            }
+        }
+        for (const list of lineDiagnostics.values()) list.sort((a, b) => a.severity - b.severity);
+        const signCols = this.st.signCols;
+        const numbersLeft = layout.textArea.left + signCols * cw;
+
         this.clip(rect(layout.textArea.left, 0, layout.textArea.right, layout.textArea.bottom));
         for (let row = 0; row < layout.rows; row++) {
             const line = ed.scrollTop + row;
@@ -710,12 +843,21 @@ class Painter {
 
             // Line number gutter: relative numbers, with the absolute number
             // on the cursor line (Vim's `number` + `relativenumber`).
-            if (gutterCols > 0) {
+            // A sign for the line's most severe diagnostic, which also colors
+            // its number.
+            const diags = lineDiagnostics.get(line) ?? [];
+            const starting = diags.find((d) => d.start.line === line);
+            if (starting && signCols > 0) {
+                const sign = (this.st.icons ? SIGNS : PLAIN_SIGNS)[starting.severity] ?? '';
+                this.text(layout.textArea.left + TEXT_PADDING / 2, y, sign, severityColor(starting.severity));
+            }
+            if (gutterCols > signCols) {
                 const current = line === cursor.line;
                 const label = opts.relativenumber && !current ? String(Math.abs(line - cursor.line)) : String(line + 1);
-                const color = current ? theme.GUTTER_CURRENT : theme.GUTTER;
+                let color: string = current ? theme.GUTTER_CURRENT : theme.GUTTER;
+                if (starting) color = severityColor(starting.severity);
                 if (opts.relativenumber && opts.number && current) {
-                    this.text(layout.textArea.left + 2, y, label, color);
+                    this.text(numbersLeft + 2, y, label, color);
                 } else {
                     this.textRight(layout.textArea.left + (gutterCols - 1) * cw, y, label, color);
                 }
@@ -725,6 +867,8 @@ class Painter {
                 const end = pos(selection.end.line, selection.end.col + 1);
                 fillRegion(line, y, selection.start, end, selection.linewise, theme.SELECTION);
             }
+
+            for (const [start, end] of this.st.references) fillRegion(line, y, start, end, false, theme.REFERENCE);
 
             const chars = buf.line(line);
             if (searchRe) {
@@ -743,6 +887,7 @@ class Painter {
                 spans = highlight.highlightLine(lang, chars, state)[0];
             }
             this.lineText(chars, spans, y);
+            this.lineDiagnostics(line, y, diags);
         }
         this.cmds.push(['unclip']);
 
@@ -751,7 +896,47 @@ class Painter {
         this.paintTree();
         this.paintStatus();
         this.paintCmdline();
+        this.paintPopups();
         return this.cmds;
+    }
+
+    /** Underline a line's diagnostics and show the most severe message after
+     * its end (Neovim's `underline` and `virtual_text`). */
+    private lineDiagnostics(line: number, y: number, diags: readonly BufferDiagnostic[]): void {
+        if (diags.length === 0) return;
+        const { ed, layout } = this;
+        const cw = layout.charW;
+        const left = ed.scrollLeft;
+        const lineEnd = ed.displayCol(line, ed.buffer.lineLen(line));
+        const x = (dcol: number): number => layout.textLeft + (dcol - left) * cw;
+        for (const d of [...diags].reverse()) {
+            let from = d.start.line === line ? ed.displayCol(line, d.start.col) : 0;
+            let to = d.end.line === line ? ed.displayCol(line, d.end.col) : lineEnd;
+            // An empty range marks the character there.
+            if (to <= from) to = from + 1;
+            from = Math.max(from, left);
+            if (to > from) this.rect(rect(x(from), y + layout.lineH - 2, x(to), y + layout.lineH - 1), severityColor(d.severity));
+        }
+        const first = diags.find((d) => d.start.line === line);
+        const at = lineEnd + 4;
+        if (first && at >= left) this.text(x(at), y, `■ ${first.message.split('\n')[0]}`, severityColor(first.severity));
+    }
+
+    /** The completion menu, a float and a picker, over everything else. */
+    private paintPopups(): void {
+        const { ed, layout } = this;
+        const overlay = new Overlay(this.cmds, layout.charW, layout.lineH);
+        const area = layout.textArea;
+        const screen = (p: Pos): [number, number] => [
+            layout.textLeft + (ed.displayCol(p.line, p.col) - ed.scrollLeft) * layout.charW,
+            area.top + (p.line - ed.scrollTop) * layout.lineH,
+        ];
+        const menu = this.st.completion;
+        const anchor = menu?.anchor();
+        if (menu && anchor) overlay.completion(menu, area, ...screen(anchor), this.st.icons);
+        const f = this.st.float;
+        if (f) overlay.float(f, area, ...screen(f.anchor));
+        if (this.st.picker) overlay.picker(this.st.picker, rect(0, 0, this.st.metrics.width, layout.status.top));
     }
 
     /** Draw the visible part of a line in its colors, expanding tabs. */
@@ -954,6 +1139,23 @@ class Painter {
         const pending = this.st.mapPending.map(keyToString).join('') + ed.pendingKeys();
         const right = `${pending}   ${filetype}   ${cursor.line + 1}:${ed.displayCol(cursor.line, cursor.col) + 1}   ${position} `;
         this.textRight(r.right - cw, r.top, right, theme.FG);
+
+        // Language server progress, or diagnostic counts, to the left.
+        let x = r.right - cw - Array.from(right).length * cw;
+        const parts: [string, string][] = [];
+        const progress = this.st.lspProgress;
+        if (progress) {
+            const chars = Array.from(progress);
+            parts.push([chars.length > 50 ? chars.slice(0, 49).join('') + '…' : progress, theme.COMMENT]);
+        } else {
+            this.st.diagnosticCounts.forEach((n, severity) => {
+                if (n > 0) parts.push([`${(this.st.icons ? SIGNS : PLAIN_SIGNS)[severity]} ${n}`, severityColor(severity)]);
+            });
+        }
+        for (const [text, color] of parts.reverse()) {
+            x -= (Array.from(text).length + 2) * cw;
+            this.text(x, r.top, text, color);
+        }
     }
 
     private paintCmdline(): void {

@@ -55,6 +55,65 @@ const SWAPPED = [
     'lastVisual',
 ] as const;
 
+/** A buffer's own state. The active buffer's lives in `Editor`, the others'
+ * in their slots. */
+export type BufferState = Pick<BufferSlot, (typeof SWAPPED)[number]>;
+
+/** The state of buffer `id`, wherever it lives. Use it right away: once the
+ * active buffer changes, the active buffer's state moves. */
+export function bufferState(ed: Editor, id: number): BufferState | undefined {
+    const i = ed.buffers.findIndex((s) => s.id === id);
+    if (i < 0) return undefined;
+    return i === ed.current ? ed : ed.buffers[i];
+}
+
+/** Every buffer's id and state, in order. */
+export function bufferStates(ed: Editor): [number, BufferState][] {
+    return ed.buffers.map((s, i) => [s.id, i === ed.current ? ed : s]);
+}
+
+/** The id of the buffer showing file `p`, if one does. */
+export function findBuffer(ed: Editor, p: string): number | undefined {
+    const full = absolute(p);
+    return bufferStates(ed).find(([, st]) => st.filePath === full)?.[0];
+}
+
+/** The buffer for file `p`, loading it in the background if it isn't open. */
+export function backgroundBuffer(ed: Editor, p: string): number {
+    const existing = findBuffer(ed, p);
+    if (existing !== undefined) return existing;
+    const slot = new BufferSlot(ed.nextBufferId);
+    ed.nextBufferId += 1;
+    slot.filePath = absolute(p);
+    try {
+        slot.buffer = Buffer.fromText(fs.readFileSync(slot.filePath, 'utf8'));
+        slot.savedVersion = slot.buffer.version();
+    } catch {
+        // A new file.
+    }
+    ed.buffers.push(slot);
+    return slot.id;
+}
+
+/** Change buffer `id` with `edit` as one undoable step (or as part of the
+ * change in progress, such as an Insert session). */
+export function editBuffer(ed: Editor, id: number, edit: (st: BufferState) => void): void {
+    const st = bufferState(ed, id);
+    if (!st) return;
+    const active = st === ed;
+    if (active && ed.undoPending !== undefined) {
+        edit(st);
+    } else {
+        const { lines, version } = st.buffer.snapshot();
+        edit(st);
+        if (st.buffer.version() !== version) {
+            st.undoStack.push({ lines, version, cursor: st.cursor });
+            st.redoStack = [];
+        }
+    }
+    if (active) ed.clampCursor();
+}
+
 function swapSlot(ed: Editor, i: number): void {
     const slot = ed.buffers[i] as unknown as Record<string, unknown>;
     const active = ed as unknown as Record<string, unknown>;
@@ -212,9 +271,25 @@ export function writeFile(ed: Editor, p: string | undefined): boolean {
     }
     if (ed.filePath === undefined) ed.filePath = target;
     if (ed.filePath === target) ed.savedVersion = ed.buffer.version();
+    ed.onWrite?.(target);
     ed.setMessage(
         `"${displayName(target)}" ${ed.buffer.lineCount()}L, ${globalThis.Buffer.byteLength(text)}B written`,
     );
+    return true;
+}
+
+/** Write buffer `id` to its file, whether or not it is active. */
+export function writeBuffer(ed: Editor, id: number): boolean {
+    const st = bufferState(ed, id);
+    if (st?.filePath === undefined) return false;
+    try {
+        fs.writeFileSync(st.filePath, st.buffer.toFileText());
+    } catch (e) {
+        ed.setError(`E212: Can't open file for writing: ${(e as Error).message}`);
+        return false;
+    }
+    st.savedVersion = st.buffer.version();
+    ed.onWrite?.(st.filePath);
     return true;
 }
 
@@ -231,6 +306,7 @@ export function writeAll(ed: Editor): boolean {
         try {
             fs.writeFileSync(slot.filePath, slot.buffer.toFileText());
             slot.savedVersion = slot.buffer.version();
+            ed.onWrite?.(slot.filePath);
         } catch (e) {
             ed.setError(`E212: Can't open file for writing: ${(e as Error).message}`);
             ok = false;

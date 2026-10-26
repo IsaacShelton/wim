@@ -1,6 +1,7 @@
 // User key mappings, translated from `~/.config/nvim/init.lua` (leader `,`,
 // `timeoutlen` 300ms). Mappings to Neovim plugins Wim doesn't have
-// (Telescope, LSP, gitsigns, spider) are left out.
+// (gitsigns, spider) are left out; Telescope's LSP and diagnostic pickers
+// become Wim's own picker.
 
 import { KeyInput, keyIs, keysEq, keysStartWith, parseKeys } from './editor/keys';
 
@@ -23,15 +24,32 @@ export type Command =
     /** Read one more character and insert it after the cursor. */
     | 'InsertCharAfter';
 
+/** Language server features. */
+export type LspAction =
+    | { t: 'Goto'; method: 'definition' | 'declaration' | 'implementation' | 'typeDefinition' }
+    | { t: 'References' }
+    | { t: 'Hover' }
+    | { t: 'Rename' }
+    | { t: 'CodeAction' }
+    | { t: 'DocumentSymbols' }
+    | { t: 'WorkspaceSymbols' }
+    | { t: 'Format' }
+    /** `]d`, `[d`; with a severity, only diagnostics of that severity. */
+    | { t: 'JumpDiagnostic'; forward: boolean; severity?: number }
+    /** Every file's diagnostics, in a picker. */
+    | { t: 'ListDiagnostics'; severity?: number };
+
 export type Rhs =
     /** Keys fed to the editor without further mapping (`noremap`). */
     | { t: 'Keys'; keys: KeyInput[] }
-    | { t: 'Command'; command: Command };
+    | { t: 'Command'; command: Command }
+    | { t: 'Lsp'; action: LspAction };
 
 /** Whether a mapping makes sense while the file tree has focus: window
- * commands and `:` commands do, editing keys don't. */
+ * commands, `:` commands and project-wide pickers do, editing keys don't. */
 export function worksInTree(rhs: Rhs): boolean {
     if (rhs.t === 'Command') return rhs.command !== 'InsertCharBefore' && rhs.command !== 'InsertCharAfter';
+    if (rhs.t === 'Lsp') return rhs.action.t === 'WorkspaceSymbols' || rhs.action.t === 'ListDiagnostics';
     return rhs.keys.length > 0 && keyIs(rhs.keys[0], ':');
 }
 
@@ -58,6 +76,7 @@ export class Keymap {
         const I: MapMode[] = ['Insert'];
         const keys = (s: string): Rhs => ({ t: 'Keys', keys: parseKeys(s) });
         const command = (c: Command): Rhs => ({ t: 'Command', command: c });
+        const lsp = (action: LspAction): Rhs => ({ t: 'Lsp', action });
         const maps: [MapMode[], string, Rhs][] = [
             // Insert a single character before/after the cursor (Option+c/d).
             [N, 'ç', command('InsertCharBefore')],
@@ -109,6 +128,30 @@ export class Keymap {
             [N, 'Ô', keys('V')],
             [N, '\u{f8ff}', keys('V')],
             [N, '<C-n>', command('ToggleTree')],
+            // Language servers (set on LspAttach in the Neovim config; `K` is
+            // Neovim's default hover mapping, `zK` the config's fold peek).
+            [N, 'gd', lsp({ t: 'Goto', method: 'definition' })],
+            [N, 'gr', lsp({ t: 'References' })],
+            [N, 'gi', lsp({ t: 'Goto', method: 'implementation' })],
+            [N, 'gt', lsp({ t: 'Goto', method: 'typeDefinition' })],
+            [N, 'gD', lsp({ t: 'Goto', method: 'declaration' })],
+            [N, '<leader>S', lsp({ t: 'DocumentSymbols' })],
+            [N, '<leader>fs', lsp({ t: 'WorkspaceSymbols' })],
+            [N, '<leader>ra', lsp({ t: 'Rename' })],
+            [NV, '<leader>ca', lsp({ t: 'CodeAction' })],
+            [NV, '<leader>f', lsp({ t: 'Format' })],
+            [N, 'K', lsp({ t: 'Hover' })],
+            [N, 'zK', lsp({ t: 'Hover' })],
+            // Diagnostics: next/previous of any severity, or of severity 1-4.
+            [N, ']d', lsp({ t: 'JumpDiagnostic', forward: true })],
+            [N, '[d', lsp({ t: 'JumpDiagnostic', forward: false })],
+            ...[1, 2, 3, 4].flatMap((severity): [MapMode[], string, Rhs][] => [
+                [N, `]${severity}`, lsp({ t: 'JumpDiagnostic', forward: true, severity })],
+                [N, `[${severity}`, lsp({ t: 'JumpDiagnostic', forward: false, severity })],
+                [N, `<leader>${severity}`, lsp({ t: 'ListDiagnostics', severity })],
+            ]),
+            [N, '<leader>q', lsp({ t: 'ListDiagnostics' })],
+            [N, '<leader>z', lsp({ t: 'ListDiagnostics', severity: 1 })],
         ];
         // On Windows and Linux, Alt+letter arrives as <M-letter> rather than the
         // character Option types on a Mac, so map those too.

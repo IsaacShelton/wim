@@ -18,6 +18,7 @@ import { FileTree } from '../src/filetree';
 import { C, RUST, Token, highlightLine, NORMAL } from '../src/highlight';
 import * as icons from '../src/icons';
 import { Keymap } from '../src/keymap';
+import { ServerSpec } from '../src/lsp/servers';
 import { ClientMessage, DrawCmd } from '../src/protocol';
 import { startServer } from '../src/server';
 
@@ -37,13 +38,14 @@ interface Harness {
     text: () => string;
 }
 
-function harness(file?: string): Harness {
+function harness(file?: string, servers: ServerSpec[] = []): Harness {
     const frames: DrawCmd[][] = [];
     let quit = false;
     const app = new WimApp({
         path: file,
         icons: false,
         clipboard: new MemoryClipboard(),
+        servers,
         onFrame: (_title, _dirty, cmds) => frames.push(cmds),
         onQuit: () => {
             quit = true;
@@ -236,7 +238,7 @@ test('leader mappings', () => {
         rhs: { t: 'Keys', keys: parseKeys(':w<CR>') },
         ambiguous: false,
     });
-    assert.deepEqual(map.lookup('Normal', parseKeys(',z'), false), { t: 'None' });
+    assert.deepEqual(map.lookup('Normal', parseKeys(',y'), false), { t: 'None' });
     assert.deepEqual(map.lookup('Insert', parseKeys(',;'), false), { t: 'None' });
 });
 

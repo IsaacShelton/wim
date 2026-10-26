@@ -107,7 +107,10 @@ export async function main(argv: string[]): Promise<void> {
                 if (client !== conn) return;
                 client = undefined;
                 if (window && !window.tracksExit && !shuttingDown) {
-                    exitTimer = setTimeout(() => process.exit(0), RECONNECT_GRACE);
+                    exitTimer = setTimeout(() => {
+                        app.dispose();
+                        process.exit(0);
+                    }, RECONNECT_GRACE);
                 }
             });
         },
@@ -115,6 +118,7 @@ export async function main(argv: string[]): Promise<void> {
 
     window = openWindow(server.url, args.window);
     window.onExit(() => {
+        app.dispose();
         server.close();
         process.exit(0);
     });
@@ -122,6 +126,7 @@ export async function main(argv: string[]): Promise<void> {
 
     for (const signal of ['SIGINT', 'SIGTERM', 'SIGHUP'] as const) {
         process.on(signal, () => {
+            app.dispose();
             window?.close();
             server.close();
             process.exit(0);

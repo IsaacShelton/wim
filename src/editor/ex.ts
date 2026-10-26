@@ -290,7 +290,8 @@ function exCommand(ed: Editor, input: string): void {
             );
             return;
         default:
-            fail(`E492: Not an editor command: ${input}`);
+            if (/^[A-Z]/.test(name) && ed.userCommand) ed.userCommand(name, args, bang);
+            else fail(`E492: Not an editor command: ${input}`);
     }
 }
 

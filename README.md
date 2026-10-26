@@ -49,6 +49,8 @@ one the tree shows plain folder arrows.
 | `src/server.ts`, `src/protocol.ts` | The local page and WebSocket, and the messages they carry |
 | `src/ui/client.ts` | The window's side: draws frames on a canvas and sends input back |
 | `src/clipboard.ts` | System clipboard through `pbcopy`/`pbpaste`, PowerShell, or `wl-clipboard`/`xclip`/`xsel` |
+| `src/lsp/` | Language server client: `rpc.ts` (JSON-RPC framing), `client.ts` (one server process), `servers.ts` (which servers, where to find them, project roots), `manager.ts` (keeps servers in sync with buffers, diagnostics, edits), `features.ts` (go to, hover, rename, ...), `completion.ts` |
+| `src/popup.ts` | The completion menu, hover/diagnostic floats and the picker |
 
 Run the tests with `npm test`.
 
@@ -97,6 +99,35 @@ toggles a folder, `l` expands, `h` collapses or goes to the parent, `R` re-reads
 hides it, `<Esc>` returns to the editor. Ctrl+h / Ctrl+l (or `<C-w>h`, `<C-w>l`, `<C-w>w`)
 move focus between the tree and the editor. Clicking works too.
 
+## Language servers
+
+Rust files use [rust-analyzer](https://rust-analyzer.github.io/); TypeScript and JavaScript
+files use [typescript-language-server](https://github.com/typescript-language-server/typescript-language-server).
+Wim looks for each in Neovim's Mason directory (`~/.local/share/nvim/mason/bin`), then on the
+`PATH` (and, for TypeScript, the project's `node_modules/.bin` first). A server starts when the
+first file it handles is opened, rooted at the nearest Cargo workspace or crate
+(`Cargo.toml`), or the nearest `tsconfig.json`, `jsconfig.json`, `package.json` or `.git`.
+Files in the same project share one server.
+
+- **Diagnostics:** underlined, with the message after the line, a sign in the sign column
+  (which also colors the line number) and counts in the status line. They update as you type.
+- **Completion** pops up while typing in Insert mode, nvim-cmp style: nothing is preselected,
+  `<Tab>`/`<S-Tab>` (or `<C-n>`/`<C-p>`) select and put the item's word in the text,
+  `<C-l>` or `<C-Space>` confirm (the first item if none is selected), `<C-e>` closes.
+  Confirming also applies the item's extra edits, such as an auto-import. `<C-Space>` with no
+  menu asks for completions.
+- **Hover** (`K`) shows documentation in a float; press `K` again to move into it and scroll
+  (`j`/`k`, `<C-d>`/`<C-u>`, `g`/`G`), `q` or `<Esc>` to leave.
+- **Pickers** (references, symbols, code actions, diagnostics) work like Telescope: type to
+  filter, `<C-n>`/`<C-p>` or the arrows to move, `<CR>` to choose, `<Esc>` to close.
+- **Formatting:** files are formatted by their server when written (conform.nvim's
+  `format_on_save` with `lsp_fallback`), then written again. `:LspFormatOnSave off` turns this
+  off for the session.
+- Other uses of the symbol under the cursor are highlighted once the cursor rests (250 ms).
+- Edits to files that aren't open (from a rename, say) go into background buffers, left
+  unsaved; `:wa` saves them.
+- `:LspInfo` shows the running servers; `:LspRestart` restarts them.
+
 ## Key mappings
 
 These come from `~/.config/nvim/init.lua`. The leader is `,`, and a key that could start a
@@ -123,12 +154,23 @@ Normal-mode mappings don't apply in the middle of a command, so `f,` still finds
 | Option+Shift+a/r/s/t | Normal | Set global mark A/R/S/T |
 | Option+c / Option+d (`ç` `∂`) | Normal | Insert the next typed character before / after the cursor |
 | Esc | Normal | Also clears search highlighting |
+| `gd` / `gD` / `gi` / `gt` | Normal | Go to definition / declaration / implementation / type definition (a picker if there are several) |
+| `gr` | Normal | References, in a picker |
+| `K` / `zK` | Normal | Hover documentation |
+| `,ra` | Normal | Rename the symbol under the cursor |
+| `,ca` | Normal, Visual | Code actions for the cursor or selection |
+| `,f` | Normal, Visual | Format the buffer |
+| `,S` / `,fs` | Normal | Document symbols / workspace symbols (searched as you type) |
+| `]d` / `[d` | Normal | Next / previous diagnostic, shown in a float |
+| `]1`–`]4` / `[1`–`[4` | Normal | Next / previous error, warning, info, hint |
+| `,q` | Normal | All diagnostics, in a picker |
+| `,z` or `,1` / `,2` / `,3` / `,4` | Normal | Errors / warnings / info / hints, in a picker |
 
 On Windows and Linux, Alt works like Option in these mappings (Alt+j is `}`, Alt+Shift+j moves
 lines, and so on).
 
-Mappings for plugins Wim doesn't have (Telescope, LSP, gitsigns, nvim-spider, the theme
-toggle, Rust auto-import) are left out, as are `<C-y>` (jump list) and the `=` re-indent
+Mappings for plugins Wim doesn't have (gitsigns, nvim-spider, the theme toggle, Rust
+auto-import, inlay hints) are left out, as are `<C-y>` (jump list) and the `=` re-indent
 step of the line-moving mappings.
 
 **Ex commands:** `:w [file]`, `:q[!]`, `:wq`, `:x`, `ZZ`, `ZQ`, `:e[!] [file]` (Tab completes paths),
