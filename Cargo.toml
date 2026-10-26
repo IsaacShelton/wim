@@ -1,0 +1,9 @@
+[package]
+name = "wim"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+arboard = "3.7.0"
+eframe = "0.37"
+regex = "1.13.1"

@@ -65,4 +65,3 @@ shows a warning first; closing again discards the changes.
 
 Multiple buffers, splits or tabs; macros (`q`); Visual Block mode; line wrapping; undo
 of only part of an Insert session; a config file.
-# wim
