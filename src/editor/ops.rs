@@ -131,6 +131,7 @@ impl Editor {
     pub(crate) fn apply_operator(&mut self, op: Operator, r: Range, reg: Option<char>) {
         match op {
             Operator::Yank => {
+                self.yank_flash = Some(r);
                 let content = self.range_register(&r);
                 self.registers.set(reg, content, RegisterOp::Yank);
                 if r.linewise {

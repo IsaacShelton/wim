@@ -24,6 +24,7 @@ impl Editor {
         if input.is_empty() {
             return Ok(());
         }
+        let whole_file = input.starts_with('%');
         let (range, rest) = self.parse_range(input)?;
         let rest = rest.trim_start();
         let name_len = rest
@@ -53,24 +54,75 @@ impl Editor {
             "w" | "write" => {
                 self.write_file(path_arg(args));
             }
-            "wq" | "x" | "xit" | "exit" | "wqa" | "wqall" | "xa" | "xall" => {
-                let needs_write = name.starts_with('w') || self.is_modified() || !args.is_empty();
+            "wa" | "wall" => {
+                if self.write_all() {
+                    self.set_message("All buffers written");
+                }
+            }
+            "wq" | "x" | "xit" | "exit" => {
+                let needs_write = name == "wq" || self.is_modified() || !args.is_empty();
                 if !needs_write || self.write_file(path_arg(args)) {
-                    self.quit_requested = true;
+                    self.request_quit(bang);
+                }
+            }
+            "wqa" | "wqall" | "xa" | "xall" => {
+                if self.write_all() {
+                    self.request_quit(bang);
                 }
             }
             "q" | "quit" | "qa" | "qall" | "quitall" | "clo" | "close" => {
                 self.request_quit(bang);
             }
-            "e" | "edit" => {
-                if self.is_modified() && !bang {
-                    return Err("E37: No write since last change (add ! to override)".into());
+            "e" | "edit" => match path_arg(args) {
+                // Other files open in their own buffer; this one keeps its changes.
+                Some(path) => self.open_file(&path),
+                None => {
+                    if self.is_modified() && !bang {
+                        return Err("E37: No write since last change (add ! to override)".into());
+                    }
+                    let path = self.file_path.clone().ok_or("E32: No file name")?;
+                    self.load_file(&path);
                 }
-                let path = match path_arg(args) {
-                    Some(p) => p,
-                    None => self.file_path.clone().ok_or("E32: No file name")?,
+            },
+            "ene" | "enew" => self.new_buffer(),
+            "ls" | "buffers" | "files" => {
+                let list: Vec<String> = self
+                    .buffer_list()
+                    .iter()
+                    .map(|b| {
+                        let active = if b.active { "%" } else { " " };
+                        let modified = if b.modified { " +" } else { "" };
+                        format!("{}{active} \"{}\"{modified}", b.id, b.name)
+                    })
+                    .collect();
+                self.set_message(list.join("   "));
+            }
+            "b" | "bu" | "buf" | "buffer" => match args {
+                "" => {}
+                "#" => self.alternate_buffer(),
+                _ => match args.parse::<usize>() {
+                    Ok(id) => {
+                        self.switch_to_buffer(id);
+                    }
+                    Err(_) => self.switch_by_name(args)?,
+                },
+            },
+            "bn" | "bne" | "bnex" | "bnext" => self.cycle_buffer(1),
+            "bp" | "bpr" | "bpre" | "bprev" | "bprevi" | "bprevio" | "bpreviou" | "bprevious" | "bN"
+            | "bNext" => self.cycle_buffer(-1),
+            "bf" | "bfirst" | "br" | "brewind" => self.first_or_last_buffer(false),
+            "bl" | "blast" => self.first_or_last_buffer(true),
+            "bd" | "bdelete" | "bw" | "bwipeout" | "bun" | "bunload" if whole_file => {
+                self.delete_all_buffers(bang, false)?;
+            }
+            "bo" | "bonly" => self.delete_all_buffers(bang, true)?,
+            "bd" | "bdelete" | "bw" | "bwipeout" | "bun" | "bunload" => {
+                let id = if args.is_empty() {
+                    None
+                } else {
+                    Some(args.parse::<usize>().map_err(|_| format!("E94: No matching buffer for {args}"))?)
                 };
-                self.open_file(&path);
+                self.delete_buffer(id, bang)?;
             }
             "s" | "substitute" => self.substitute(first, last, args)?,
             "d" | "delete" => {
@@ -94,21 +146,22 @@ impl Editor {
                 self.join_lines(first, joins, !bang);
             }
             "m" | "move" => {
-                let dest = self.parse_address(args)?.ok_or("E14: Invalid address")?.0;
-                if dest >= first && dest < last {
+                // Lines go below `dest`; address 0 (`dest == -1`) means the top.
+                let dest = self.parse_target(args)?;
+                if (first as i64) <= dest && dest < last as i64 {
                     return Err("E134: Cannot move a range of lines into itself".into());
                 }
                 let lines = self.buffer.remove_lines(first, last);
                 let n = lines.len();
-                let at = if dest >= last { dest + 1 - n } else { dest + 1 };
-                let at = if args.trim() == "0" { 0 } else { at };
+                let at = if dest >= last as i64 { dest as usize + 1 - n } else { (dest + 1) as usize };
                 self.buffer.insert_lines(at, lines);
                 self.cursor = Pos::new(at + n - 1, self.buffer.first_non_blank(at + n - 1));
+                self.shift_visual_marks(first, last, at as i64 - first as i64);
             }
             "t" | "co" | "copy" => {
-                let dest = self.parse_address(args)?.ok_or("E14: Invalid address")?.0;
+                let dest = self.parse_target(args)?;
                 let lines: Vec<Vec<char>> = (first..=last).map(|l| self.buffer.line(l).to_vec()).collect();
-                let at = if args.trim() == "0" { 0 } else { dest + 1 };
+                let at = (dest + 1) as usize;
                 let n = lines.len();
                 self.buffer.insert_lines(at, lines);
                 self.cursor = Pos::new(at + n - 1, self.buffer.first_non_blank(at + n - 1));
@@ -158,7 +211,7 @@ impl Editor {
                 self.set_message(dir);
             }
             "h" | "help" => self.set_message(
-                "Wim: :w [file]  :q[!]  :wq  :e file  :[range]s/pat/rep/[gi]  :set opt  :noh  :sort  :m  :t  :reg",
+                "Wim: :w :q[!] :wq :e file :ls :b N :bn :bp :bd :[range]s/pat/rep/[gi] :set opt :noh :sort :reg  Ctrl+n: file tree",
             ),
             _ => return Err(format!("E492: Not an editor command: {input}")),
         }
@@ -186,7 +239,41 @@ impl Editor {
     }
 
     /// Parse a single address (`12`, `.`, `$`, `'a`, with `+N`/`-N` offsets).
+    /// The destination address of `:m` and `:t`, where `-1` is address 0
+    /// (above the first line).
+    fn parse_target(&self, args: &str) -> Result<i64, String> {
+        Ok(self
+            .parse_address_raw(args)?
+            .ok_or("E14: Invalid address")?
+            .0)
+    }
+
+    /// Move the visual marks (and `gv`'s selection) along with lines that
+    /// `:m` moved, so mappings like `:m '>+1<CR>gv` keep the selection.
+    fn shift_visual_marks(&mut self, first: usize, last: usize, delta: i64) {
+        let shift = |p: &mut Pos| {
+            if (first..=last).contains(&p.line) {
+                p.line = (p.line as i64 + delta) as usize;
+            }
+        };
+        for name in ['<', '>'] {
+            if let Some(p) = self.marks.get_mut(&name) {
+                shift(p);
+            }
+        }
+        if let Some(v) = &mut self.last_visual {
+            shift(&mut v.anchor);
+            shift(&mut v.cursor);
+        }
+    }
+
     fn parse_address<'a>(&self, s: &'a str) -> Result<Option<(usize, &'a str)>, String> {
+        Ok(self
+            .parse_address_raw(s)?
+            .map(|(l, rest)| (l.max(0) as usize, rest)))
+    }
+
+    fn parse_address_raw<'a>(&self, s: &'a str) -> Result<Option<(i64, &'a str)>, String> {
         let last = self.buffer.last_line() as i64;
         let mut chars = s.char_indices().peekable();
         let mut line: Option<i64> = None;
@@ -234,8 +321,8 @@ impl Editor {
         }
         match line {
             None => Ok(None),
-            Some(l) if l > last => Err("E16: Invalid range".into()),
-            Some(l) => Ok(Some((l.max(0) as usize, rest))),
+            Some(l) if l > last || l < -1 => Err("E16: Invalid range".into()),
+            Some(l) => Ok(Some((l, rest))),
         }
     }
 

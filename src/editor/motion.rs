@@ -235,6 +235,13 @@ impl Editor {
         for_op: bool,
     ) -> Option<MotionTarget> {
         use MotionKind::*;
+        if let Motion::Mark { name, .. } = motion
+            && name.is_ascii_uppercase()
+            && !self.enter_mark_buffer(name, for_op)
+        {
+            self.set_error("E20: Mark not set");
+            return None;
+        }
         let n = count.unwrap_or(1);
         let buf = &self.buffer;
         let cur = self.cursor;
@@ -413,9 +420,22 @@ impl Editor {
             Motion::SearchNext | Motion::SearchPrev => {
                 return self.search_motion(motion == Motion::SearchNext, n);
             }
+            Motion::Unmatched { ch } => {
+                let forward = matches!(ch, '}' | ')');
+                let (open, close) = if matches!(ch, '{' | '}') {
+                    ('{', '}')
+                } else {
+                    ('(', ')')
+                };
+                let mut p = cur;
+                for _ in 0..n {
+                    p = find_unmatched(buf, p, open, close, forward)?;
+                }
+                MotionTarget::new(p, Exclusive)
+            }
             Motion::Mark { name, exact } => {
                 let name = if name == '`' { '\'' } else { name };
-                let Some(&pos) = self.marks.get(&name) else {
+                let Some(pos) = self.mark_pos(name) else {
                     self.set_error("E20: Mark not set");
                     return None;
                 };
@@ -429,6 +449,39 @@ impl Editor {
             }
         };
         Some(target)
+    }
+
+    /// Make the buffer holding uppercase mark `name` active. Operators
+    /// can't span buffers, so for them the mark must be in this buffer.
+    fn enter_mark_buffer(&mut self, name: char, for_op: bool) -> bool {
+        let Some(mark) = self.global_marks.get(&name).cloned() else {
+            return false;
+        };
+        if mark.buffer_id == self.buffer_id() {
+            return true;
+        }
+        if for_op {
+            return false;
+        }
+        if !self.switch_to_buffer_quietly(mark.buffer_id) {
+            let Some(path) = mark.path else {
+                return false;
+            };
+            self.open_file(&path);
+        }
+        let id = self.buffer_id();
+        if let Some(m) = self.global_marks.get_mut(&name) {
+            m.buffer_id = id;
+        }
+        true
+    }
+
+    fn mark_pos(&self, name: char) -> Option<Pos> {
+        if name.is_ascii_uppercase() {
+            self.global_marks.get(&name).map(|m| m.pos)
+        } else {
+            self.marks.get(&name).copied()
+        }
     }
 
     fn find_char(
@@ -517,4 +570,70 @@ fn is_jump(m: Motion) -> bool {
             | Motion::ScreenMiddle
             | Motion::ScreenBottom
     )
+}
+
+/// The next (or previous) bracket that is not matched between it and `from`
+/// (`]}`, `[{`, `])`, `[(`).
+fn find_unmatched(buf: &Buffer, from: Pos, open: char, close: char, forward: bool) -> Option<Pos> {
+    let (same, target) = if forward {
+        (open, close)
+    } else {
+        (close, open)
+    };
+    let mut p = from;
+    let mut depth = 0usize;
+    loop {
+        let moved = if forward {
+            advance(buf, &mut p)
+        } else {
+            retreat(buf, &mut p)
+        };
+        if !moved {
+            return None;
+        }
+        match buf.char_at(p) {
+            Some(c) if c == same => depth += 1,
+            Some(c) if c == target => {
+                if depth == 0 {
+                    return Some(p);
+                }
+                depth -= 1;
+            }
+            _ => {}
+        }
+    }
+}
+
+/// Option+Left in macOS text fields: back over non-word characters, then to
+/// the start of the word before them.
+pub(crate) fn mac_word_left(buf: &Buffer, start: Pos) -> Pos {
+    let is_word_before = |p: Pos| {
+        let mut q = p;
+        retreat(buf, &mut q) && buf.char_at(q).is_some_and(is_keyword)
+    };
+    let mut p = start;
+    while !is_word_before(p) {
+        if !retreat(buf, &mut p) {
+            return p;
+        }
+    }
+    while is_word_before(p) {
+        retreat(buf, &mut p);
+    }
+    p
+}
+
+/// Option+Right in macOS text fields: over non-word characters, then to the
+/// end of the following word.
+pub(crate) fn mac_word_right(buf: &Buffer, start: Pos) -> Pos {
+    let mut p = start;
+    while !buf.char_at(p).is_some_and(is_keyword) {
+        if !advance(buf, &mut p) {
+            return p;
+        }
+    }
+    while buf.char_at(p).is_some_and(is_keyword) {
+        advance(buf, &mut p);
+    }
+    p
 }

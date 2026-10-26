@@ -274,3 +274,162 @@ fn write_and_reload_file() {
     assert_eq!(ed2.buffer.text(), "hello");
     std::fs::remove_dir_all(&dir).unwrap();
 }
+
+#[test]
+fn dot_repeat_twice() {
+    check("|a\nb\nc\nd", "dd..", "|d");
+    check("|a\nb\nc\nd", "dd.", "|c\nd");
+}
+
+#[test]
+fn dot_ignores_undo() {
+    check("|a\nb\nc", "ddu.", "|b\nc");
+}
+
+#[test]
+fn option_word_editing_in_insert_mode() {
+    check("|", "ifoo bar.baz<M-Left>X<Esc>", "foo bar.|Xbaz");
+    check("|", "ifoo bar<M-Left><M-Left>X<Esc>", "|Xfoo bar");
+    check("|foo bar", "i<M-Right>X<Esc>", "foo|X bar");
+    check("|foo bar", "i<M-Right><M-Right>X<Esc>", "foo bar|X");
+    check("|", "ifoo bar<M-BS>X<Esc>", "foo |X");
+    check("|", "ifoo bar  <M-BS>X<Esc>", "foo |X");
+    check("|foo bar", "i<M-Del>X<Esc>", "|X bar");
+    check("a\n|b", "i<M-BS>X<Esc>", "|Xb");
+    check("|foo bar", "<M-Right>x", "foo |ar");
+}
+
+#[test]
+fn option_backspace_in_cmdline() {
+    let mut ed = editor("|x");
+    ed.handle_keys(&parse_keys(":set number<M-BS>"));
+    assert_eq!(ed.cmdline().unwrap(), ":set ");
+}
+
+#[test]
+fn yank_reports_flash_region() {
+    let mut ed = editor("foo |bar");
+    ed.handle_keys(&parse_keys("yiw"));
+    let r = ed.take_yank_flash().unwrap();
+    assert_eq!(
+        (r.start, r.end, r.linewise),
+        (Pos::new(0, 4), Pos::new(0, 7), false)
+    );
+    assert!(ed.take_yank_flash().is_none());
+}
+
+#[test]
+fn multiple_buffers() {
+    let dir = std::env::temp_dir().join(format!("wim-bufs-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let (a, b) = (dir.join("a.txt"), dir.join("b.txt"));
+    std::fs::write(&a, "alpha\n").unwrap();
+    std::fs::write(&b, "beta\n").unwrap();
+
+    let mut ed = Editor::new();
+    ed.open_file(&a);
+    assert_eq!(ed.buffer_list().len(), 1, "empty start buffer is replaced");
+    ed.handle_keys(&parse_keys("x"));
+    ed.open_file(&b);
+    assert_eq!(ed.buffer.text(), "beta");
+    assert_eq!(ed.buffer_list().len(), 2);
+
+    // Each buffer keeps its own text, cursor and undo history.
+    ed.handle_keys(&parse_keys("<C-^>"));
+    assert_eq!(ed.buffer.text(), "lpha");
+    ed.handle_keys(&parse_keys("u"));
+    assert_eq!(ed.buffer.text(), "alpha");
+    ed.handle_keys(&parse_keys(":bn<CR>"));
+    assert_eq!(ed.buffer.text(), "beta");
+    ed.open_file(&a);
+    assert_eq!(ed.buffer_list().len(), 2, "reopening reuses the buffer");
+
+    // Quitting is refused while another buffer has changes.
+    ed.handle_keys(&parse_keys(":bn<CR>dd:bn<CR>:q<CR>"));
+    assert!(!ed.quit_requested());
+    assert!(ed.message().unwrap().text.contains("E162"));
+    // Closing the (unmodified) active buffer `a` leaves the modified `b`.
+    ed.handle_keys(&parse_keys(":bd<CR>"));
+    assert_eq!(ed.buffer_list().len(), 1);
+    assert_eq!(ed.buffer.text(), "");
+    assert!(ed.is_modified());
+    std::fs::remove_dir_all(&dir).unwrap();
+}
+
+#[test]
+fn unmatched_bracket_motions() {
+    check(
+        "fn f() {\n    if x {\n        |a;\n    }\n}",
+        "[{",
+        "fn f() {\n    if x |{\n        a;\n    }\n}",
+    );
+    check(
+        "fn f() {\n    if x {\n        |a;\n    }\n}",
+        "2[{",
+        "fn f() |{\n    if x {\n        a;\n    }\n}",
+    );
+    check(
+        "fn f() {\n    if x {\n        |a;\n    }\n}",
+        "]}",
+        "fn f() {\n    if x {\n        a;\n    |}\n}",
+    );
+    check("f(a, (|b), c)", "[(", "f(a, |(b), c)");
+    check("f(a, (b), |c)", "d])", "f(a, (b), |)");
+    // `[f` in the user's config: as many `[{` as possible, then stop.
+    check(
+        "a {\n b {\n  |c\n }\n}",
+        "[{[{[{[{",
+        "a |{\n b {\n  c\n }\n}",
+    );
+}
+
+#[test]
+fn move_lines_keeps_visual_selection() {
+    check("|a\nb\nc\nd", "Vj:m '>+1<CR>gv", "c\na\n|b\nd");
+    check("a\nb\n|c\nd", "V:m '<-2<CR>gv", "a\n|c\nb\nd");
+    check("|a\nb", "V:m '<-2<CR>", "|a\nb");
+}
+
+#[test]
+fn esc_clears_search_highlight() {
+    let mut ed = editor("|foo foo");
+    ed.handle_keys(&parse_keys("/foo<CR>"));
+    assert!(ed.highlight_regex().is_some());
+    ed.handle_keys(&parse_keys("<Esc>"));
+    assert!(ed.highlight_regex().is_none());
+}
+
+#[test]
+fn global_marks_and_closing_buffers() {
+    let dir = std::env::temp_dir().join(format!("wim-marks-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let (a, b, c) = (dir.join("a.txt"), dir.join("b.txt"), dir.join("c.txt"));
+    std::fs::write(&a, "one\ntwo\nthree\n").unwrap();
+    std::fs::write(&b, "beta\n").unwrap();
+    std::fs::write(&c, "gamma\n").unwrap();
+
+    let mut ed = Editor::new();
+    ed.open_file(&a);
+    ed.handle_keys(&parse_keys("jjmA"));
+    ed.open_file(&b);
+    ed.handle_keys(&parse_keys("'A"));
+    assert_eq!(ed.file_path(), Some(a.canonicalize().unwrap().as_path()));
+    assert_eq!(ed.cursor.line, 2);
+
+    // A mark whose buffer was closed reopens its file.
+    ed.handle_keys(&parse_keys(":bd<CR>"));
+    assert_eq!(ed.buffer.text(), "beta");
+    ed.handle_keys(&parse_keys("'A"));
+    assert_eq!(ed.buffer.text(), "one\ntwo\nthree");
+
+    ed.open_file(&c);
+    assert_eq!(ed.buffer_list().len(), 3);
+    ed.handle_keys(&parse_keys(":bonly<CR>"));
+    assert_eq!(ed.buffer_list().len(), 1);
+    assert_eq!(ed.buffer.text(), "gamma");
+    ed.open_file(&a);
+    ed.handle_keys(&parse_keys(":%bd<CR>"));
+    assert_eq!(ed.buffer_list().len(), 1);
+    assert_eq!(ed.file_path(), None);
+    std::fs::remove_dir_all(&dir).unwrap();
+}

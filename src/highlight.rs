@@ -607,7 +607,8 @@ pub fn highlight_line(
 /// the buffer content changes.
 #[derive(Default)]
 pub struct Cache {
-    version: Option<u64>,
+    /// The buffer id and content version the states were computed for.
+    key: Option<(usize, u64)>,
     lang: Option<&'static str>,
     states: Vec<State>,
 }
@@ -617,12 +618,12 @@ impl Cache {
     pub fn state_at<'b>(
         &mut self,
         lang: &Language,
-        version: u64,
+        key: (usize, u64),
         line: usize,
         lines: impl Fn(usize) -> &'b [char],
     ) -> State {
-        if self.version != Some(version) || self.lang != Some(lang.name) {
-            self.version = Some(version);
+        if self.key != Some(key) || self.lang != Some(lang.name) {
+            self.key = Some(key);
             self.lang = Some(lang.name);
             self.states.clear();
             self.states.push(State::Normal);

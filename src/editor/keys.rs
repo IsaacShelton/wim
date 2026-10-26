@@ -10,6 +10,8 @@ pub enum Key {
     Backspace,
     Delete,
     Tab,
+    /// Shift+Tab.
+    BackTab,
     Left,
     Right,
     Up,
@@ -24,15 +26,34 @@ pub enum Key {
 pub struct KeyInput {
     pub key: Key,
     pub ctrl: bool,
+    /// Option on macOS.
+    pub alt: bool,
 }
 
 impl KeyInput {
     pub fn new(key: Key, ctrl: bool) -> Self {
-        Self { key, ctrl }.normalized()
+        Self {
+            key,
+            ctrl,
+            alt: false,
+        }
+        .normalized()
     }
 
     pub fn plain(key: Key) -> Self {
-        Self { key, ctrl: false }
+        Self {
+            key,
+            ctrl: false,
+            alt: false,
+        }
+    }
+
+    pub fn alt(key: Key) -> Self {
+        Self {
+            key,
+            ctrl: false,
+            alt: true,
+        }
     }
 
     pub fn ch(c: char) -> Self {
@@ -43,16 +64,17 @@ impl KeyInput {
         Self::new(Key::Char(c), true)
     }
 
-    /// Map the classic terminal aliases onto their canonical keys.
+    /// Map terminal aliases onto their canonical keys. Like Neovim, `<C-h>`,
+    /// `<C-j>` and `<C-i>` stay distinct from `<BS>`, `<CR>` and `<Tab>` so
+    /// they can be mapped.
     fn normalized(self) -> Self {
         match (self.key, self.ctrl) {
             (Key::Char('['), true) | (Key::Char('c'), true) => Self::plain(Key::Esc),
-            (Key::Char('h'), true) => Self::plain(Key::Backspace),
-            (Key::Char('m'), true) | (Key::Char('j'), true) => Self::plain(Key::Enter),
-            (Key::Char('i'), true) => Self::plain(Key::Tab),
+            (Key::Char('m'), true) => Self::plain(Key::Enter),
             (Key::Char(c), true) => Self {
                 key: Key::Char(c.to_ascii_lowercase()),
                 ctrl: true,
+                alt: false,
             },
             _ => self,
         }
@@ -61,7 +83,7 @@ impl KeyInput {
     /// The typed character, if this is an unmodified printable key.
     pub fn char(&self) -> Option<char> {
         match self.key {
-            Key::Char(c) if !self.ctrl => Some(c),
+            Key::Char(c) if !self.ctrl && !self.alt => Some(c),
             _ => None,
         }
     }
@@ -78,6 +100,9 @@ impl fmt::Display for KeyInput {
         {
             return write!(f, "^{}", c.to_ascii_uppercase());
         }
+        if self.alt {
+            write!(f, "M-")?;
+        }
         match self.key {
             Key::Char(c) => write!(f, "{c}"),
             Key::Esc => write!(f, "<Esc>"),
@@ -85,6 +110,7 @@ impl fmt::Display for KeyInput {
             Key::Backspace => write!(f, "<BS>"),
             Key::Delete => write!(f, "<Del>"),
             Key::Tab => write!(f, "<Tab>"),
+            Key::BackTab => write!(f, "<S-Tab>"),
             Key::Left => write!(f, "<Left>"),
             Key::Right => write!(f, "<Right>"),
             Key::Up => write!(f, "<Up>"),
@@ -125,12 +151,24 @@ fn parse_named(name: &str) -> Option<KeyInput> {
         let c = it.next()?;
         return it.next().is_none().then(|| KeyInput::ctrl(c));
     }
+    if let Some(rest) = lower
+        .strip_prefix("m-")
+        .or_else(|| lower.strip_prefix("a-"))
+    {
+        let inner = parse_named(rest).map(|k| k.key).or_else(|| {
+            let mut it = rest.chars();
+            let c = it.next()?;
+            it.next().is_none().then_some(Key::Char(c))
+        })?;
+        return Some(KeyInput::alt(inner));
+    }
     let key = match lower.as_str() {
         "esc" => Key::Esc,
         "cr" | "enter" | "return" => Key::Enter,
         "bs" => Key::Backspace,
         "del" => Key::Delete,
         "tab" => Key::Tab,
+        "s-tab" => Key::BackTab,
         "left" => Key::Left,
         "right" => Key::Right,
         "up" => Key::Up,

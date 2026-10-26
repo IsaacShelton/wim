@@ -79,10 +79,18 @@ pub enum Motion {
     Right,
     Up,
     Down,
-    WordForward { big: bool },
-    WordBackward { big: bool },
-    WordEnd { big: bool },
-    WordEndBackward { big: bool },
+    WordForward {
+        big: bool,
+    },
+    WordBackward {
+        big: bool,
+    },
+    WordEnd {
+        big: bool,
+    },
+    WordEndBackward {
+        big: bool,
+    },
     LineStart,
     FirstNonBlank,
     LineEnd,
@@ -93,10 +101,17 @@ pub enum Motion {
     NextLineStart,
     PrevLineStart,
     CurrentLineStart,
-    Find { kind: FindKind, ch: char },
+    Find {
+        kind: FindKind,
+        ch: char,
+    },
     RepeatFind,
     RepeatFindReverse,
     MatchPair,
+    /// `[{`, `[(`, `]}`, `])`: the enclosing unmatched bracket.
+    Unmatched {
+        ch: char,
+    },
     ParagraphForward,
     ParagraphBackward,
     ScreenTop,
@@ -104,7 +119,10 @@ pub enum Motion {
     ScreenBottom,
     SearchNext,
     SearchPrev,
-    Mark { name: char, exact: bool },
+    Mark {
+        name: char,
+        exact: bool,
+    },
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -175,6 +193,7 @@ pub enum Action {
     WriteQuit,
     QuitForce,
     FileInfo,
+    AlternateBuffer,
     // Visual mode only.
     VisualOp(Operator),
     VisualLinewiseOp(Operator),
@@ -319,6 +338,7 @@ fn parse_normal(k: &mut Keys, key: KeyInput, count: &mut Option<usize>) -> Resul
             Key::Char('a') => Ok(Action::Increment(1)),
             Key::Char('x') => Ok(Action::Increment(-1)),
             Key::Char('g') => Ok(Action::FileInfo),
+            Key::Char('6') | Key::Char('^') => Ok(Action::AlternateBuffer),
             _ => Err(Parse::Invalid),
         };
     }
@@ -512,6 +532,9 @@ fn parse_motion(k: &mut Keys, key: KeyInput) -> Result<Option<Motion>, Parse> {
         });
     }
     let c = match key.key {
+        // Option+arrows move by word, as in other macOS editors.
+        Key::Left if key.alt => return Ok(Some(WordBackward { big: false })),
+        Key::Right if key.alt => return Ok(Some(WordForward { big: false })),
         Key::Left | Key::Backspace => return Ok(Some(Left)),
         Key::Right => return Ok(Some(Right)),
         Key::Up => return Ok(Some(Up)),
@@ -556,6 +579,10 @@ fn parse_motion(k: &mut Keys, key: KeyInput) -> Result<Option<Motion>, Parse> {
         ';' => RepeatFind,
         ',' => RepeatFindReverse,
         '%' => MatchPair,
+        '[' | ']' => match (c, k.next_char()?) {
+            ('[', ch @ ('{' | '(')) | (']', ch @ ('}' | ')')) => Unmatched { ch },
+            _ => return Err(Parse::Invalid),
+        },
         '}' => ParagraphForward,
         '{' => ParagraphBackward,
         'H' => ScreenTop,

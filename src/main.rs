@@ -1,6 +1,9 @@
 mod app;
 mod editor;
+mod filetree;
 mod highlight;
+mod icons;
+mod keymap;
 
 use std::path::PathBuf;
 

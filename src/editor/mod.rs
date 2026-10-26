@@ -3,6 +3,7 @@
 //! its state back.
 
 pub mod buffer;
+mod buffers;
 pub mod command;
 mod ex;
 pub mod keys;
@@ -23,6 +24,8 @@ use buffer::{Buffer, Pos};
 use command::{Action, Command, FindKind, Parse};
 use keys::{Key, KeyInput};
 use registers::Registers;
+
+pub use ops::Range;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Mode {
@@ -70,7 +73,7 @@ impl Default for Options {
     fn default() -> Self {
         Self {
             number: true,
-            relativenumber: false,
+            relativenumber: true,
             ignorecase: false,
             smartcase: false,
             hlsearch: true,
@@ -120,6 +123,14 @@ struct LastSearch {
     forward: bool,
 }
 
+/// An uppercase mark, which remembers its file as well as its position.
+#[derive(Clone)]
+struct GlobalMark {
+    buffer_id: usize,
+    path: Option<PathBuf>,
+    pos: Pos,
+}
+
 struct LastVisual {
     mode: Mode,
     anchor: Pos,
@@ -162,6 +173,7 @@ pub struct Editor {
     visual_anchor: Pos,
     last_visual: Option<LastVisual>,
     marks: HashMap<char, Pos>,
+    global_marks: HashMap<char, GlobalMark>,
 
     cmdline: String,
     ex_history: Vec<String>,
@@ -170,6 +182,16 @@ pub struct Editor {
 
     message: Option<Message>,
     quit_requested: bool,
+
+    /// Every open buffer. The active buffer's state lives in the fields
+    /// above while its slot here holds placeholders.
+    buffers: Vec<buffers::BufferSlot>,
+    current: usize,
+    next_buffer_id: usize,
+    /// The previously active buffer (`<C-^>`, `:b#`).
+    alternate: Option<usize>,
+    /// The most recent yank, for the UI to flash.
+    yank_flash: Option<Range>,
 }
 
 impl Default for Editor {
@@ -210,12 +232,18 @@ impl Editor {
             visual_anchor: Pos::default(),
             last_visual: None,
             marks: HashMap::new(),
+            global_marks: HashMap::new(),
             cmdline: String::new(),
             ex_history: Vec::new(),
             search_history: Vec::new(),
             history_index: None,
             message: None,
             quit_requested: false,
+            buffers: vec![buffers::BufferSlot::new(1)],
+            current: 0,
+            next_buffer_id: 2,
+            alternate: None,
+            yank_flash: None,
         }
     }
 
@@ -258,10 +286,7 @@ impl Editor {
     }
 
     pub fn file_name(&self) -> String {
-        self.file_path
-            .as_ref()
-            .map(|p| p.display().to_string())
-            .unwrap_or_else(|| "[No Name]".to_string())
+        buffers::display_name(self.file_path.as_deref())
     }
 
     pub fn is_modified(&self) -> bool {
@@ -364,79 +389,18 @@ impl Editor {
         re
     }
 
-    // ----- Files ---------------------------------------------------------
-
-    pub fn open_file(&mut self, path: &Path) {
-        match std::fs::read(path) {
-            Ok(bytes) => {
-                let text = String::from_utf8_lossy(&bytes);
-                self.load_text(&text);
-                self.file_path = Some(path.to_path_buf());
-                self.set_message(format!(
-                    "\"{}\" {}L, {}B",
-                    path.display(),
-                    self.buffer.line_count(),
-                    bytes.len()
-                ));
-            }
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-                self.load_text("");
-                self.file_path = Some(path.to_path_buf());
-                self.set_message(format!("\"{}\" [New]", path.display()));
-            }
-            Err(e) => self.set_error(format!("E484: Can't open file {}: {e}", path.display())),
-        }
-    }
-
-    fn load_text(&mut self, text: &str) {
-        self.buffer = Buffer::from_text(text);
-        self.saved_version = self.buffer.version();
-        self.cursor = Pos::default();
-        self.scroll_top = 0;
-        self.scroll_left = 0;
-        self.want_col = 0;
-        self.mode = Mode::Normal;
-        self.undo_stack.clear();
-        self.redo_stack.clear();
-        self.undo_pending = None;
-        self.marks.clear();
-        self.last_visual = None;
-    }
-
-    pub(crate) fn write_file(&mut self, path: Option<PathBuf>) -> bool {
-        let Some(path) = path.or_else(|| self.file_path.clone()) else {
-            self.set_error("E32: No file name");
-            return false;
-        };
-        let text = self.buffer.to_file_text();
-        match std::fs::write(&path, &text) {
-            Ok(()) => {
-                if self.file_path.is_none() {
-                    self.file_path = Some(path.clone());
-                }
-                if self.file_path.as_deref() == Some(path.as_path()) {
-                    self.saved_version = self.buffer.version();
-                }
-                self.set_message(format!(
-                    "\"{}\" {}L, {}B written",
-                    path.display(),
-                    self.buffer.line_count(),
-                    text.len()
-                ));
-                true
-            }
-            Err(e) => {
-                self.set_error(format!("E212: Can't open file for writing: {e}"));
-                false
-            }
-        }
-    }
-
     /// Request to close the window. Refuses (with a message) when there are
     /// unsaved changes unless `force` is set.
     pub fn request_quit(&mut self, force: bool) -> bool {
-        if !force && self.is_modified() {
-            self.set_error("E37: No write since last change (add ! to override)");
+        if !force && let Some(b) = self.first_modified_buffer() {
+            if b.active {
+                self.set_error("E37: No write since last change (add ! to override)");
+            } else {
+                self.set_error(format!(
+                    "E162: No write since last change for buffer \"{}\"",
+                    b.name
+                ));
+            }
             return false;
         }
         self.quit_requested = true;
@@ -561,6 +525,11 @@ impl Editor {
         }
     }
 
+    /// The region of the latest yank, once, so the UI can flash it.
+    pub fn take_yank_flash(&mut self) -> Option<Range> {
+        self.yank_flash.take()
+    }
+
     /// Copy (or cut) the visual selection to the system clipboard (Cmd+C/X).
     pub fn copy_selection(&mut self, cut: bool) {
         if !self.mode.is_visual() {
@@ -599,8 +568,13 @@ impl Editor {
 
     fn normal_key(&mut self, key: KeyInput) {
         if key.key == Key::Esc {
-            if self.pending.is_empty() && self.mode.is_visual() {
-                self.exit_visual();
+            if self.pending.is_empty() {
+                if self.mode.is_visual() {
+                    self.exit_visual();
+                } else {
+                    // Esc in Normal mode also clears search highlighting.
+                    self.hlsearch_active = false;
+                }
             }
             self.pending.clear();
             return;
@@ -629,7 +603,8 @@ impl Editor {
                 self.dot_record = Some(keys);
             }
         } else {
-            if self.buffer.version() != version && !from_visual && !self.replaying {
+            // `.`, `u` and `<C-r>` change the buffer but are not changes to repeat.
+            if may_change && self.buffer.version() != version && !from_visual && !self.replaying {
                 self.last_change = keys;
             }
             self.commit_undo();
@@ -731,6 +706,14 @@ impl Editor {
             }
             Action::SearchWord { forward } => self.search_word(forward, count),
             Action::Scroll(s) => self.scroll(s, cmd.count),
+            Action::SetMark(c) if c.is_ascii_uppercase() => {
+                let mark = GlobalMark {
+                    buffer_id: self.buffer_id(),
+                    path: self.file_path.clone(),
+                    pos: self.cursor,
+                };
+                self.global_marks.insert(c, mark);
+            }
             Action::SetMark(c) => {
                 self.marks.insert(c, self.cursor);
             }
@@ -742,6 +725,7 @@ impl Editor {
             }
             Action::QuitForce => self.quit_requested = true,
             Action::FileInfo => self.show_file_info(),
+            Action::AlternateBuffer => self.alternate_buffer(),
             Action::VisualOp(op) => self.visual_operate(op, false, count, cmd.register),
             Action::VisualLinewiseOp(op) => self.visual_operate(op, true, count, cmd.register),
             Action::VisualObject { obj, around } => self.visual_select_object(obj, around, count),
@@ -815,6 +799,29 @@ impl Editor {
         let replace = self.mode == Mode::Replace;
         let cur = self.cursor;
         let len = self.buffer.line_len(cur.line);
+        if key.alt
+            && matches!(
+                key.key,
+                Key::Left | Key::Right | Key::Backspace | Key::Delete
+            )
+        {
+            // macOS-style word editing with Option.
+            match key.key {
+                Key::Left => self.cursor = motion::mac_word_left(&self.buffer, cur),
+                Key::Right => self.cursor = motion::mac_word_right(&self.buffer, cur),
+                Key::Backspace => {
+                    let start = motion::mac_word_left(&self.buffer, cur);
+                    self.buffer.delete_range(start, cur);
+                    self.cursor = start;
+                }
+                _ => {
+                    let end = motion::mac_word_right(&self.buffer, cur);
+                    self.buffer.delete_range(cur, end);
+                }
+            }
+            self.update_want_col();
+            return;
+        }
         if key.ctrl {
             match key.key {
                 Key::Char('w') => self.insert_delete_word(),
@@ -824,17 +831,13 @@ impl Editor {
                     self.buffer.delete_range(Pos::new(cur.line, start), cur);
                     self.cursor.col = start;
                 }
-                Key::Char('t') | Key::Char('d') => {
-                    let before = self.buffer.line_len(cur.line);
-                    self.shift_lines(cur.line, cur.line, key.key == Key::Char('t'));
-                    let after = self.buffer.line_len(cur.line);
-                    self.cursor.col = (cur.col + after).saturating_sub(before);
-                }
+                Key::Char('t') | Key::Char('d') => self.insert_shift(key.key == Key::Char('t')),
                 _ => {}
             }
             return;
         }
         match key.key {
+            Key::BackTab => self.insert_shift(false),
             Key::Char(c) if replace => {
                 if cur.col < len {
                     self.buffer.set_char(cur, c);
@@ -891,6 +894,15 @@ impl Editor {
             Key::Esc => {}
         }
         self.update_want_col();
+    }
+
+    /// Indent or outdent the current line, keeping the cursor on its text.
+    fn insert_shift(&mut self, indent: bool) {
+        let cur = self.cursor;
+        let before = self.buffer.line_len(cur.line);
+        self.shift_lines(cur.line, cur.line, indent);
+        let after = self.buffer.line_len(cur.line);
+        self.cursor.col = (cur.col + after).saturating_sub(before);
     }
 
     fn insert_char(&mut self, c: char) {
@@ -1004,6 +1016,14 @@ impl Editor {
 
     fn cmdline_key(&mut self, key: KeyInput, kind: CmdKind) {
         let search = kind != CmdKind::Ex;
+        // Option+Backspace deletes a word, like <C-w>; <C-h> is backspace.
+        let key = if key.alt && key.key == Key::Backspace {
+            KeyInput::ctrl('w')
+        } else if key == KeyInput::ctrl('h') {
+            KeyInput::plain(Key::Backspace)
+        } else {
+            key
+        };
         match key.key {
             Key::Esc => {
                 self.cancel_cmdline(search);
