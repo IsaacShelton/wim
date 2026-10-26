@@ -1,0 +1,72 @@
+WIM REQUIREMENTS
+================
+
+Wim is a Vim-like code editor written in Rust. It runs in its own native
+desktop window, not in a terminal.
+
+This file lists what has been asked for so far. "Decided" notes record choices
+made where a request was open to interpretation.
+
+
+1. Core
+-------
+1.1  Written in Rust.
+1.2  Opens a native desktop window (macOS is the primary platform).
+1.3  Edits code the way Vim does: Vim modes and Vim motions.
+1.4  Opens a file given on the command line: `wim path/to/file`.
+
+
+2. Vim editing
+--------------
+2.1  Modes: Normal, Insert, Replace, Visual, Visual Line, and the `:`, `/`
+     and `?` command lines.
+2.2  Motions, operators, text objects, counts, registers, marks, undo/redo
+     and search behave as in Vim.
+2.3  `.` repeats the last change, and repeats again each time it is pressed:
+     after `dd`, each further `.` deletes another line.
+     Decided: `u`, `<C-r>` and `.` itself are never recorded as the change
+     to repeat.
+2.4  Line numbers are relative, with the absolute number on the cursor line
+     (Vim's `number` + `relativenumber`). This is the default.
+2.5  Yanked text flashes briefly.
+
+
+3. Buffers
+----------
+3.1  Several files can be open at once, each in its own buffer with its own
+     cursor, undo history and marks.
+3.2  Tab and Shift+Tab cycle to the next and previous buffer.
+3.3  Open buffers are shown along the top of the window when there is more
+     than one.
+
+
+4. File tree
+------------
+4.1  A sidebar file tree shows the project's files.
+4.2  Ctrl+n shows and hides it.
+     Decided: Ctrl+n works in Normal mode (and in the tree), as in the
+     user's Neovim config.
+4.3  The tree shows icons for folders and files.
+     Decided: icons, folder glyphs and tree settings follow the user's
+     Neovim setup (nvim-web-devicons, ~/.config/nvim/lua/dev_icons.lua and
+     the nvim-tree options in ~/.config/nvim/init.lua). Icons come from an
+     installed Nerd Font.
+
+
+5. Windows and key bindings
+---------------------------
+5.1  Ctrl+h and Ctrl+l (and the other Ctrl+h/j/k/l keys) move between
+     windows, e.g. between the file tree and the editor.
+5.2  Key bindings follow the user's Neovim 0.10.4 configuration in
+     ~/.config/nvim wherever Wim has the feature they use.
+     Decided: mappings for plugins Wim doesn't have (Telescope, LSP,
+     gitsigns, nvim-spider, theme toggle, Rust auto-import) are left out.
+
+
+6. macOS text editing in Insert mode
+------------------------------------
+6.1  Option+Left and Option+Right move by word.
+6.2  Option+Delete and Option+Backspace delete a word, as in standard macOS
+     text editing.
+     Decided: Option+Delete (the ⌫ key) deletes the word before the cursor;
+     Option+fn+Delete (⌦) deletes the word after it.
