@@ -20,6 +20,7 @@ export interface WindowHandle {
     /** Whether `onExit` fires when the window closes. Otherwise the window's
      * lifetime is only known from its connection. */
     tracksExit: boolean;
+
     onExit(callback: () => void): void;
     close(): void;
 }
@@ -42,10 +43,10 @@ export function openWindow(url: string, kind: WindowKind): WindowHandle {
 }
 
 function untracked(kind: 'browser' | 'none'): WindowHandle {
-    return { kind, tracksExit: false, onExit: () => {}, close: () => {} };
+    return { kind, tracksExit: false, onExit: () => { }, close: () => { } };
 }
 
-function childHandle(kind: 'webkit' | 'chromium', child: ChildProcess, cleanup = (): void => {}): WindowHandle {
+function childHandle(kind: 'webkit' | 'chromium', child: ChildProcess, cleanup = (): void => { }): WindowHandle {
     let exited = false;
     const callbacks: (() => void)[] = [];
     child.on('exit', () => {
@@ -209,7 +210,7 @@ function openDefaultBrowser(url: string): void {
         process.platform === 'darwin'
             ? ['open', [url]]
             : process.platform === 'win32'
-              ? ['rundll32', ['url.dll,FileProtocolHandler', url]]
-              : ['xdg-open', [url]];
-    spawn(cmd, args, { stdio: 'ignore', detached: true }).on('error', () => {}).unref();
+                ? ['rundll32', ['url.dll,FileProtocolHandler', url]]
+                : ['xdg-open', [url]];
+    spawn(cmd, args, { stdio: 'ignore', detached: true }).on('error', () => { }).unref();
 }

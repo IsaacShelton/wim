@@ -6,6 +6,7 @@ import * as fs from 'node:fs';
 import * as path from 'node:path';
 
 import { Clipboard, SystemClipboard } from './clipboard';
+import { bufferState, findBuffer } from './editor/buffers';
 import { Pos, isWhitespace, pos, posCmp } from './editor/buffer';
 import { Editor } from './editor/editor';
 import { fail } from './editor/errors';
@@ -14,8 +15,8 @@ import { isCmdLine } from './editor/mode';
 import { Range } from './editor/range';
 import { lineMatches } from './editor/search';
 import { FileTree } from './filetree';
+import { GrepMatch, Search, findFiles, liveGrep } from './finder';
 import * as highlight from './highlight';
-import { Token } from './highlight';
 import * as icons from './icons';
 import { Command, Keymap, LspAction, MapMode, Rhs, TIMEOUT } from './keymap';
 import { Completion } from './lsp/completion';
@@ -23,9 +24,9 @@ import { LspFeatures, severityColor } from './lsp/features';
 import { BufferDiagnostic, LspManager } from './lsp/manager';
 import { ServerSpec, defaultServers } from './lsp/servers';
 import { baseName, currentDir } from './paths';
-import { Float, Overlay, Picker } from './popup';
+import { Float, Overlay, Picker, PickerItem, readPreview } from './popup';
 import { ClientMessage, DrawCmd } from './protocol';
-import { theme } from './theme';
+import { theme, tokenColor } from './theme';
 
 const TEXT_PADDING = 6;
 /** Width of the file tree, in characters. */
@@ -262,6 +263,7 @@ export class WimApp {
             const picker = this.picker;
             const before = [this.editor.bufferId(), this.editor.cursor];
             if (!picker.key(key)) {
+                picker.dispose();
                 if (this.picker === picker) this.picker = undefined;
                 // A choice that went somewhere (a symbol from the tree, say)
                 // moves to the editor to show it.
@@ -385,6 +387,12 @@ export class WimApp {
                 break;
             case 'ToggleTree':
                 this.toggleTree();
+                break;
+            case 'FindFiles':
+                this.findFiles();
+                break;
+            case 'LiveGrep':
+                this.liveGrep();
                 break;
             case 'InsertCharBefore':
             case 'InsertCharAfter':
@@ -517,6 +525,115 @@ export class WimApp {
         this.focus = 'Tree';
     }
 
+    /** `,a`: pick a file under the working directory to open. */
+    private findFiles(): void {
+        const root = currentDir();
+        const items: PickerItem<string>[] = [];
+        const picker = new Picker<string>('Find Files', (file) => this.openAt(path.join(root, file)), {
+            preview: true,
+            message: 'No files',
+            onClose: () => search.cancel(),
+        });
+        picker.busy = true;
+        const search = findFiles(
+            root,
+            (files) => {
+                for (const file of files) {
+                    items.push({ label: file, icon: this.fileIcon(file), truncateStart: true, preview: { file: path.join(root, file) }, value: file });
+                }
+                picker.setItems(items, 'No files', true);
+                this.refresh();
+            },
+            (error) => {
+                picker.busy = false;
+                if (error) picker.setItems(items, error, true);
+                this.refresh();
+            },
+        );
+        this.picker = picker as unknown as Picker<never>;
+    }
+
+    /** `,fw`: search the working directory's files as you type, and jump to a
+     * match. */
+    private liveGrep(): void {
+        const root = currentDir();
+        let search: Search | undefined;
+        const picker: Picker<GrepMatch> = new Picker<GrepMatch>(
+            'Live Grep',
+            (m) => this.openAt(path.join(root, m.file), m.line, m.col),
+            {
+                preview: true,
+                message: 'Type to search',
+                onClose: () => search?.cancel(),
+                onQuery: (query) => {
+                    search?.cancel();
+                    if (query === '') {
+                        picker.busy = false;
+                        picker.setItems([], 'Type to search');
+                        return;
+                    }
+                    const items: PickerItem<GrepMatch>[] = [];
+                    let first = true;
+                    picker.busy = true;
+                    const show = (message: string): void => {
+                        // New results start at the top; more of them keep the
+                        // selection.
+                        picker.setItems(items, message, !first);
+                        first = false;
+                        this.refresh();
+                    };
+                    search = liveGrep(
+                        root,
+                        query,
+                        (matches) => {
+                            for (const m of matches) {
+                                items.push({
+                                    label: `${m.file}:${m.line + 1}:${m.col + 1}: ${m.text.trim()}`,
+                                    icon: this.fileIcon(m.file),
+                                    preview: { file: path.join(root, m.file), line: m.line },
+                                    value: m,
+                                });
+                            }
+                            show('No matches');
+                        },
+                        (error) => {
+                            picker.busy = false;
+                            show(error ?? 'No matches');
+                        },
+                    );
+                },
+            },
+        );
+        this.picker = picker as unknown as Picker<never>;
+    }
+
+    private fileIcon(file: string): [string, string] | undefined {
+        if (!this.icons) return undefined;
+        const icon = icons.forFile(path.basename(file));
+        return [icon.glyph, rgb(icon.color)];
+    }
+
+    /** Open a file chosen from a picker, at a line and column if given. */
+    private openAt(file: string, line?: number, col = 0): void {
+        const ed = this.editor;
+        this.editorToNormal();
+        this.focus = 'Editor';
+        ed.marks.set("'", ed.cursor);
+        if (ed.filePath !== file) ed.openFile(file);
+        if (line === undefined || ed.filePath !== file) return;
+        ed.cursor = pos(Math.min(line, ed.buffer.lastLine()), col);
+        ed.clampCursor();
+        ed.updateWantCol();
+    }
+
+    /** A file's lines for a picker's preview: an open buffer's (with unsaved
+     * changes), or the file's. */
+    private previewLines(file: string): string[] | string {
+        const id = findBuffer(this.editor, file);
+        const st = id === undefined ? undefined : bufferState(this.editor, id);
+        return st ? st.buffer.text().split('\n') : readPreview(file);
+    }
+
     private openFromTree(p: string): void {
         this.editorToNormal();
         this.editor.openFile(p);
@@ -548,6 +665,7 @@ export class WimApp {
 
     private mouse(layout: Layout, kind: 'down' | 'move' | 'up', x: number, y: number): void {
         if (kind === 'down') {
+            this.picker?.dispose();
             this.picker = undefined;
             this.float = undefined;
             this.completion.close();
@@ -675,6 +793,7 @@ export class WimApp {
             completion: this.completion.visible && this.focus === 'Editor' ? this.completion : undefined,
             float: this.float,
             picker: this.picker,
+            previewLines: (file) => this.previewLines(file),
             focus: this.focus,
             icons: this.icons,
             tree: this.tree,
@@ -742,28 +861,6 @@ function rgb(color: number): string {
     return '#' + color.toString(16).padStart(6, '0');
 }
 
-function tokenColor(token: Token): string {
-    switch (token) {
-        case 'Normal':
-            return theme.FG;
-        case 'Keyword':
-            return theme.KEYWORD;
-        case 'Type':
-            return theme.TYPE;
-        case 'Constant':
-        case 'Number':
-            return theme.CONSTANT;
-        case 'String':
-            return theme.STRING;
-        case 'Comment':
-            return theme.COMMENT;
-        case 'Function':
-            return theme.FUNCTION;
-        case 'Macro':
-            return theme.MACRO;
-    }
-}
-
 /** What the painter needs to know besides the editor. */
 interface PaintState {
     metrics: Metrics;
@@ -785,6 +882,7 @@ interface PaintState {
     completion: Completion | undefined;
     float: Float | undefined;
     picker: Picker<never> | undefined;
+    previewLines: (file: string) => string[] | string;
 }
 
 /** Paints one frame. */
@@ -974,7 +1072,8 @@ class Painter {
         if (menu && anchor) overlay.completion(menu, area, ...screen(anchor), this.st.icons);
         const f = this.st.float;
         if (f) overlay.float(f, area, ...screen(f.anchor));
-        if (this.st.picker) overlay.picker(this.st.picker, rect(0, 0, this.st.metrics.width, layout.status.top));
+        const picker = this.st.picker;
+        if (picker) overlay.picker(picker, rect(0, 0, this.st.metrics.width, layout.status.top), this.st.previewLines);
     }
 
     /** Draw the visible part of a line in its colors, expanding tabs. */

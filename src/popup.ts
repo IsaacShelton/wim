@@ -1,11 +1,15 @@
 // Popups drawn over the editor: floating text (hover, diagnostics), the
 // completion menu and a Telescope-style picker.
 
+import * as fs from 'node:fs';
+
 import { Pos } from './editor/buffer';
 import { KeyInput, charOf, isCharKey } from './editor/keys';
 import { fuzzyScore } from './fuzzy';
+import * as highlight from './highlight';
+import { baseName } from './paths';
 import { DrawCmd } from './protocol';
-import { theme } from './theme';
+import { theme, tokenColor } from './theme';
 
 /** A piece of text in one color. */
 export type Run = [text: string, color: string];
@@ -19,6 +23,11 @@ export interface Box {
 
 /** Vertical padding inside a popup's border, in pixels. */
 const PAD = 4;
+/** Pickers show a preview only when the window is at least this many
+ * columns wide (Telescope's `preview_cutoff`). */
+const PREVIEW_CUTOFF = 120;
+/** Previews of larger files are skipped. */
+const PREVIEW_MAX_BYTES = 2 * 1024 * 1024;
 
 function width(s: string): number {
     return Array.from(s).length;
@@ -153,14 +162,25 @@ export class Overlay {
         this.cmds.push(['unclip']);
     }
 
-    picker<T>(p: Picker<T>, area: Box): void {
+    /** A picker, Telescope's horizontal layout: the prompt and results, and
+     * a preview of the selected item's file beside them when there is room.
+     * `load` reads a file's lines for the preview (or says why it can't). */
+    picker<T>(p: Picker<T>, area: Box, load: (file: string) => string[] | string): void {
         const areaCols = Math.floor((area.right - area.left) / this.cw);
         const areaRows = Math.floor((area.bottom - area.top) / this.lh);
-        const cols = Math.max(Math.min(Math.round(areaCols * 0.8), 120, areaCols - 4), 10);
-        const rows = p.inputOnly ? 1 : Math.max(Math.min(Math.round(areaRows * 0.6), areaRows - 4), 3);
+        const big = p.hasPreview;
+        const totalCols = big
+            ? Math.max(Math.round(areaCols * 0.97) - 2, 10)
+            : Math.max(Math.min(Math.round(areaCols * 0.8), 120, areaCols - 4), 10);
+        const rows = p.inputOnly
+            ? 1
+            : Math.max(Math.min(Math.round(areaRows * (big ? 0.9 : 0.6)), areaRows - (big ? 2 : 4)), 3);
+        const preview = big && areaCols >= PREVIEW_CUTOFF;
+        // The results take 60% of the width beside a preview.
+        const cols = preview ? Math.floor(totalCols * 0.6) - 1 : totalCols;
         const w = (cols + 2) * this.cw;
         const h = (rows + (p.inputOnly ? 0 : 1)) * this.lh + 2 * PAD;
-        const left = area.left + Math.floor((area.right - area.left - w) / 2);
+        const left = area.left + Math.floor((area.right - area.left - (totalCols + 2) * this.cw) / 2);
         const top = p.inputOnly ? area.top + Math.floor((area.bottom - area.top) / 3) : area.top + Math.floor((area.bottom - area.top - h) / 2);
         const b = { left, top, right: left + w, bottom: top + h };
         this.frame(b, p.title);
@@ -172,7 +192,7 @@ export class Overlay {
         const end = x + Math.min(width(prompt), cols) * this.cw;
         this.rect({ left: end, top: y, right: end + 2, bottom: y + this.lh }, theme.CURSOR);
         if (p.inputOnly) return;
-        const count = `${p.filtered.length} / ${p.total}`;
+        const count = p.busy ? `${p.filtered.length} / ${p.total} …` : `${p.filtered.length} / ${p.total}`;
         this.text(b.right - (width(count) + 1) * this.cw, y, count, theme.COMMENT);
         y += this.lh;
         this.rect({ left: b.left, top: y, right: b.right, bottom: y + 1 }, theme.POPUP_BORDER);
@@ -184,13 +204,53 @@ export class Overlay {
             const item = p.filtered[p.scroll + i];
             const ry = y + PAD + i * this.lh;
             if (p.scroll + i === p.selected) this.rect({ left: b.left + 1, top: ry, right: b.right - 1, bottom: ry + this.lh }, theme.POPUP_SELECTION);
+            let ix = x;
+            let room = cols;
+            if (item.icon) {
+                this.text(ix, ry, item.icon[0], item.icon[1]);
+                ix += 2 * this.cw;
+                room -= 2;
+            }
             const detail = item.detail ?? '';
-            const detailCols = Math.min(width(detail), Math.floor(cols / 2));
-            const labelCols = cols - (detailCols > 0 ? detailCols + 2 : 0);
-            this.runs(x, ry, [[item.label, item.color ?? theme.FG]], labelCols);
-            if (detailCols > 0) this.runs(x + (cols - detailCols) * this.cw, ry, [[detail, theme.COMMENT]], detailCols);
+            const detailCols = Math.min(width(detail), Math.floor(room / 2));
+            const labelCols = room - (detailCols > 0 ? detailCols + 2 : 0);
+            let label = item.label;
+            // Long paths lose their start, as with Telescope's `truncate`.
+            if (item.truncateStart && width(label) > labelCols) label = '…' + Array.from(label).slice(-(labelCols - 1)).join('');
+            this.runs(ix, ry, [[label, item.color ?? theme.FG]], labelCols);
+            if (detailCols > 0) this.runs(ix + (room - detailCols) * this.cw, ry, [[detail, theme.COMMENT]], detailCols);
         }
         if (p.filtered.length === 0 && p.message) this.text(x, y + PAD, p.message, theme.COMMENT);
+        this.cmds.push(['unclip']);
+        if (preview) {
+            const pb = { left: b.right + this.cw, top: b.top, right: left + (totalCols + 2) * this.cw, bottom: b.bottom };
+            this.preview(p, pb, load);
+        }
+    }
+
+    /** The selected item's file, with its line marked and in view. */
+    private preview<T>(p: Picker<T>, b: Box, load: (file: string) => string[] | string): void {
+        const target = p.filtered[p.selected]?.preview;
+        this.frame(b, target ? baseName(target.file) : 'Preview');
+        if (!target) return;
+        const text = p.previewText(target.file, load);
+        const x = b.left + this.cw;
+        const top = b.top + PAD;
+        const cols = Math.floor((b.right - b.left) / this.cw) - 2;
+        const rows = Math.floor((b.bottom - b.top - 2 * PAD) / this.lh);
+        if (typeof text === 'string') {
+            this.text(x, top, text, theme.COMMENT);
+            return;
+        }
+        const line = target.line ?? 0;
+        const first = target.line === undefined ? 0 : Math.max(Math.min(line - Math.floor(rows / 2), text.lines.length - rows), 0);
+        this.cmds.push(['clip', b.left, b.top, b.right - b.left, b.bottom - b.top]);
+        for (let i = 0; i < rows && first + i < text.lines.length; i++) {
+            const l = first + i;
+            const y = top + i * this.lh;
+            if (target.line !== undefined && l === line) this.rect({ left: b.left + 1, top: y, right: b.right - 1, bottom: y + this.lh }, theme.POPUP_SELECTION);
+            this.runs(x, y, p.previewLine(text, l), cols);
+        }
         this.cmds.push(['unclip']);
     }
 }
@@ -313,7 +373,34 @@ export interface PickerItem<T> {
     /** Shown dimmed on the right, and matched too. */
     detail?: string;
     color?: string;
+    /** A file icon: glyph and color. */
+    icon?: [string, string];
+    /** Shorten a long label from its start (a path) rather than its end. */
+    truncateStart?: boolean;
+    /** The file (and line, from 0) to show in the preview. */
+    preview?: { file: string; line?: number };
     value: T;
+}
+
+/** A file's lines for previews, with highlighter states found so far. */
+interface PreviewText {
+    lines: string[];
+    lang: highlight.Language | undefined;
+    states: highlight.State[];
+}
+
+/** Read a file for a preview, or say why it can't be shown. */
+export function readPreview(file: string): string[] | string {
+    try {
+        const stat = fs.statSync(file);
+        if (stat.isDirectory()) return '(a directory)';
+        if (stat.size > PREVIEW_MAX_BYTES) return '(file too large to preview)';
+        const bytes = fs.readFileSync(file);
+        if (bytes.subarray(0, 8000).includes(0)) return '(binary file)';
+        return bytes.toString('utf8').split(/\r?\n/);
+    } catch (e) {
+        return `(${(e as Error).message})`;
+    }
 }
 
 export interface PickerOptions<T> {
@@ -326,6 +413,10 @@ export interface PickerOptions<T> {
     /** For a text prompt with no list: accepting passes the query. */
     onInput?: (text: string) => void;
     items?: PickerItem<T>[];
+    /** Use the large layout with a preview of the selected item's file. */
+    preview?: boolean;
+    /** Called when the picker closes, however it closes. */
+    onClose?: () => void;
 }
 
 /** A Telescope-style list to choose from, filtered by typing. */
@@ -337,7 +428,10 @@ export class Picker<T> {
     /** Rows shown in the last frame. */
     visibleRows = 10;
     message: string | undefined;
+    /** Items are still coming in. */
+    busy = false;
     private items: PickerItem<T>[];
+    private readonly previews = new Map<string, PreviewText | string>();
 
     constructor(
         readonly title: string,
@@ -358,10 +452,53 @@ export class Picker<T> {
         return this.items.length;
     }
 
-    setItems(items: PickerItem<T>[], message?: string): void {
+    get hasPreview(): boolean {
+        return Boolean(this.opts.preview);
+    }
+
+    /** Replace the items. With `keepSelection` (more of the same items
+     * arriving) the selection stays where it is. */
+    setItems(items: PickerItem<T>[], message?: string, keepSelection = false): void {
         this.items = items;
         this.message = message;
+        const selected = this.selected;
+        const scroll = this.scroll;
         this.filter();
+        if (keepSelection) {
+            this.selected = Math.min(selected, Math.max(this.filtered.length - 1, 0));
+            this.scroll = scroll;
+        }
+    }
+
+    /** A file's text for the preview, read once. */
+    previewText(file: string, load: (file: string) => string[] | string): PreviewText | string {
+        let text = this.previews.get(file);
+        if (text === undefined) {
+            const lines = load(file);
+            text = typeof lines === 'string' ? lines : { lines, lang: highlight.detect(file), states: [highlight.NORMAL] };
+            this.previews.set(file, text);
+        }
+        return text;
+    }
+
+    /** Line `i` of a preview, highlighted. */
+    previewLine(text: PreviewText, i: number): Run[] {
+        const chars = Array.from(text.lines[i].replace(/\t/g, '    '));
+        if (!text.lang) return [[chars.join(''), theme.FG]];
+        while (text.states.length <= i) {
+            const j = text.states.length - 1;
+            text.states.push(highlight.highlightLine(text.lang, Array.from(text.lines[j].replace(/\t/g, '    ')), text.states[j])[1]);
+        }
+        const [spans] = highlight.highlightLine(text.lang, chars, text.states[i]);
+        const runs: Run[] = [];
+        let at = 0;
+        for (const [start, end, token] of spans) {
+            if (start > at) runs.push([chars.slice(at, start).join(''), theme.FG]);
+            runs.push([chars.slice(start, end).join(''), tokenColor(token)]);
+            at = end;
+        }
+        if (at < chars.length) runs.push([chars.slice(at).join(''), theme.FG]);
+        return runs;
     }
 
     private filter(): void {
@@ -398,6 +535,11 @@ export class Picker<T> {
         this.query = query;
         if (this.opts.onQuery) this.opts.onQuery(query);
         else this.filter();
+    }
+
+    /** The picker is closing. */
+    dispose(): void {
+        this.opts.onClose?.();
     }
 
     /** Type text into the prompt (Cmd+V). */

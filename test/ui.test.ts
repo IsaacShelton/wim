@@ -305,6 +305,81 @@ test('the tree only gets window and ex mappings', () => {
     assert.equal(map.lookup('Normal', parseKeys('∆'), true).t, 'None');
 });
 
+// ----- Finding files and text ----------------------------------------------------------
+
+async function until(what: string, cond: () => boolean): Promise<void> {
+    const start = Date.now();
+    while (!cond()) {
+        if (Date.now() - start > 5000) throw new Error(`timed out waiting for ${what}`);
+        await new Promise((r) => setTimeout(r, 10));
+    }
+}
+
+/** A project for the finders: two files and an ignored directory. */
+function finderProject(): string {
+    const dir = tempDir('finder');
+    fs.mkdirSync(path.join(dir, 'src'));
+    fs.mkdirSync(path.join(dir, 'node_modules', 'dep'), { recursive: true });
+    fs.writeFileSync(path.join(dir, 'src', 'main.rs'), 'fn main() {\n    let é = needle();\n}\n');
+    fs.writeFileSync(path.join(dir, 'README.md'), '# needle\n');
+    fs.writeFileSync(path.join(dir, 'node_modules', 'dep', 'index.js'), 'needle\n');
+    return dir;
+}
+
+/** Run `f` in `dir`, with or without ripgrep on the PATH. */
+async function inProject(dir: string, withRipgrep: boolean, f: () => Promise<void>): Promise<void> {
+    const cwd = process.cwd();
+    const PATH = process.env.PATH;
+    process.chdir(dir);
+    if (!withRipgrep) process.env.PATH = '';
+    try {
+        await f();
+    } finally {
+        process.env.PATH = PATH;
+        process.chdir(cwd);
+        fs.rmSync(dir, { recursive: true, force: true });
+    }
+}
+
+for (const withRipgrep of [true, false]) {
+    const how = withRipgrep ? 'with ripgrep' : 'without ripgrep';
+
+    test(`,a finds files to open (${how})`, () =>
+        inProject(finderProject(), withRipgrep, async () => {
+            const h = harness();
+            h.type(',a');
+            assert.match(h.text(), /Find Files/);
+            await until('the files', () => /2 \/ 2\n/.test(h.text()));
+            assert.doesNotMatch(h.text(), /node_modules/);
+            h.type('main');
+            assert.match(h.text(), /1 \/ 2/);
+            h.type('<CR>');
+            assert.equal(h.app.editor.filePath, path.join(process.cwd(), 'src', 'main.rs'));
+            assert.match(h.text(), /NORMAL/);
+        }));
+
+    test(`,fw searches as you type and jumps to a match (${how})`, () =>
+        inProject(finderProject(), withRipgrep, async () => {
+            const h = harness();
+            h.type(',fw');
+            assert.match(h.text(), /Live Grep/);
+            h.type('needle\\(');
+            await until('the match', () => h.text().includes('src/main.rs:2:13:'));
+            assert.doesNotMatch(h.text(), /README|node_modules/, 'only the matching line');
+            h.type('<CR>');
+            assert.equal(h.app.editor.filePath, path.join(process.cwd(), 'src', 'main.rs'));
+            // The column counts characters, not the bytes of `é`.
+            assert.deepEqual(h.app.editor.cursor, { line: 1, col: 12 });
+        }));
+}
+
+test('a bad live grep pattern is reported', () =>
+    inProject(finderProject(), true, async () => {
+        const h = harness();
+        h.type(',fw(');
+        await until('the error', () => /regex|parse|unclosed/i.test(h.text()));
+    }));
+
 // ----- Highlighting and icons ------------------------------------------------------
 
 function tokens(lang: typeof RUST, s: string): [string, Token][] {

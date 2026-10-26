@@ -1,7 +1,6 @@
 // User key mappings, translated from `~/.config/nvim/init.lua` (leader `,`,
 // `timeoutlen` 300ms). Mappings to Neovim plugins Wim doesn't have
-// (gitsigns, spider) are left out; Telescope's LSP and diagnostic pickers
-// become Wim's own picker.
+// (gitsigns, spider) are left out; Telescope's pickers become Wim's own.
 
 import { KeyInput, keyIs, keysEq, keysStartWith, parseKeys } from './editor/keys';
 
@@ -19,6 +18,10 @@ export type Command =
     | 'WindowUp'
     | 'WindowDown'
     | 'ToggleTree'
+    /** Telescope's `find_files`. */
+    | 'FindFiles'
+    /** Telescope's `live_grep`. */
+    | 'LiveGrep'
     /** Read one more character and insert it before the cursor. */
     | 'InsertCharBefore'
     /** Read one more character and insert it after the cursor. */
@@ -128,6 +131,9 @@ export class Keymap {
             [N, 'Ô', keys('V')],
             [N, '\u{f8ff}', keys('V')],
             [N, '<C-n>', command('ToggleTree')],
+            // Telescope.
+            [N, '<leader>a', command('FindFiles')],
+            [N, '<leader>fw', command('LiveGrep')],
             // Language servers (set on LspAttach in the Neovim config; `K` is
             // Neovim's default hover mapping, `zK` the config's fold peek).
             [N, 'gd', lsp({ t: 'Goto', method: 'definition' })],

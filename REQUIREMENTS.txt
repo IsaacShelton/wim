@@ -78,8 +78,8 @@ made where a request was open to interpretation.
 5.2  Key bindings follow the user's Neovim 0.10.4 configuration in
      ~/.config/nvim wherever Wim has the feature they use.
      Decided: mappings for plugins Wim doesn't have (gitsigns, nvim-spider,
-     theme toggle, Rust auto-import) are left out. Telescope's LSP and
-     diagnostic pickers become Wim's own picker (see 7).
+     theme toggle, Rust auto-import) are left out. Telescope's pickers
+     become Wim's own picker (see 7 and 8).
 
 
 6. macOS text editing in Insert mode
@@ -117,3 +117,21 @@ made where a request was open to interpretation.
      text is written again if the buffer hasn't changed meanwhile.
      Decided: `<C-Space>` with no completion menu open asks for
      completions.
+
+
+8. Finding files and text
+-------------------------
+8.1  `,a` finds files and `,fw` searches text, as Telescope's find_files
+     and live_grep do in the Neovim config.
+     Decided: both use ripgrep with the Neovim config's
+     `vimgrep_arguments`, and leave out `node_modules` (its
+     `file_ignore_patterns`). Without ripgrep, files come from git (or a
+     directory walk) and are searched with JavaScript regular expressions,
+     so they also work where ripgrep isn't installed (such as a plain
+     Windows machine).
+     Decided: pickers use Telescope's horizontal layout from the config
+     (97% by 90% of the window, prompt on top, a preview of the selected
+     item's file beside the results when the window is at least 120
+     columns wide). The LSP pickers that list locations get the preview
+     too.
+     Decided: live grep stops after 5000 matches.

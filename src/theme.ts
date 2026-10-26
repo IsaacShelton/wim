@@ -1,5 +1,7 @@
 // Colors, after Atom's One Dark.
 
+import type { Token } from './highlight';
+
 export const theme = {
     BG: '#282c34',
     FG: '#abb2bf',
@@ -40,3 +42,26 @@ export const theme = {
     POPUP_BORDER: '#5c6370',
     POPUP_SELECTION: '#3e4451',
 } as const;
+
+/** The color for a syntax highlighting token. */
+export function tokenColor(token: Token): string {
+    switch (token) {
+        case 'Normal':
+            return theme.FG;
+        case 'Keyword':
+            return theme.KEYWORD;
+        case 'Type':
+            return theme.TYPE;
+        case 'Constant':
+        case 'Number':
+            return theme.CONSTANT;
+        case 'String':
+            return theme.STRING;
+        case 'Comment':
+            return theme.COMMENT;
+        case 'Function':
+            return theme.FUNCTION;
+        case 'Macro':
+            return theme.MACRO;
+    }
+}

@@ -55,6 +55,7 @@ one the tree shows plain folder arrows.
 | `src/clipboard.ts` | System clipboard through `pbcopy`/`pbpaste`, PowerShell, or `wl-clipboard`/`xclip`/`xsel` |
 | `src/lsp/` | Language server client: `rpc.ts` (JSON-RPC framing), `client.ts` (one server process), `servers.ts` (which servers, where to find them, project roots), `manager.ts` (keeps servers in sync with buffers, diagnostics, edits), `features.ts` (go to, hover, rename, ...), `completion.ts` |
 | `src/popup.ts` | The completion menu, hover/diagnostic floats and the picker |
+| `src/finder.ts` | Finding files and searching text for the pickers, with ripgrep or without it |
 
 Run the tests with `npm test`.
 
@@ -124,7 +125,9 @@ Files in the same project share one server.
 - **Hover** (`K`) shows documentation in a float; press `K` again to move into it and scroll
   (`j`/`k`, `<C-d>`/`<C-u>`, `g`/`G`), `q` or `<Esc>` to leave.
 - **Pickers** (references, symbols, code actions, diagnostics) work like Telescope: type to
-  filter, `<C-n>`/`<C-p>` or the arrows to move, `<CR>` to choose, `<Esc>` to close.
+  filter, `<C-n>`/`<C-p>` or the arrows to move, `<CR>` to choose, `<Esc>` to close. Those
+  with locations show a preview of the selected one beside the list when the window is at
+  least 120 columns wide.
 - **Formatting:** files are formatted by their server when written (conform.nvim's
   `format_on_save` with `lsp_fallback`), then written again. `:LspFormatOnSave off` turns this
   off for the session.
@@ -132,6 +135,17 @@ Files in the same project share one server.
 - Edits to files that aren't open (from a rename, say) go into background buffers, left
   unsaved; `:wa` saves them.
 - `:LspInfo` shows the running servers; `:LspRestart` restarts them.
+
+## Finding files and text
+
+`,a` lists the files under the working directory and `,fw` searches their text as you type,
+each in a picker with a preview, like Telescope's `find_files` and `live_grep`. Both use
+[ripgrep](https://github.com/BurntSushi/ripgrep) (`rg`) when it is installed, with the
+Neovim config's arguments, so they skip what `.gitignore` ignores and hidden files; `,fw`
+takes a regular expression and is case-insensitive unless it has capitals. Without ripgrep,
+Wim lists files with git (or by walking the directory) and searches them itself. Paths under
+`node_modules` are left out, as in the Neovim config. `<CR>` opens the file, at the match
+for `,fw`.
 
 ## Key mappings
 
@@ -168,6 +182,8 @@ Normal-mode mappings don't apply in the middle of a command, so `f,` still finds
 | `,S` / `,fs` | Normal | Document symbols / workspace symbols (searched as you type) |
 | `]d` / `[d` | Normal | Next / previous diagnostic, shown in a float |
 | `]1`–`]4` / `[1`–`[4` | Normal | Next / previous error, warning, info, hint |
+| `,a` | Normal | Find files under the working directory (Telescope `find_files`) |
+| `,fw` | Normal | Search the working directory's files as you type (Telescope `live_grep`) |
 | `,q` | Normal | All diagnostics, in a picker |
 | `,z` or `,1` / `,2` / `,3` / `,4` | Normal | Errors / warnings / info / hints, in a picker |
 

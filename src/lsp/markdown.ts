@@ -3,7 +3,7 @@
 
 import * as highlight from '../highlight';
 import { Run } from '../popup';
-import { theme } from '../theme';
+import { theme, tokenColor } from '../theme';
 import { Hover, MarkedString, MarkupContent } from './types';
 
 /** File extensions for code block languages, to find a highlighter. */
@@ -35,28 +35,6 @@ export function hoverMarkdown(hover: Hover | null): string {
     };
     const contents = Array.isArray(hover.contents) ? hover.contents : [hover.contents];
     return contents.map(part).join('\n\n');
-}
-
-function tokenColor(token: highlight.Token): string {
-    switch (token) {
-        case 'Keyword':
-            return theme.KEYWORD;
-        case 'Type':
-            return theme.TYPE;
-        case 'Constant':
-        case 'Number':
-            return theme.CONSTANT;
-        case 'String':
-            return theme.STRING;
-        case 'Comment':
-            return theme.COMMENT;
-        case 'Function':
-            return theme.FUNCTION;
-        case 'Macro':
-            return theme.MACRO;
-        default:
-            return theme.FG;
-    }
 }
 
 function codeLine(lang: highlight.Language | undefined, line: string, state: highlight.State): [Run[], highlight.State] {

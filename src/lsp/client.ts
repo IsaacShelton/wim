@@ -259,7 +259,9 @@ export class LanguageClient {
             case 'window/showMessage': {
                 const p = params as { type: number; message: string };
                 // Errors and warnings only; information is mostly chatter.
-                if (p.type <= 2) this.events.onMessage(`${this.name}: ${p.message}`, p.type === 1);
+                // The message line has room for one line.
+                const text = p.message.trim().replace(/\s*\n\s*/g, ' ');
+                if (p.type <= 2) this.events.onMessage(`${this.name}: ${text}`, p.type === 1);
                 break;
             }
         }

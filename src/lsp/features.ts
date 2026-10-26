@@ -201,9 +201,9 @@ export class LspFeatures {
                 const file = pathFromUri(t.uri) ?? t.uri;
                 const line = lines.get(file, t.range.start.line);
                 const col = fromCharacter(Array.from(line), t.range.start.character, t.encoding);
-                return { label: `${displayName(file)}:${t.range.start.line + 1}:${col + 1}`, detail: line.trim(), value: t };
+                return { label: `${displayName(file)}:${t.range.start.line + 1}:${col + 1}`, detail: line.trim(), preview: previewOf(t), value: t };
             });
-            this.pick(new Picker(title, (t) => this.jump(t), { items }));
+            this.pick(new Picker(title, (t) => this.jump(t), { items, preview: true }));
         }
         this.host.refresh();
     }
@@ -371,6 +371,7 @@ export class LspFeatures {
                     items.push({
                         label: '  '.repeat(depth) + s.name,
                         detail: `[${SYMBOL_KINDS[s.kind] ?? '?'}] ${s.detail ?? ''}`.trim(),
+                        preview: { file: h.file, line: s.selectionRange.start.line },
                         value: { uri: h.uri, range: s.selectionRange, encoding: enc },
                     });
                     for (const child of s.children ?? []) add(child, depth + 1);
@@ -382,7 +383,7 @@ export class LspFeatures {
                         add(s, 0);
                     }
                 }
-                this.pick(new Picker('Document Symbols', (t: Target) => this.jump(t), { items, message: 'No symbols' }));
+                this.pick(new Picker('Document Symbols', (t: Target) => this.jump(t), { items, message: 'No symbols', preview: true }));
                 this.host.refresh();
             })
             .catch(this.failed(h.client, 'document symbols'));
@@ -394,6 +395,7 @@ export class LspFeatures {
         const enc = h.client.encoding;
         let seq = 0;
         const picker: Picker<Target> = new Picker('Workspace Symbols', (t: Target) => this.jump(t), {
+            preview: true,
             message: 'Type to search',
             onQuery: (query) => {
                 const mine = ++seq;
@@ -481,11 +483,12 @@ export class LspFeatures {
                 label: `${SEVERITY_LETTERS[sev]} ${d.message.split('\n')[0]}`,
                 detail: `${displayName(file)}:${d.range.start.line + 1}:${col + 1}`,
                 color: severityColor(sev),
+                preview: { file, line: d.range.start.line },
                 value: { uri: uriFromPath(file), range: d.range, encoding },
             });
         }
         const title = severity === undefined ? 'Diagnostics' : `${SEVERITY_NAMES[severity]}s`;
-        this.pick(new Picker(title, (t: Target) => this.jump(t), { items, message: 'No diagnostics' }));
+        this.pick(new Picker(title, (t: Target) => this.jump(t), { items, message: 'No diagnostics', preview: true }));
     }
 
     // ----- Highlighting references -------------------------------------------------------------
@@ -536,6 +539,11 @@ export class LspFeatures {
     }
 }
 
+function previewOf(t: Target): PickerItem<Target>['preview'] {
+    const file = pathFromUri(t.uri);
+    return file === undefined ? undefined : { file, line: t.range.start.line };
+}
+
 const ZERO_RANGE: Range = { start: { line: 0, character: 0 }, end: { line: 0, character: 0 } };
 
 function symbolItem(s: SymbolInformation, location: Location, encoding: Encoding, withFile: boolean): PickerItem<Target> {
@@ -545,6 +553,7 @@ function symbolItem(s: SymbolInformation, location: Location, encoding: Encoding
     return {
         label: s.name,
         detail: `[${SYMBOL_KINDS[s.kind] ?? '?'}]${container}${where}`,
+        preview: file ? { file, line: location.range.start.line } : undefined,
         value: { uri: location.uri, range: location.range, encoding },
     };
 }
