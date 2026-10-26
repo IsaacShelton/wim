@@ -80,6 +80,12 @@ and the system clipboard as `"+` / `"*`.
 
 **Insert mode:** auto-indent, extra indent after `{ ( [`, a closing `}` dedents,
 `<Tab>` inserts spaces, `<BS>` removes one indent level, `<C-w> <C-u> <C-t> <C-d>`.
+Autopairs, as nvim-autopairs is set up in the Neovim config: typing `(`, `[`, `{`, `"` or
+`` ` `` adds its closer (not before a letter, digit or quote, and a quote not right after a
+word or to close a string), typing a closer that is already there steps over it, and `<BS>`
+between an empty pair deletes both. `'` is left alone. `"""` in Python and ```` ``` ```` in
+Markdown get closing triples. Confirming a function or method from the completion menu adds
+`()` with the cursor inside. `:set noautopairs` turns it off.
 macOS word editing: Option+Left/Right move by word, Option+Delete (⌫) deletes the word before
 the cursor, Option+fn+Delete (⌦) deletes the word after it. Option+Left/Right also move by
 word in Normal mode, and Option+Delete deletes a word on the command line.
@@ -108,12 +114,20 @@ move focus between the tree and the editor. Clicking works too.
 ## Language servers
 
 Rust files use [rust-analyzer](https://rust-analyzer.github.io/); TypeScript and JavaScript
-files use [typescript-language-server](https://github.com/typescript-language-server/typescript-language-server).
-Wim looks for each in Neovim's Mason directory (`~/.local/share/nvim/mason/bin`), then on the
-`PATH` (and, for TypeScript, the project's `node_modules/.bin` first). A server starts when the
-first file it handles is opened, rooted at the nearest Cargo workspace or crate
-(`Cargo.toml`), or the nearest `tsconfig.json`, `jsconfig.json`, `package.json` or `.git`.
-Files in the same project share one server.
+files use [typescript-language-server](https://github.com/typescript-language-server/typescript-language-server);
+Python files use [pylsp](https://github.com/python-lsp/python-lsp-server), with the Neovim
+config's pycodestyle settings.
+Wim looks for each in the project's own copy, then Neovim's Mason directory
+(`~/.local/share/nvim/mason/bin`), then the `PATH`. For TypeScript the project's copy is in
+`node_modules/.bin`. For Python it is the virtual environment's (`.venv` or `venv` in the
+project, or an activated `$VIRTUAL_ENV`): its `pylsp`, or else its Python running `-m pylsp`,
+so the server sees the project's packages; when a virtual environment exists, a pylsp from
+elsewhere is pointed at its Python too. Last, the first `python3` on the `PATH` is tried with
+`-m pylsp`. If none start, the message says why each one failed. A server
+starts when the first file it handles is opened, rooted at the nearest Cargo workspace or crate
+(`Cargo.toml`); `tsconfig.json`, `jsconfig.json`, `package.json` or `.git`; or
+`pyproject.toml`, `setup.py`, `setup.cfg`, `requirements.txt`, `Pipfile` or `.git`. Files in
+the same project share one server.
 
 - **Diagnostics:** underlined, with the message after the line, a sign in the sign column
   (which also colors the line number) and counts in the status line. They update as you type.
@@ -207,7 +221,7 @@ it was closed.
 
 **Options (`:set`):** `number`, `relativenumber` (both on by default: relative numbers, with
 the absolute number on the cursor line), `ignorecase`, `smartcase`, `hlsearch`,
-`incsearch`, `expandtab`, `autoindent`, `tabstop`, `shiftwidth`, `scrolloff`,
+`incsearch`, `expandtab`, `autoindent`, `autopairs`, `tabstop`, `shiftwidth`, `scrolloff`,
 `clipboard=unnamed`. Each supports the `no`, `!` and `?` forms.
 
 **Desktop additions:** click to place the cursor, drag to select, Cmd+C / Cmd+X copy or cut the

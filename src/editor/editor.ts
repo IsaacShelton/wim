@@ -7,6 +7,7 @@ import * as path from 'node:path';
 
 import { Clipboard } from '../clipboard';
 import { displayName, expandTilde } from '../paths';
+import * as autopairs from './autopairs';
 import { Buffer, Line, Pos, isWhitespace, order, pos } from './buffer';
 import * as buffers from './buffers';
 import { BufferSlot } from './buffers';
@@ -29,6 +30,8 @@ export interface Options {
     incsearch: boolean;
     expandtab: boolean;
     autoindent: boolean;
+    /** Insert closing brackets and quotes with opening ones (nvim-autopairs). */
+    autopairs: boolean;
     tabstop: number;
     shiftwidth: number;
     scrolloff: number;
@@ -44,6 +47,7 @@ export function defaultOptions(): Options {
         incsearch: true,
         expandtab: true,
         autoindent: true,
+        autopairs: true,
         tabstop: 4,
         shiftwidth: 4,
         scrolloff: 3,
@@ -756,6 +760,13 @@ export class Editor {
 
     private insertChar(c: string): void {
         const cur = this.cursor;
+        const pair = this.options.autopairs ? autopairs.typed(this.buffer.line(cur.line), cur.col, c, this.filePath) : undefined;
+        if (pair) {
+            this.buffer.insertText(cur, pair.text);
+            this.cursor = pos(cur.line, cur.col + pair.advance);
+            this.insert.autoindentLine = undefined;
+            return;
+        }
         const sw = Math.max(this.options.shiftwidth, 1);
         // Typing a closing brace on a line of pure indentation dedents it.
         if (c === '}' && cur.col > 0 && this.buffer.line(cur.line).slice(0, cur.col).every((x) => x === ' ')) {
@@ -798,6 +809,11 @@ export class Editor {
 
     private insertBackspace(): void {
         const cur = this.cursor;
+        if (this.options.autopairs && autopairs.betweenPair(this.buffer.line(cur.line), cur.col)) {
+            this.buffer.deleteRange(pos(cur.line, cur.col - 1), pos(cur.line, cur.col + 1));
+            this.cursor = pos(cur.line, cur.col - 1);
+            return;
+        }
         if (cur.col === 0) {
             if (cur.line > 0) {
                 const prev = pos(cur.line - 1, this.buffer.lineLen(cur.line - 1));

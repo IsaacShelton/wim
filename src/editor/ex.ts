@@ -435,7 +435,16 @@ function substitute(ed: Editor, first: number, last: number, args: string): void
     }
 }
 
-type BoolOption = 'number' | 'relativenumber' | 'ignorecase' | 'smartcase' | 'hlsearch' | 'incsearch' | 'expandtab' | 'autoindent';
+type BoolOption =
+    | 'number'
+    | 'relativenumber'
+    | 'ignorecase'
+    | 'smartcase'
+    | 'hlsearch'
+    | 'incsearch'
+    | 'expandtab'
+    | 'autoindent'
+    | 'autopairs';
 const BOOL_OPTIONS: readonly string[] = [
     'number',
     'relativenumber',
@@ -445,6 +454,7 @@ const BOOL_OPTIONS: readonly string[] = [
     'incsearch',
     'expandtab',
     'autoindent',
+    'autopairs',
 ];
 
 function setOptions(ed: Editor, args: string): void {
@@ -459,6 +469,7 @@ function setOptions(ed: Editor, args: string): void {
                 flag(o.smartcase, 'smartcase'),
                 flag(o.hlsearch, 'hlsearch'),
                 flag(o.expandtab, 'expandtab'),
+                flag(o.autopairs, 'autopairs'),
                 `tabstop=${o.tabstop}`,
                 `shiftwidth=${o.shiftwidth}`,
                 `scrolloff=${o.scrolloff}`,

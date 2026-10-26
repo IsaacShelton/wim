@@ -291,6 +291,7 @@ export class Completion implements CompletionMenu {
         const item = entry.item;
         const { text, cursor } = Completion.insertion(item);
         this.replaceWord(entry.start, text, cursor);
+        this.addParens(item, text);
         // Auto-imports and the like, often only known once resolved.
         const resolve = s.client.capabilities.completionProvider?.resolveProvider;
         if (item.additionalTextEdits?.length || !resolve) {
@@ -304,6 +305,18 @@ export class Completion implements CompletionMenu {
                 this.refresh();
             })
             .catch(() => {});
+    }
+
+    /** After a function or method, add `()` with the cursor inside, as
+     * nvim-autopairs does on nvim-cmp's `confirm_done`. */
+    private addParens(item: CompletionItem, text: string): void {
+        const ed = this.ed;
+        const kind = item.kind;
+        if (!ed.options.autopairs || (kind !== CompletionItemKind.Function && kind !== CompletionItemKind.Method)) return;
+        if (text.includes('(') || ed.buffer.charAt(ed.cursor) === '(') return;
+        ed.buffer.insertText(ed.cursor, '()');
+        ed.cursor = pos(ed.cursor.line, ed.cursor.col + 1);
+        ed.updateWantCol();
     }
 
     private applyAdditional(s: Session, edits: TextEdit[] | undefined): void {

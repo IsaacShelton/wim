@@ -146,6 +146,43 @@ test('insert mode', () => {
     check('|abc', 'Rxy<Esc>', 'x|yc');
 });
 
+test('autopairs', () => {
+    // Opening brackets and quotes bring their closers; typing a closer steps
+    // over it, and <BS> between an empty pair deletes both.
+    check('|', 'if(x<Esc>', 'f(|x)');
+    check('|', 'if(x)y<Esc>', 'f(x)|y');
+    check('|', 'i[{"<Esc>', '[{|""}]');
+    check('|', 'i(<BS>x<Esc>', '|x');
+    check('|', 'ia = `b`;<Esc>', 'a = `b`|;');
+    // Enter between a pair opens a block.
+    check('|', 'ifn x() {<CR>a<Esc>', 'fn x() {\n    |a\n}');
+    // No pair before a word character, after one (for quotes), or to close
+    // a string; and none for an opener whose closer is already on the line.
+    check('|foo', 'i(<Esc>', '|(foo');
+    check('|', 'ix"<Esc>', 'x|"');
+    check('"ab|', 'a"<Esc>', '"ab|"');
+    check('|)', 'i(<Esc>', '|()');
+    // `'` is left alone, as in the Neovim config.
+    check('|', "i'<Esc>", "|'");
+    // Dot repeat types the same.
+    check('|\n-', 'if(x)<Esc>j0.', 'f(x)\nf(x|)-');
+    // Replace mode doesn't pair.
+    check('|ab', 'R(<Esc>', '|(b');
+    // :set noautopairs turns it off.
+    check('|', ':set noautopairs<CR>i(<Esc>', '|(');
+});
+
+test('autopairs make triple quotes in Python', () => {
+    const py = editor('|');
+    py.filePath = '/x/a.py';
+    py.handleKeys(parseKeys('i"""<Esc>'));
+    assert.equal(state(py), '""|""""');
+    const js = editor('|');
+    js.filePath = '/x/a.js';
+    js.handleKeys(parseKeys('i"""<Esc>'));
+    assert.equal(state(js), '""|""');
+});
+
 test('undo and redo', () => {
     check('|abc', 'xu', '|abc');
     check('|abc', 'xu<C-r>', '|bc');

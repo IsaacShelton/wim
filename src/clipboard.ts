@@ -30,7 +30,7 @@ function tools(): { get: Tool[]; set: Tool[] } {
             set: [
                 ps(
                     '[Console]::InputEncoding=[Text.Encoding]::UTF8; ' +
-                        'Set-Clipboard -Value ([Console]::In.ReadToEnd())',
+                    'Set-Clipboard -Value ([Console]::In.ReadToEnd())',
                 ),
             ],
         };
@@ -72,7 +72,7 @@ export class SystemClipboard implements Clipboard {
         if (!t) return;
         const child = spawn(t.cmd, t.args, { env: UTF8_ENV, windowsHide: true, stdio: ['pipe', 'ignore', 'ignore'] });
         child.on('error', () => this.trySet(i + 1, text));
-        child.stdin.on('error', () => {});
+        child.stdin.on('error', () => { });
         child.stdin.end(text);
     }
 }

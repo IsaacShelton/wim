@@ -16,7 +16,7 @@ import { parseKeys } from '../src/editor/keys';
 import { fuzzyScore } from '../src/fuzzy';
 import { markdownLines } from '../src/lsp/markdown';
 import { RpcConnection } from '../src/lsp/rpc';
-import { ServerSpec } from '../src/lsp/servers';
+import { ServerSpec, defaultServers } from '../src/lsp/servers';
 import { applyTextEdits, fromCharacter, snippetText, toCharacter } from '../src/lsp/text';
 import { DrawCmd } from '../src/protocol';
 
@@ -88,6 +88,31 @@ test('JSON-RPC messages are framed and matched to their requests', async () => {
     server.notify('note', [1]);
     await new Promise((r) => setImmediate(r));
     assert.deepEqual(notes, [['note', [1]]]);
+});
+
+test('pylsp prefers the project\'s virtual environment', { skip: process.platform === 'win32' }, () => {
+    const dir = tempDir('venv');
+    const bin = path.join(dir, '.venv', 'bin');
+    fs.mkdirSync(bin, { recursive: true });
+    for (const name of ['pylsp', 'python3']) fs.writeFileSync(path.join(bin, name), '', { mode: 0o755 });
+    const pylsp = defaultServers().find((s) => s.name === 'pylsp')!;
+    const venv = process.env.VIRTUAL_ENV;
+    delete process.env.VIRTUAL_ENV;
+    try {
+        const commands = pylsp.commands(dir);
+        assert.deepEqual(commands.slice(0, 2), [
+            { command: path.join(bin, 'pylsp'), args: [] },
+            { command: path.join(bin, 'python3'), args: ['-m', 'pylsp'] },
+        ]);
+        const settings = pylsp.settings!(dir) as { pylsp: { plugins: { jedi?: { environment: string } } } };
+        assert.equal(settings.pylsp.plugins.jedi?.environment, path.join(bin, 'python3'));
+        // Without one, Jedi uses pylsp's own environment.
+        fs.rmSync(path.join(dir, '.venv'), { recursive: true });
+        assert.equal((pylsp.settings!(dir) as typeof settings).pylsp.plugins.jedi, undefined);
+    } finally {
+        if (venv !== undefined) process.env.VIRTUAL_ENV = venv;
+        fs.rmSync(dir, { recursive: true, force: true });
+    }
 });
 
 // ----- Against a fake server --------------------------------------------------------------
@@ -287,7 +312,7 @@ test('completion pops up while typing and confirms with resolved edits', async (
         assert.equal(h.app.editor.buffer.line(1).join(''), '    foo', 'back to the typed word');
         h.type('<Tab><Tab><C-l>');
         await h.until('the import', () => h.app.editor.buffer.text().startsWith('use foo;'));
-        assert.equal(h.app.editor.buffer.text(), 'use foo;\nfn main() {\n    foobar\n}');
+        assert.equal(h.app.editor.buffer.text(), 'use foo;\nfn main() {\n    foobar()\n}', 'with parens, as for a function');
         h.type('<Esc>u');
         assert.equal(h.app.editor.buffer.text(), 'fn main() {\n}', 'one undo step');
     } finally {
@@ -319,6 +344,36 @@ test('saving formats the file and writes it again', async () => {
     } finally {
         h.done();
     }
+});
+
+test('every way a server failed to start is reported', async () => {
+    const dir = tempDir('badls');
+    const file = path.join(dir, 'x.rs');
+    fs.writeFileSync(file, '');
+    const app = new WimApp({
+        path: file,
+        icons: false,
+        clipboard: new MemoryClipboard(),
+        servers: [
+            {
+                name: 'bad',
+                languageId: () => 'rust',
+                commands: () => [
+                    { command: path.join(dir, 'missing'), args: [] },
+                    { command: process.execPath, args: ['-e', 'console.error("no module"); process.exit(1)'] },
+                ],
+                root: () => dir,
+            },
+        ],
+        onFrame: () => {},
+        onQuit: () => {},
+    });
+    app.handleMessage({ t: 'resize', width: 800, height: 600, charW: 10, lineH: 20 });
+    const start = Date.now();
+    while (!app.editor.message?.error && Date.now() - start < 5000) await new Promise((r) => setTimeout(r, 10));
+    assert.match(app.editor.message?.text ?? '', /^bad failed to start: .*missing: spawn .*ENOENT; .* -e .*: no module$/);
+    app.dispose();
+    fs.rmSync(dir, { recursive: true, force: true });
 });
 
 test('a missing server is reported once', async () => {

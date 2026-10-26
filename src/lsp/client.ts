@@ -4,6 +4,7 @@
 import { ChildProcess, spawn } from 'node:child_process';
 import * as path from 'node:path';
 
+import { displayName } from '../paths';
 import { ResponseError, RpcConnection } from './rpc';
 import { ServerCommand, ServerSpec } from './servers';
 import { Encoding, uriFromPath } from './text';
@@ -33,12 +34,14 @@ export class LanguageClient {
     /** Resolves once the server is initialized (true) or has failed (false). */
     private readonly ready: Promise<boolean>;
     private readonly progress = new Map<string | number, ProgressValue>();
+    private readonly settings: Record<string, unknown> | undefined;
 
     constructor(
         readonly spec: ServerSpec,
         readonly root: string,
         private readonly events: ClientEvents,
     ) {
+        this.settings = spec.settings?.(root);
         this.ready = this.start();
     }
 
@@ -70,7 +73,7 @@ export class LanguageClient {
 
     private async start(): Promise<boolean> {
         const commands = this.spec.commands(this.root);
-        let error = `${this.name} was not found (install it, for example with Mason in Neovim)`;
+        const failures: string[] = [];
         for (const command of commands) {
             const failure = await this.tryStart(command);
             if (failure === undefined) {
@@ -78,15 +81,21 @@ export class LanguageClient {
                 this.events.onChange();
                 return true;
             }
-            error = failure;
+            failures.push(`${displayName([command.command, ...command.args].join(' '))}: ${failure}`);
         }
         this.state = 'failed';
-        this.events.onMessage(error, true);
+        this.events.onMessage(
+            failures.length === 0
+                ? `${this.name} was not found (install it, for example with Mason in Neovim)`
+                : `${this.name} failed to start: ${failures.join('; ')}`,
+            true,
+        );
         this.events.onChange();
         return false;
     }
 
-    /** Start and initialize the server with `command`; returns why it failed. */
+    /** Start and initialize the server with `command`; returns why it
+     * failed. */
     private tryStart(command: ServerCommand): Promise<string | undefined> {
         return new Promise((resolve) => {
             let settled = false;
@@ -107,18 +116,18 @@ export class LanguageClient {
                     windowsHide: true,
                 });
             } catch (e) {
-                finish(`${this.name}: ${(e as Error).message}`);
+                finish(spawnError(e as NodeJS.ErrnoException));
                 return;
             }
             proc.stderr!.setEncoding('utf8');
             proc.stderr!.on('data', (chunk: string) => {
                 stderr = (stderr + chunk).slice(-STDERR_TAIL);
             });
-            proc.on('error', (e) => finish(`${this.name}: ${e.message}`));
+            proc.on('error', (e: NodeJS.ErrnoException) => finish(spawnError(e)));
             proc.on('exit', (code, signal) => {
                 const why = stderr.trim().split('\n').pop() || `exit ${signal ?? code}`;
                 if (!settled) {
-                    finish(`${this.name} failed to start: ${why}`);
+                    finish(why);
                     return;
                 }
                 if (this.proc !== proc) return;
@@ -143,7 +152,7 @@ export class LanguageClient {
                     const enc = this.capabilities.positionEncoding;
                     this.encoding = enc === 'utf-8' || enc === 'utf-32' ? enc : 'utf-16';
                     rpc.notify('initialized', {});
-                    if (this.spec.settings) rpc.notify('workspace/didChangeConfiguration', { settings: this.spec.settings });
+                    if (this.settings) rpc.notify('workspace/didChangeConfiguration', { settings: this.settings });
                     finish(undefined);
                 },
                 (e: Error) => {
@@ -151,7 +160,7 @@ export class LanguageClient {
                     // output) when the exit comes in.
                     if (!(e instanceof ResponseError)) return;
                     proc.kill();
-                    finish(`${this.name} failed to initialize: ${e.message}`);
+                    finish(`initialize failed: ${e.message}`);
                 },
             );
         });
@@ -271,7 +280,7 @@ export class LanguageClient {
         switch (method) {
             case 'workspace/configuration': {
                 const p = params as { items: { section?: string }[] };
-                return p.items.map((item) => lookup(this.spec.settings, item.section));
+                return p.items.map((item) => lookup(this.settings, item.section));
             }
             case 'workspace/applyEdit': {
                 const p = params as { edit: WorkspaceEdit };
@@ -327,6 +336,12 @@ export class LanguageClient {
     didClose(uri: string): void {
         this.notify('textDocument/didClose', { textDocument: { uri } });
     }
+}
+
+/** Why a server couldn't be started. */
+function spawnError(e: NodeJS.ErrnoException): string {
+    // macOS's EBADARCH, which Node doesn't name.
+    return e.errno === -86 ? 'built for another CPU architecture' : e.message;
 }
 
 /** A dotted section of the settings, or null. */

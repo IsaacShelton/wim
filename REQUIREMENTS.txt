@@ -42,6 +42,12 @@ made where a request was open to interpretation.
 2.4  Line numbers are relative, with the absolute number on the cursor line
      (Vim's `number` + `relativenumber`). This is the default.
 2.5  Yanked text flashes briefly.
+2.6  Autopairs: closing brackets and quotes are typed with opening ones.
+     Decided: as nvim-autopairs with the Neovim config (its default rules
+     without the `'` rule, and `()` added after confirming a function or
+     method completion). Its fast wrap (Alt+e) is left out. The
+     `autopairs` option (`:set noautopairs`) turns it off, standing in
+     for the config's enable/disable functions.
 
 
 3. Buffers
@@ -95,12 +101,20 @@ made where a request was open to interpretation.
 
 7. Language servers
 -------------------
-7.1  LSP support for Rust and TypeScript (and JavaScript).
-     Decided: rust-analyzer and typescript-language-server, found in
-     Neovim's Mason directory first, then on the PATH, since that is how
-     the user's Neovim finds them. A command that fails to start (such as
-     a rustup proxy with no rust-analyzer installed) falls through to the
-     next one found.
+7.1  LSP support for Rust, TypeScript (and JavaScript) and Python.
+     Decided: rust-analyzer, typescript-language-server and pylsp (with
+     the Neovim config's pycodestyle settings), found in Neovim's Mason
+     directory first, then on the PATH, since that is how the user's
+     Neovim finds them. A project's own copy comes before both
+     (node_modules/.bin; for pylsp, the virtual environment's: .venv,
+     venv or $VIRTUAL_ENV), and pylsp can also run as `python -m pylsp`.
+     Decided: a project's virtual environment is preferred for pylsp, so
+     it sees the project's packages: its pylsp, else its Python with
+     `-m pylsp`, before Mason's; a pylsp from elsewhere gets Jedi's
+     `environment` set to the virtual environment's Python. A command that fails to start (such as a rustup
+     proxy with no rust-analyzer installed, or a Mason install built for
+     another CPU) falls through to the next one found; when none start,
+     the message says why each one failed.
      Decided: features and mappings follow the Neovim config's LspAttach
      mappings, diagnostic settings, nvim-cmp and conform.nvim setup:
      diagnostics (underline, virtual text, signs, update in Insert mode),
