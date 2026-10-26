@@ -1,7 +1,7 @@
 WIM REQUIREMENTS
 ================
 
-Wim is a Vim-like code editor written in Rust. It runs in its own native
+Wim is a Vim-like code editor that runs on Node.js. It runs in its own
 desktop window, not in a terminal.
 
 This file lists what has been asked for so far. "Decided" notes record choices
@@ -10,10 +10,18 @@ made where a request was open to interpretation.
 
 1. Core
 -------
-1.1  Written in Rust.
-1.2  Opens a native desktop window (macOS is the primary platform).
+1.1  Runs from Node.js as a Node project (`node wim.js`), without native code.
+     It was first written in Rust; Rust is no longer a requirement.
+     Decided: ported to TypeScript (compiled to plain JavaScript by `npm
+     install`), rather than compiling the Rust core to WebAssembly.
+1.2  Node opens a native desktop window. Works on macOS and Windows.
+     Decided: on macOS, a Cocoa window with a WebKit view, created through
+     the built-in `osascript` (JavaScript for Automation). On Windows, an
+     Edge app window (Edge ships with Windows; Chrome if Edge is missing),
+     since Windows has no built-in way to host a modern web view without
+     native code. The editor runs in Node and the window only draws.
 1.3  Edits code the way Vim does: Vim modes and Vim motions.
-1.4  Opens a file given on the command line: `wim path/to/file`.
+1.4  Opens a file given on the command line: `node wim.js path/to/file`.
 
 
 2. Vim editing
@@ -70,3 +78,5 @@ made where a request was open to interpretation.
      text editing.
      Decided: Option+Delete (the ⌫ key) deletes the word before the cursor;
      Option+fn+Delete (⌦) deletes the word after it.
+     Decided: on Windows, Alt stands in for Option, both for these keys and
+     for the Option mappings in 5.2; Cmd shortcuts are Ctrl+Shift there.

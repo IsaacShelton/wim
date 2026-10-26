@@ -1,0 +1,23 @@
+{
+  "name": "wim",
+  "version": "0.1.0",
+  "description": "A Vim-like code editor that runs in its own window, driven by Node.js",
+  "license": "UNLICENSED",
+  "private": true,
+  "bin": {
+    "wim": "wim.js"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "build": "tsc -p . && tsc -p src/ui",
+    "prepare": "npm run build",
+    "test": "npm run build && node --test",
+    "start": "node wim.js"
+  },
+  "devDependencies": {
+    "@types/node": "^20.19.0",
+    "typescript": "~5.9.3"
+  }
+}

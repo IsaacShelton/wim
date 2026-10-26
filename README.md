@@ -1,29 +1,56 @@
 # Wim
 
-A Vim-like code editor in Rust that runs in a native desktop window
-(eframe/egui). Not a terminal app: Wim draws its own window.
+A Vim-like code editor that runs on Node.js in its own window. Not a terminal
+app: Wim opens a native window, without any native code of its own.
 
 ```sh
-cargo run --release -- path/to/file.rs
+npm install            # installs the TypeScript compiler (development only)
+node wim.js path/to/file.rs
 ```
+
+Requires Node.js 20 or later. `wim.js` compiles the TypeScript sources into `dist/` on first run,
+and again whenever they change. Wim runs until its window closes.
+
+## The window
+
+The editor runs in Node; the window only draws frames and forwards input, over
+a WebSocket on localhost that only accepts this session's token.
+
+| Platform | Window |
+| --- | --- |
+| macOS | A Cocoa window with a WebKit view, created through `osascript` (JavaScript for Automation), which ships with macOS |
+| Windows | A Microsoft Edge app window (no tabs or address bar). Edge ships with Windows 10 and 11; Chrome is used if Edge is missing |
+| Linux | An app window from Edge, Chrome, Chromium or Brave |
+
+`--window=webkit|chromium|browser|none` picks one explicitly (`browser` uses the
+default browser, `none` prints the address). `WIM_BROWSER` points at a specific
+Chromium-based browser.
+
+File icons need a Nerd Font installed (for example FiraMono Nerd Font); without
+one the tree shows plain folder arrows.
 
 ## Layout
 
 | Path | Purpose |
 | --- | --- |
-| `src/editor/` | Editor core, independent of the GUI and unit tested |
-| `src/editor/command.rs` | Parses Normal/Visual key sequences (`"a3d2w`, `ci(`, `gUiw`) into commands |
-| `src/editor/motion.rs`, `textobj.rs`, `ops.rs` | Motions, text objects, operators |
-| `src/editor/buffers.rs` | Multiple buffers and file I/O |
-| `src/editor/ex.rs` | `:` commands |
-| `src/editor/search.rs` | Translates Vim regex syntax to the `regex` crate |
-| `src/highlight.rs` | Syntax highlighting for Rust, C/C++, JS/TS, Python, Go, Java-likes, shell, Lua, JSON and config files |
-| `src/filetree.rs` | The sidebar file tree |
-| `src/keymap.rs` | Key mappings translated from `~/.config/nvim/init.lua` |
-| `src/icons.rs` | File icons, generated from nvim-web-devicons plus `~/.config/nvim/lua/dev_icons.lua` |
-| `src/app.rs` | Window: translates input and paints the tree, buffer tabs, text, gutter, cursor, status line and command line |
+| `wim.js` | Entry point |
+| `src/editor/` | Editor core, independent of the window and unit tested |
+| `src/editor/command.ts` | Parses Normal/Visual key sequences (`"a3d2w`, `ci(`, `gUiw`) into commands |
+| `src/editor/motion.ts`, `textobj.ts`, `ops.ts` | Motions, text objects, operators |
+| `src/editor/buffers.ts` | Multiple buffers and file I/O |
+| `src/editor/ex.ts` | `:` commands |
+| `src/editor/search.ts` | Translates Vim regex syntax to JavaScript regular expressions |
+| `src/highlight.ts` | Syntax highlighting for Rust, C/C++, JS/TS, Python, Go, Java-likes, shell, Lua, JSON and config files |
+| `src/filetree.ts` | The sidebar file tree |
+| `src/keymap.ts` | Key mappings translated from `~/.config/nvim/init.lua` |
+| `src/icons.ts` | File icons, generated from nvim-web-devicons plus `~/.config/nvim/lua/dev_icons.lua` |
+| `src/app.ts` | Window logic: routes input (mappings, focus, mouse) and paints the tree, buffer tabs, text, gutter, cursor, status line and command line as drawing commands |
+| `src/window.ts` | Opens the window on each platform |
+| `src/server.ts`, `src/protocol.ts` | The local page and WebSocket, and the messages they carry |
+| `src/ui/client.ts` | The window's side: draws frames on a canvas and sends input back |
+| `src/clipboard.ts` | System clipboard through `pbcopy`/`pbpaste`, PowerShell, or `wl-clipboard`/`xclip`/`xsel` |
 
-Run the tests with `cargo test`.
+Run the tests with `npm test`.
 
 ## Supported Vim features
 
@@ -96,6 +123,9 @@ Normal-mode mappings don't apply in the middle of a command, so `f,` still finds
 | Option+c / Option+d (`ç` `∂`) | Normal | Insert the next typed character before / after the cursor |
 | Esc | Normal | Also clears search highlighting |
 
+On Windows and Linux, Alt works like Option in these mappings (Alt+j is `}`, Alt+Shift+j moves
+lines, and so on).
+
 Mappings for plugins Wim doesn't have (Telescope, LSP, gitsigns, nvim-spider, the theme
 toggle, Rust auto-import) are left out, as are `<C-y>` (jump list) and the `=` re-indent
 step of the line-moving mappings.
@@ -117,8 +147,10 @@ the absolute number on the cursor line), `ignorecase`, `smartcase`, `hlsearch`,
 `clipboard=unnamed`. Each supports the `no`, `!` and `?` forms.
 
 **Desktop additions:** click to place the cursor, drag to select, Cmd+C / Cmd+X copy or cut the
-selection, Cmd+V pastes, Cmd+S saves, Cmd+= / Cmd+- zoom. Closing the window with unsaved changes
-shows a warning first; closing again discards the changes.
+selection, Cmd+V pastes, Cmd+S saves, Cmd+= / Cmd+- / Cmd+0 zoom, Cmd+W / Cmd+Q close. On Windows
+and Linux these are Ctrl+Shift+C, Ctrl+Shift+V and so on, since Ctrl alone belongs to Vim. Closing
+the macOS window with unsaved changes shows a warning first; closing again discards the changes. In
+an Edge or Chrome window, the browser asks before closing with unsaved changes instead.
 
 ## Not supported yet
 

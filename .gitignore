@@ -1,1 +1,4 @@
+/node_modules
+/dist
+# Build output from the old Rust version.
 /target
