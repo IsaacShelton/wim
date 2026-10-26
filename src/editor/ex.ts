@@ -71,7 +71,7 @@ function exCommand(ed: Editor, input: string): void {
         case 'xit':
         case 'exit': {
             const needsWrite = name === 'wq' || ed.isModified() || args !== '';
-            if (!needsWrite || writeFile(ed, pathArg(args))) ed.requestQuit(bang);
+            if (!needsWrite || writeFile(ed, pathArg(args))) ed.quitBuffer(bang);
             return;
         }
         case 'wqa':
@@ -82,11 +82,13 @@ function exCommand(ed: Editor, input: string): void {
             return;
         case 'q':
         case 'quit':
+        case 'clo':
+        case 'close':
+            ed.quitBuffer(bang);
+            return;
         case 'qa':
         case 'qall':
         case 'quitall':
-        case 'clo':
-        case 'close':
             ed.requestQuit(bang);
             return;
         case 'e':

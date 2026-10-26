@@ -257,6 +257,18 @@ export class Editor {
         return true;
     }
 
+    /** Close the active buffer (`:q`), or the window when it is the last one.
+     * Refuses (with a message) when it has unsaved changes unless `force` is set. */
+    quitBuffer(force: boolean): boolean {
+        if (this.buffers.length === 1) return this.requestQuit(force);
+        if (this.isModified() && !force) {
+            this.setError('E37: No write since last change (add ! to override)');
+            return false;
+        }
+        buffers.deleteBuffer(this, undefined, true);
+        return true;
+    }
+
     // ----- Buffers -------------------------------------------------------------
 
     bufferId(): number {
@@ -544,10 +556,10 @@ export class Editor {
                 ops.increment(this, a.n * count);
                 break;
             case 'WriteQuit':
-                if (!this.isModified() || buffers.writeFile(this, undefined)) this.quitRequested = true;
+                if (!this.isModified() || buffers.writeFile(this, undefined)) this.quitBuffer(false);
                 break;
             case 'QuitForce':
-                this.quitRequested = true;
+                this.quitBuffer(true);
                 break;
             case 'FileInfo':
                 this.showFileInfo();

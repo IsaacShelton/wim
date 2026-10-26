@@ -327,15 +327,20 @@ test('multiple buffers', () => {
     ed.openFile(a);
     assert.equal(ed.bufferList().length, 2, 'reopening reuses the buffer');
 
-    // Quitting is refused while another buffer has changes.
-    ed.handleKeys(parseKeys(':bn<CR>dd:bn<CR>:q<CR>'));
+    // Quitting everything is refused while another buffer has changes.
+    ed.handleKeys(parseKeys(':bn<CR>dd:bn<CR>:qa<CR>'));
     assert.ok(!ed.quitRequested);
     assert.ok(ed.message!.text.includes('E162'));
-    // Closing the (unmodified) active buffer `a` leaves the modified `b`.
-    ed.handleKeys(parseKeys(':bd<CR>'));
+    // `:q` closes just the (unmodified) active buffer `a`, leaving the modified `b`.
+    ed.handleKeys(parseKeys(':q<CR>'));
+    assert.ok(!ed.quitRequested);
     assert.equal(ed.bufferList().length, 1);
     assert.equal(ed.buffer.text(), '');
     assert.ok(ed.isModified());
+    // The last buffer still guards its changes before quitting.
+    ed.handleKeys(parseKeys(':q<CR>'));
+    assert.ok(!ed.quitRequested);
+    assert.ok(ed.message!.text.includes('E37'));
     fs.rmSync(dir, { recursive: true });
 });
 

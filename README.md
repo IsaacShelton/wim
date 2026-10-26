@@ -1,4 +1,4 @@
-# Wim
+# Wim (Windowed Vim-esque Editor)
 
 A Vim-like code editor that runs on Node.js in its own window. Not a terminal
 app: Wim opens a native window, without any native code of its own.
@@ -86,7 +86,8 @@ word in Normal mode, and Option+Delete deletes a word on the command line.
 each buffer keeps its own cursor, undo history and marks. `:ls`, `:b N`, `:b name`, `:b#`,
 `<C-^>` (alternate buffer), `:bn`, `:bp`, `:bfirst`, `:blast`, `:bd[!] [N]`, `:enew`, `:wa`,
 `:wqa`/`:xa`. A tab line across the top shows the open buffers when there is more than one;
-click a tab to switch. `:q` refuses while any buffer has unsaved changes.
+click a tab to switch. `:q`, `:wq`, `:x`, `ZZ` and `ZQ` close the current buffer, and quit only
+when it is the last one; `:qa` quits everything and refuses while any buffer has unsaved changes.
 
 **File tree:** Ctrl+n shows or hides a sidebar tree of the working directory and focuses it,
 set up like the nvim-tree config: 30 columns wide, Nerd Font folder and file icons (from an
