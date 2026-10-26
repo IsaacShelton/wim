@@ -22,6 +22,11 @@ made where a request was open to interpretation.
      native code. The editor runs in Node and the window only draws.
 1.3  Edits code the way Vim does: Vim modes and Vim motions.
 1.4  Opens a file given on the command line: `node wim.js path/to/file`.
+1.5  Given a directory (`wim .`), Wim works in that directory and starts
+     with no file open; Ctrl+n shows the tree to open files from.
+     Decided: the directory becomes the working directory, so the tree and
+     relative paths start there. "No file open" is one empty, unnamed
+     buffer, as when Wim starts with no argument.
 
 
 2. Vim editing
@@ -59,6 +64,11 @@ made where a request was open to interpretation.
      Neovim setup (nvim-web-devicons, ~/.config/nvim/lua/dev_icons.lua and
      the nvim-tree options in ~/.config/nvim/init.lua). Icons come from an
      installed Nerd Font.
+4.4  `a` in the tree creates a file.
+     Decided: as in nvim-tree, the prompt starts with the selected folder
+     (or the selected file's folder), relative to the tree's root; a
+     trailing `/` makes a folder, missing folders are made, and the new
+     entry is selected while the tree keeps focus.
 
 
 5. Windows and key bindings

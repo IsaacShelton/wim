@@ -1,5 +1,6 @@
-// Entry point: `node wim.js [file]`. Starts the editor, serves its window's
-// page on localhost and opens the window. Wim exits when the window closes.
+// Entry point: `node wim.js [file or directory]`. Starts the editor, serves
+// its window's page on localhost and opens the window. Wim exits when the
+// window closes.
 
 import { WimApp } from './app';
 import { findNerdFont } from './fonts';
@@ -7,7 +8,7 @@ import { ClientMessage, ServerMessage } from './protocol';
 import { WebSocketConnection, startServer } from './server';
 import { WindowHandle, WindowKind, openWindow } from './window';
 
-const USAGE = `Usage: wim [options] [file]
+const USAGE = `Usage: wim [options] [file or directory]
 
 Options:
   --window=KIND  How to show Wim: auto (default), webkit (macOS), chromium

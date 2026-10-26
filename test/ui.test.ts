@@ -133,6 +133,62 @@ test('Ctrl+n toggles the file tree and Ctrl+h/l move focus', () => {
     }
 });
 
+test('a directory argument becomes the working directory, with no file open', () => {
+    const dir = tempDir('app-dir');
+    fs.mkdirSync(path.join(dir, 'src'));
+    fs.writeFileSync(path.join(dir, 'src', 'main.rs'), 'fn main() {}\n');
+    const cwd = process.cwd();
+    try {
+        const h = harness(dir);
+        assert.equal(process.cwd(), dir);
+        assert.equal(h.app.editor.filePath, undefined);
+        assert.equal(h.app.editor.message, undefined, 'no error about the directory');
+        assert.match(h.text(), /\[No Name\]/);
+        h.type('<C-n><CR>j<CR>');
+        assert.equal(h.app.editor.filePath, path.join(dir, 'src', 'main.rs'));
+        assert.equal(h.app.editor.buffer.text(), 'fn main() {}');
+    } finally {
+        process.chdir(cwd);
+        fs.rmSync(dir, { recursive: true });
+    }
+});
+
+test('a in the tree creates files and directories', () => {
+    const dir = tempDir('app-create');
+    fs.mkdirSync(path.join(dir, 'src'));
+    fs.writeFileSync(path.join(dir, 'src', 'main.rs'), '');
+    const cwd = process.cwd();
+    process.chdir(dir);
+    try {
+        const h = harness();
+        // On a directory, the prompt starts in it.
+        h.type('<C-n>a');
+        assert.match(h.text(), /Create File/);
+        assert.match(h.text(), new RegExp(`src\\${path.sep}`));
+        h.type('lib.rs<CR>');
+        assert.ok(fs.existsSync(path.join(dir, 'src', 'lib.rs')));
+        assert.match(h.text(), /TREE/, 'the tree keeps focus');
+        assert.match(h.text(), /lib\.rs/);
+        // On a file, it starts in the file's directory; missing directories
+        // are made, and a trailing slash makes a directory.
+        h.type('a<C-u>deep/er/x.txt<CR>');
+        assert.ok(fs.existsSync(path.join(dir, 'deep', 'er', 'x.txt')));
+        h.type('a<C-u>empty/<CR>');
+        assert.ok(fs.statSync(path.join(dir, 'empty')).isDirectory());
+        h.type('a<C-u>deep/er/x.txt<CR>');
+        assert.match(h.app.editor.message?.text ?? '', /already exists/);
+        // Escape cancels.
+        h.type('anever<Esc>');
+        assert.ok(!fs.existsSync(path.join(dir, 'never')));
+        // A new file is selected, ready to open.
+        h.type('a<C-u>new.txt<CR><CR>');
+        assert.equal(h.app.editor.filePath, path.join(dir, 'new.txt'));
+    } finally {
+        process.chdir(cwd);
+        fs.rmSync(dir, { recursive: true });
+    }
+});
+
 test('clicking places the cursor and dragging selects', () => {
     const h = harness();
     h.type('ione two<CR>three<Esc>');

@@ -2,6 +2,7 @@
 // editor state (file tree, buffer tabs, text, gutter, selection, cursor,
 // status and command lines) as a list of drawing commands for the window.
 
+import * as fs from 'node:fs';
 import * as path from 'node:path';
 
 import { Clipboard, SystemClipboard } from './clipboard';
@@ -144,12 +145,23 @@ export class WimApp {
     constructor(private readonly opts: AppOptions) {
         this.icons = opts.icons;
         this.clipboard = opts.clipboard ?? new SystemClipboard();
+        // `wim .` or `wim some/dir`: work in that directory, with no file open.
+        let file = opts.path;
+        let dirError: string | undefined;
+        if (file !== undefined && isDirectory(file)) {
+            try {
+                process.chdir(file);
+            } catch (e) {
+                dirError = `E344: Can't find directory "${file}": ${(e as Error).message}`;
+            }
+            file = undefined;
+        }
         // Launched from a file manager the working directory may be the root;
         // use the file's directory instead so the tree and relative paths are
         // useful.
         const cwd = process.cwd();
-        if (path.dirname(cwd) === cwd && opts.path !== undefined) {
-            const dir = path.dirname(path.resolve(opts.path));
+        if (path.dirname(cwd) === cwd && file !== undefined) {
+            const dir = path.dirname(path.resolve(file));
             try {
                 process.chdir(dir);
             } catch {
@@ -170,7 +182,8 @@ export class WimApp {
         });
         this.completion = new Completion(this.editor, this.lsp, refresh);
         this.editor.userCommand = (name, args) => this.userCommand(name, args);
-        if (opts.path !== undefined) this.editor.openFile(opts.path);
+        if (file !== undefined) this.editor.openFile(file);
+        if (dirError !== undefined) this.editor.setError(dirError);
         const root = currentDir();
         this.tree = new FileTree(root);
         this.treeCwd = root;
@@ -246,9 +259,13 @@ export class WimApp {
     private key(key: KeyInput): void {
         this.closeWarned = false;
         if (this.picker) {
-            if (!this.picker.key(key)) {
-                this.picker = undefined;
-                if (key.key === 'Enter') this.focus = 'Editor';
+            const picker = this.picker;
+            const before = [this.editor.bufferId(), this.editor.cursor];
+            if (!picker.key(key)) {
+                if (this.picker === picker) this.picker = undefined;
+                // A choice that went somewhere (a symbol from the tree, say)
+                // moves to the editor to show it.
+                if (this.editor.bufferId() !== before[0] || this.editor.cursor !== before[1]) this.focus = 'Editor';
             }
             return;
         }
@@ -454,6 +471,19 @@ export class WimApp {
                 break;
             case 'FocusEditor':
                 this.focus = 'Editor';
+                break;
+            case 'Create':
+                this.picker = new Picker<never>('Create File', () => {}, {
+                    initialQuery: this.tree.promptPath(action.dir),
+                    onInput: (name) => {
+                        if (name.trim() === '') return;
+                        try {
+                            this.tree.create(name);
+                        } catch (e) {
+                            this.editor.setError(`Can't create ${name}: ${(e as Error).message}`);
+                        }
+                    },
+                });
                 break;
         }
     }
@@ -689,6 +719,14 @@ export class WimApp {
         const o = this.editor.options;
         if (!o.number && !o.relativenumber) return this.signCols();
         return this.signCols() + Math.max(String(this.editor.buffer.lineCount()).length, 3) + 1;
+    }
+}
+
+function isDirectory(p: string): boolean {
+    try {
+        return fs.statSync(p).isDirectory();
+    } catch {
+        return false;
     }
 }
 

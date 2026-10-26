@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-// Wim: a Vim-like code editor. Usage: node wim.js [file]
+// Wim: a Vim-like code editor. Usage: node wim.js [file or directory]
 //
 // Builds itself first when the compiled code in dist/ is missing or older
 // than the sources (npm may be set to skip the `prepare` build script).

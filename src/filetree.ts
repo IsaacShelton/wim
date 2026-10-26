@@ -2,8 +2,8 @@
 //
 // Keys while it has focus: `j`/`k` move, `gg`/`G` jump, `<CR>`/`o` open a
 // file or toggle a directory, `l` expands, `h` collapses (or goes to the
-// parent), `R` re-reads the disk, `q` hides the tree, `<Esc>` returns to the
-// editor.
+// parent), `a` creates a file or directory, `R` re-reads the disk, `q` hides
+// the tree, `<Esc>` returns to the editor.
 
 import { spawnSync } from 'node:child_process';
 import * as fs from 'node:fs';
@@ -25,7 +25,13 @@ export interface Row {
     empty: boolean;
 }
 
-export type TreeAction = { t: 'None' } | { t: 'Open'; path: string } | { t: 'Close' } | { t: 'FocusEditor' };
+export type TreeAction =
+    | { t: 'None' }
+    | { t: 'Open'; path: string }
+    | { t: 'Close' }
+    | { t: 'FocusEditor' }
+    /** Ask for the name of a file to create in `dir`. */
+    | { t: 'Create'; dir: string };
 
 const NONE: TreeAction = { t: 'None' };
 
@@ -141,6 +147,40 @@ export class FileTree {
         return NONE;
     }
 
+    /** The directory new files go in: the selected directory, or the
+     * selected file's. */
+    private selectedDir(): string {
+        const row = this.rows[this.selected];
+        if (!row) return this.root;
+        return row.isDir ? row.path : path.dirname(row.path);
+    }
+
+    /** Create `name` (relative to the tree's root) as nvim-tree's `a` does: a
+     * trailing slash makes a directory, and missing parent directories are
+     * created too. Selects it and returns its path; throws if it exists or
+     * can't be made. */
+    create(name: string): string {
+        const dir = /[\\/]$/.test(name);
+        const p = path.resolve(this.root, name);
+        if (fs.existsSync(p)) throw new Error('it already exists');
+        if (dir) {
+            fs.mkdirSync(p, { recursive: true });
+        } else {
+            fs.mkdirSync(path.dirname(p), { recursive: true });
+            fs.writeFileSync(p, '', { flag: 'wx' });
+        }
+        this.refresh();
+        this.reveal(p);
+        return p;
+    }
+
+    /** `dir` as typed in a prompt: relative to the root, with a trailing
+     * separator (empty for the root itself). */
+    promptPath(dir: string): string {
+        const rel = stripPrefix(dir, this.root);
+        return rel === undefined ? dir + path.sep : rel === '' ? '' : rel + path.sep;
+    }
+
     private collapseOrParent(): void {
         const row = this.rows[this.selected];
         if (!row) return;
@@ -183,6 +223,7 @@ export class FileTree {
             if (row && !row.expanded) return this.activate();
         } else if ((k === 'h' && plain) || k === 'Left') this.collapseOrParent();
         else if (k === 'R' && plain) this.refresh();
+        else if (k === 'a' && plain) return { t: 'Create', dir: this.selectedDir() };
         else if (k === 'q' && plain) return { t: 'Close' };
         else if (k === 'Esc') return { t: 'FocusEditor' };
         return NONE;
