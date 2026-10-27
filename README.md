@@ -4,6 +4,12 @@ A Vim-like, personalized code editor created on a wim. It's a Windowed Vim-esque
 
 ![Wim editing a file](.github/screenshot1.png)
 
+![Wim screenshot 2](.github/screenshot2.png)
+
+![Wim screenshot 3](.github/screenshot3.png)
+
+![Wim screenshot 4](.github/screenshot4.png)
+
 Despite being Vim-like, Wim runs as a native window and not as a terminal app.
 
 Wim uses Node.js and opens a native window, without any native code of its own.
