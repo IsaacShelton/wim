@@ -232,13 +232,13 @@ async function chat(h: Harness, message: string): Promise<FakeQuery> {
     return q;
 }
 
-test('Cmd+L shows the Claude panel at its prompt, and Ctrl+h / Ctrl+l move between it and the editor', () => {
+test('Cmd+L shows the agents panel at its prompt, and Ctrl+h / Ctrl+l move between it and the editor', () => {
     const h = harness();
-    assert.doesNotMatch(h.text(), /CLAUDE/);
-    assert.match(h.text(), /✻ Claude/, 'the badge in the status line');
+    assert.doesNotMatch(h.text(), / AGENT /);
+    assert.match(h.text(), /✻ Agents/, 'the badge in the status line');
     h.send({ t: 'command', name: 'agents' });
-    assert.match(h.text(), /CLAUDE/);
-    assert.match(h.text(), /Ask Claude…/);
+    assert.match(h.text(), / AGENT /);
+    assert.match(h.text(), /Ask the agent…/);
     assert.match(h.text(), /New session/);
     // Typing goes to the prompt, not the buffer.
     h.type('ihello');
@@ -247,7 +247,7 @@ test('Cmd+L shows the Claude panel at its prompt, and Ctrl+h / Ctrl+l move betwe
     h.type('<Esc><C-h>');
     assert.match(h.text(), /NORMAL/);
     h.type('<C-l>');
-    assert.match(h.text(), /CLAUDE/);
+    assert.match(h.text(), / AGENT /);
     // From the panel, Cmd+L hides it.
     h.send({ t: 'command', name: 'agents' });
     assert.doesNotMatch(h.text(), /New session/);
@@ -364,7 +364,7 @@ test('a permission prompt takes the keys: a number chooses, Esc denies, and "no"
     await settle();
     h.type('3');
     await settle();
-    assert.match(h.text(), /Tell Claude what to do instead/);
+    assert.match(h.text(), /Tell the agent what to do instead/);
     h.type('use a temp dir<CR>');
     const feedback = await answer;
     assert.equal(feedback?.behavior, 'deny');
@@ -376,7 +376,7 @@ test('a permission prompt takes the keys: a number chooses, Esc denies, and "no"
     h.send({ t: 'command', name: 'agents' });
     h.send({ t: 'command', name: 'agents' });
     await settle();
-    assert.match(h.text(), /Claude needs you/);
+    assert.match(h.text(), /Agents need you/);
     // Clicking a choice answers too.
     h.send({ t: 'command', name: 'agents' });
     const yes = h.last().find((c) => c[0] === 'text' && c[3] === 'Yes');
@@ -444,13 +444,13 @@ test('the model, permission mode and effort can be changed', async () => {
     assert.equal(h.backend.last.opts.permissionMode, 'plan');
 });
 
-test('Ctrl+c interrupts Claude, and clears the prompt when Claude is idle', async () => {
+test('Ctrl+x interrupts Claude, and Ctrl+c leaves the prompt as Esc does', async () => {
     const h = harness();
     const q = await chat(h, 'do a long thing');
     for (const m of streamText('Starting')) q.emit(m);
     await settle();
     assert.match(h.text(), /Working…/);
-    h.send({ t: 'key', key: 'c', ctrl: true, alt: false });
+    h.send({ t: 'key', key: 'x', ctrl: true, alt: false });
     await settle();
     assert.equal(q.interrupts, 1);
     assert.doesNotMatch(h.text(), /Working…/);
@@ -467,9 +467,33 @@ test('Ctrl+c interrupts Claude, and clears the prompt when Claude is idle', asyn
     await settle();
     assert.doesNotMatch(h.text(), /Stopped by an error/);
     assert.equal(h.text().match(/Interrupted/g)?.length, 1);
+    // Ctrl+c doesn't interrupt: it goes to Normal mode, keeping the draft,
+    // and from there to the editor.
+    h.type('go on<CR>');
+    await settle();
     h.type('draft');
     h.send({ t: 'key', key: 'c', ctrl: true, alt: false });
+    assert.equal(q.interrupts, 1);
+    assert.match(h.text(), /Working…/);
+    assert.match(h.text(), /draft/);
+    assert.match(h.text(), /i to type/);
+    h.type('j');
+    assert.match(h.text(), /\ndraft\n/, 'j scrolled rather than typed');
+    h.send({ t: 'key', key: 'c', ctrl: true, alt: false });
+    assert.match(h.text(), /NORMAL/);
+    // `S` clears the prompt and types in it.
+    h.send({ t: 'command', name: 'agents' });
+    h.type('<Esc>S');
     assert.doesNotMatch(h.text(), /draft/);
+    h.type('fresh');
+    assert.match(h.text(), /fresh/);
+    h.type('<Esc><C-h>');
+    // With Claude idle, Ctrl+x only says so.
+    q.emit(result());
+    await settle();
+    h.send({ t: 'command', name: 'agents' });
+    h.send({ t: 'key', key: 'x', ctrl: true, alt: false });
+    assert.match(h.text(), /The agent isn't working on anything/);
     assert.equal(q.interrupts, 1);
 });
 
@@ -532,9 +556,9 @@ test('the context is broken down by kind, and help lists the keys', async () => 
     assert.match(h.text(), /System tools/);
     assert.match(h.text(), /Free space/);
     h.type('c?');
-    assert.match(h.text(), /Keys in the Claude panel/);
+    assert.match(h.text(), /Keys in the agents panel/);
     h.type('?');
-    assert.doesNotMatch(h.text(), /Keys in the Claude panel/);
+    assert.doesNotMatch(h.text(), /Keys in the agents panel/);
 });
 
 test('the conversation scrolls, and follows the end until scrolled up', async () => {
@@ -557,11 +581,11 @@ test('the conversation scrolls, and follows the end until scrolled up', async ()
     assert.doesNotMatch(h.text(), /line number 61/);
 });
 
-test(':Claude shows the panel, and with a message sends it', async () => {
+test(':Agents shows the panel, and with a message sends it', async () => {
     const h = harness();
-    h.type(':Claude explain this<CR>');
+    h.type(':Agents explain this<CR>');
     await settle();
-    assert.match(h.text(), /CLAUDE/);
+    assert.match(h.text(), / AGENT /);
     assert.deepEqual(h.backend.last.sent, ['explain this']);
 });
 
@@ -572,7 +596,7 @@ test('when Claude Code stops, the next message starts it again on the same sessi
     await settle();
     q.fail('process exited with code 1');
     await settle();
-    assert.match(h.text(), /Claude Code stopped: process exited with code 1/);
+    assert.match(h.text(), /The agent stopped: process exited with code 1/);
     h.type('two<CR>');
     await settle();
     assert.equal(h.backend.queries.length, 2);

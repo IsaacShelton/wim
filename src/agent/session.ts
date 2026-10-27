@@ -297,7 +297,7 @@ export class AgentSession {
                 },
             });
         } catch (e) {
-            this.notice(`Can't start Claude Code: ${(e as Error).message}`, true);
+            this.notice(`Can't start the agent: ${(e as Error).message}`, true);
             return undefined;
         }
         if (this.closed) {
@@ -320,7 +320,7 @@ export class AgentSession {
         } catch (e) {
             if (!this.closed) {
                 const detail = this.stderr.trim().split('\n').slice(-3).join(' ');
-                this.notice(`Claude Code stopped: ${(e as Error).message}${detail ? ` (${detail})` : ''}`, true);
+                this.notice(`The agent stopped: ${(e as Error).message}${detail ? ` (${detail})` : ''}`, true);
             }
         }
         input.end();
@@ -553,12 +553,12 @@ export class AgentSession {
                     choices.push({ label: `Yes, and ${describeUpdates(suggestions)}`, allow: true, updates: suggestions });
                 }
                 choices.push({ label: 'No', allow: false });
-                choices.push({ label: 'No, and tell Claude what to do instead', allow: false, feedback: true });
+                choices.push({ label: 'No, and tell the agent what to do instead', allow: false, feedback: true });
                 prompt = {
                     t: 'Permission',
                     tool: toolName,
                     input,
-                    title: options.title ?? `Claude wants to use ${options.displayName ?? toolName}`,
+                    title: options.title ?? `The agent wants to use ${options.displayName ?? toolName}`,
                     description: options.description ?? options.decisionReason,
                     choices,
                     defaultToNo: Boolean(options.defaultToNo),

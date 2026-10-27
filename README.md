@@ -58,7 +58,7 @@ one the tree shows plain folder arrows.
 | `src/finder.ts` | Finding files and searching text for the pickers, with ripgrep or without it |
 | `src/image.ts`, `src/imageview.ts` | Which files are images, their format and size, and zooming them |
 | `src/audio.ts` | Which files are sounds, and the player's state |
-| `src/agent/` | The Claude Code panel: `backend.ts` (Claude Code through the Claude Agent SDK), `session.ts` (one session: its conversation, prompts and settings), `transcript.ts` (the conversation laid out as rows), `input.ts` (the prompt), `panel.ts` (sessions, keys, mouse and painting) |
+| `src/agent/` | The agents panel: `backend.ts` (Claude Code through the Claude Agent SDK), `session.ts` (one session: its conversation, prompts and settings), `transcript.ts` (the conversation laid out as rows), `input.ts` (the prompt), `panel.ts` (sessions, keys, mouse and painting) |
 
 Run the tests with `npm test`.
 
@@ -214,11 +214,11 @@ buffers (the status line shows it) and stops when its buffer is closed; one soun
 time. Like images, sound buffers can't be changed or written. Which formats play depends on the
 window's browser engine; if one can't, the player says so.
 
-## Claude Code
+## Agents
 
-Cmd+L (Ctrl+Shift+L on Windows and Linux), `,cc` or `:Claude` shows a panel on the right for
-chatting with Claude Code, and moves to it; Cmd+L from the panel hides it again. `:Claude
-message` also sends the message. The `✻ Claude` badge at the end of the status line shows and
+Cmd+L (Ctrl+Shift+L on Windows and Linux), `,cc` or `:Agents` shows the agents panel on the
+right for chatting with Claude Code, and moves to it; Cmd+L from the panel hides it again.
+`:Agents message` also sends the message. The `✻ Agents` badge at the end of the status line shows and
 hides the panel too when clicked; it turns orange when a session is waiting for an answer, and
 spins while Claude works.
 
@@ -237,11 +237,12 @@ permission mode, effort, context use and cost, each clickable.
 The panel has two modes, like Vim. In the prompt at the bottom, Enter sends (a `\` before it,
 or Option/Alt with it, makes a new line instead), Up/Down go through earlier messages, Esc
 goes to Normal mode, and the usual text field keys work (Option+Left/Right, Option+Delete,
-Ctrl+a/e/w/u). In Normal mode:
+Ctrl+a/e/w/u). Ctrl+c is Esc there too. In Normal mode:
 
 | Keys | Action |
 | --- | --- |
 | `i` `a` Enter | Type in the prompt |
+| `S` | Clear the prompt and type in it |
 | `j` `k`, Ctrl+d/u/e/y/f/b, `gg` `G`, the wheel | Scroll the conversation (it follows new replies unless scrolled up) |
 | Tab `]` `[` `gt` `gT` `1`–`9` | Next, previous or Nth session |
 | `n` / `s` / `x` | New session / pick a session, open or saved, to switch to or resume / close a session (stopping its process; twice if Claude is working) |
@@ -251,7 +252,7 @@ Ctrl+a/e/w/u). In Normal mode:
 | `y` | Copy the last reply |
 | `?` | All of these keys |
 | `q` / Esc / Ctrl+h | Hide the panel / back to the editor / back to the editor (Ctrl+l from the rightmost window returns) |
-| Ctrl+c | Interrupt Claude (or clear the prompt), in either mode |
+| Ctrl+x | Interrupt Claude, in either mode (Ctrl+c is Esc, as in the editor) |
 
 When Claude wants to use a tool that needs permission, the prompt shows what it will do (the
 command, a diff, the plan) and takes the keys: `1`–`4` or the arrows and Enter pick Yes, Yes
@@ -288,7 +289,7 @@ Normal-mode mappings don't apply in the middle of a command, so `f,` still finds
 | Ctrl+h/j/k/l | Insert | Move the cursor left/down/up/right |
 | Tab / Shift+Tab | Normal | Next / previous buffer |
 | Ctrl+n | Normal | Toggle the file tree |
-| `,cc` (or Cmd+L) | Normal | Show the Claude Code panel (see [Claude Code](#claude-code)) |
+| `,cc` (or Cmd+L) | Normal | Show the agents panel (see [Agents](#agents)) |
 | `,th` | Normal | Switch between Wim's colors (One Dark) and Nord |
 | Ctrl+y | Normal | Forward in the jump list (`<C-i>`, which is Tab in a terminal) |
 | `,w` `,b` `,e` `,ge` | Normal, Visual, after an operator | Like `w`, `b`, `e`, `ge` for subwords (nvim-spider): camelCase humps, snake_case parts and digit runs; single punctuation is skipped |
@@ -348,7 +349,7 @@ the absolute number on the cursor line), `ignorecase`, `smartcase`, `hlsearch`,
 `clipboard=unnamed`. Each supports the `no`, `!` and `?` forms.
 
 **Desktop additions:** click to place the cursor, drag to select, Cmd+C / Cmd+X copy or cut the
-selection, Cmd+V pastes, Cmd+S saves, Cmd+L shows the Claude Code panel, Cmd+= / Cmd+- / Cmd+0 zoom, Cmd+W / Cmd+Q close. On Windows
+selection, Cmd+V pastes, Cmd+S saves, Cmd+L shows the agents panel, Cmd+= / Cmd+- / Cmd+0 zoom, Cmd+W / Cmd+Q close. On Windows
 and Linux these are Ctrl+Shift+C, Ctrl+Shift+V and so on, since Ctrl alone belongs to Vim. Closing
 the macOS window with unsaved changes shows a warning first; closing again discards the changes. In
 an Edge or Chrome window, the browser asks before closing with unsaved changes instead.

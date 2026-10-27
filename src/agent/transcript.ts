@@ -264,7 +264,7 @@ export function promptRows(p: Prompt, view: PromptView, cwd: string, cols: numbe
         rows.push({ runs: [] });
         rows.push({ runs: [['Do you want to proceed?', theme.FG]] });
         p.choices.forEach((c, i) => rows.push(...choiceRows(i, c.label, view, cols)));
-        const hint = view.typing ? 'Type what Claude should do instead, then Enter · Esc to go back' : 'Enter to choose · Esc to deny';
+        const hint = view.typing ? 'Type what the agent should do instead, then Enter · Esc to go back' : 'Enter to choose · Esc to deny';
         rows.push({ runs: [[cut(hint, cols), theme.COMMENT]] });
         return rows;
     }
@@ -297,7 +297,7 @@ function statusRow(s: AgentSession, now: number, cols: number): Row {
     const verb = s.status ?? (s.live?.t === 'Thinking' ? 'Thinking' : 'Working');
     const secs = Math.max(Math.floor((now - s.turnStart) / 1000), 0);
     const tokens = s.turnTokens >= 1 ? ` · ↓ ${formatTokens(s.turnTokens)} tokens` : '';
-    return { runs: [[`${frame} `, theme.MODE_AGENT], [`${verb}…`, theme.MODE_AGENT], [cut(` (${secs}s${tokens} · ctrl+c to interrupt)`, cols - verb.length - 3), theme.COMMENT]] };
+    return { runs: [[`${frame} `, theme.MODE_AGENT], [`${verb}…`, theme.MODE_AGENT], [cut(` (${secs}s${tokens} · ctrl+x to interrupt)`, cols - verb.length - 3), theme.COMMENT]] };
 }
 
 /** The whole transcript: the entries, what is streaming in, the prompt

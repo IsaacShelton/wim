@@ -266,8 +266,8 @@ made where a request was open to interpretation.
      permissions and the model.
      Decided: a panel on the right of the window, toggled with Cmd+L
      (Ctrl+Shift+L on Windows and Linux, as Wim's other Cmd shortcuts), `,cc`
-     (unused in the Neovim config) and `:Claude [message]`, and by clicking
-     a `✻ Claude` badge at the right end of the status line, which also
+     (unused in the Neovim config) and `:Agents [message]`, and by clicking
+     a `✻ Agents` badge at the right end of the status line, which also
      shows when a session is working or waiting for an answer. Ctrl+h and
      Ctrl+l move between it and the editor, as with the file tree.
      Decided: sessions run through the Claude Agent SDK (the
@@ -282,7 +282,8 @@ made where a request was open to interpretation.
      Decided: the panel has a Normal mode (reading and scrolling, single
      keys for sessions and settings, `?` lists them) and the prompt (`i`),
      like Vim's modes; Esc leaves the prompt. Mappings don't apply in the
-     panel. Ctrl+c interrupts Claude, as in the terminal.
+     panel. Ctrl+c is Esc, as in the editor (asked for later); Ctrl+x
+     interrupts Claude, from either mode.
      Decided: "context" is the session's context use (percentage, and by
      kind with `c`, as `/context` shows it) and cost. Model, permission mode
      (Shift+Tab cycles as in the terminal) and effort come from pickers.
@@ -297,3 +298,8 @@ made where a request was open to interpretation.
      any whose file changed) is reloaded as one undoable change, as Vim's
      `autoread` would; a buffer with unsaved changes is kept, with a warning
      when Claude edited its file.
+14.3 The panel says "agents" rather than "Claude" (asked for later).
+     Decided: its name, badge (`✻ Agents`), mode pill (AGENT), messages
+     and the `:Agents` command; the README still says the agents are Claude
+     Code sessions. Titles Claude Code itself gives a permission prompt
+     ("Claude wants to…") are shown as it sends them.

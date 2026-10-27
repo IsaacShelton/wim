@@ -41,10 +41,10 @@ const TEXT_PADDING = 6;
 const SIDEBAR_COLS = 30;
 /** The Claude Code panel takes this share of the window, between these
  * widths in characters (and at most AGENTS_MAX_SHARE of the window). */
-const AGENTS_SHARE = 0.4;
-const AGENTS_MIN_COLS = 44;
-const AGENTS_MAX_COLS = 100;
-const AGENTS_MAX_SHARE = 0.6;
+const AGENTS_SHARE = 0.5;
+const AGENTS_MIN_COLS = 60;
+const AGENTS_MAX_COLS = 140;
+const AGENTS_MAX_SHARE = 0.7;
 const FLASH_DURATION = 300;
 /** How far the mouse must move before a press becomes a drag, in pixels. */
 const DRAG_THRESHOLD = 4;
@@ -270,12 +270,6 @@ export class WimApp {
                 };
                 break;
             case 'key': {
-                // Ctrl+c is Esc to the editor; in the Claude panel it
-                // interrupts Claude.
-                if (this.focus === 'Agents' && !this.picker && msg.ctrl && msg.key === 'c') {
-                    this.agents.interrupt();
-                    break;
-                }
                 const key = toKeyInput(msg);
                 if (key) this.key(key);
                 break;
@@ -561,8 +555,8 @@ export class WimApp {
                 if (args === 'on' || args === 'off') this.lsp.formatOnSave = args === 'on';
                 this.editor.setMessage(`Format on save is ${this.lsp.formatOnSave ? 'on' : 'off'}`);
                 return;
-            case 'Claude':
-                // `:Claude` shows the panel; `:Claude message` also sends it.
+            case 'Agents':
+                // `:Agents` shows the panel; `:Agents message` also sends it.
                 this.showAgents();
                 if (args !== '') this.agents.session?.send(args);
                 return;
@@ -1008,10 +1002,10 @@ export class WimApp {
             const result = reloadFromDisk(this.editor, id);
             if (result === 'Reloaded') reloaded.push(displayName(file));
             else if (result === 'Modified' && named) {
-                this.editor.setError(`W12: Warning: Claude changed "${displayName(file)}", and its buffer has unsaved changes too`);
+                this.editor.setError(`W12: Warning: an agent changed "${displayName(file)}", and its buffer has unsaved changes too`);
             }
         }
-        if (reloaded.length > 0) this.editor.setMessage(`Reloaded ${reloaded.join(', ')}, changed by Claude`);
+        if (reloaded.length > 0) this.editor.setMessage(`Reloaded ${reloaded.join(', ')}, changed by an agent`);
         this.refresh();
     }
 
@@ -2124,7 +2118,7 @@ class Painter {
             modeName = 'TREE';
             modeColor = theme.MODE_TREE;
         } else if (this.st.focus === 'Agents') {
-            modeName = 'CLAUDE';
+            modeName = 'AGENT';
             modeColor = theme.MODE_AGENT;
         } else {
             modeName = ed.modeName();

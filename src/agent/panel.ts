@@ -131,10 +131,11 @@ function contextColor(percent: number): string {
 
 const HELP: [string, string][] = [
     ['i  a  Enter', 'Type a message'],
-    ['Esc', 'Back to reading (from the prompt); to the editor'],
+    ['S', 'Clear the prompt and type a new message'],
+    ['Esc  Ctrl+c', 'Back to reading (from the prompt); to the editor'],
     ['Enter', 'Send (\\ or ⌥ before it: a new line)'],
     ['↑ ↓', 'Earlier messages, in the prompt'],
-    ['Ctrl+c', 'Interrupt Claude (or clear the prompt)'],
+    ['Ctrl+x', 'Interrupt the agent'],
     ['j k  Ctrl+d Ctrl+u', 'Scroll the conversation'],
     ['gg  G', 'Go to the top / the end'],
     ['Tab  ]  [  1-9', 'Next / previous / Nth session'],
@@ -293,6 +294,13 @@ export class AgentPanel {
         const g = this.pendingG;
         this.pendingG = false;
         if (key.key !== 'x' || key.ctrl) this.closeWarned = false;
+        // Ctrl+x interrupts Claude from either mode (Ctrl+c is Esc, as in
+        // the editor).
+        if (key.ctrl && key.key === 'x') {
+            if (s.running) s.interrupt();
+            else this.message = "The agent isn't working on anything";
+            return NONE;
+        }
         if (s.prompt) {
             const action = this.promptKey(s, s.prompt, key);
             if (action) return action;
@@ -300,14 +308,6 @@ export class AgentPanel {
             return this.inputKey(s, key);
         }
         return this.normalKey(s, key, g);
-    }
-
-    /** Ctrl+c: interrupt Claude, or else clear the prompt. */
-    interrupt(): void {
-        const s = this.session;
-        if (s?.running) s.interrupt();
-        else if (this.promptView.typing) this.answer.clear();
-        else this.input.clear();
     }
 
     /** Cmd+V. */
@@ -491,6 +491,13 @@ export class AgentPanel {
             case 'o':
                 if (!s.prompt) this.focus = 'Input';
                 break;
+            case 'S':
+                // As in Vim: start the prompt afresh.
+                if (!s.prompt) {
+                    this.input.clear();
+                    this.focus = 'Input';
+                }
+                break;
             case 'j':
                 this.scrollBy(1);
                 break;
@@ -571,7 +578,7 @@ export class AgentPanel {
     private closeSession(s: AgentSession): void {
         if (s.running && !this.closeWarned) {
             this.closeWarned = true;
-            this.message = 'Claude is working: x again stops it and closes the session';
+            this.message = 'The agent is working: x again stops it and closes the session';
             return;
         }
         this.closeWarned = false;
@@ -600,7 +607,7 @@ export class AgentPanel {
             items.push({ label: s.title, detail: s.running ? 'open · working' : 'open', value: { t: 'Open', index } });
         });
         const picker = new Picker<SessionChoice>(
-            'Claude Sessions',
+            'Agent Sessions',
             (choice) => {
                 if (choice.t === 'New') this.newSession();
                 else if (choice.t === 'Open') this.current = choice.index;
@@ -745,11 +752,11 @@ export class AgentPanel {
     /** The status line's reminder of the panel, which also shows and hides
      * it: whether Claude is working or waiting for an answer. */
     badge(now: number): { text: string; color: string; bg: string } {
-        if (this.needsAttention) return { text: ' ✻ Claude needs you ', color: theme.BG, bg: theme.MODE_AGENT };
+        if (this.needsAttention) return { text: ' ✻ Agents need you ', color: theme.BG, bg: theme.MODE_AGENT };
         if (this.sessions.some((s) => s.running)) {
-            return { text: ` ${SPINNER[Math.floor(now / SPIN) % SPINNER.length]} Claude `, color: theme.MODE_AGENT, bg: theme.STATUS_BG };
+            return { text: ` ${SPINNER[Math.floor(now / SPIN) % SPINNER.length]} Agents `, color: theme.MODE_AGENT, bg: theme.STATUS_BG };
         }
-        return { text: ' ✻ Claude ', color: theme.COMMENT, bg: theme.STATUS_BG };
+        return { text: ' ✻ Agents ', color: theme.COMMENT, bg: theme.STATUS_BG };
     }
 
     /** Draw the panel in `r`. `focused`: it has the keyboard. */
@@ -852,7 +859,7 @@ export class AgentPanel {
     private paintContext(cv: Canvas, ctx: ContextUsage | undefined, x: number, y: number, cols: number): number {
         const { cw, lh } = cv;
         if (!ctx) {
-            cv.text(x, y, cut('Context use shows once Claude has replied', cols), theme.COMMENT);
+            cv.text(x, y, cut('Context use shows once the agent has replied', cols), theme.COMMENT);
             return y + lh;
         }
         // A bar of the whole window, filled by kind.
@@ -912,9 +919,9 @@ export class AgentPanel {
         cv.text(x, ty, '❯', active ? theme.MODE_AGENT : theme.COMMENT);
         if (input.text === '') {
             let placeholder: string;
-            if (typing) placeholder = p?.t === 'Question' ? 'Type your answer' : 'Tell Claude what to do instead';
+            if (typing) placeholder = p?.t === 'Question' ? 'Type your answer' : 'Tell the agent what to do instead';
             else if (p) placeholder = 'Answer the prompt above';
-            else if (active) placeholder = 'Ask Claude…  (Enter sends, \\ or ⌥ Enter for a new line)';
+            else if (active) placeholder = 'Ask the agent…  (Enter sends, \\ or ⌥ Enter for a new line)';
             else placeholder = 'Press i to type a message';
             cv.text(x + 2 * cw, ty, cut(placeholder, textCols), theme.COMMENT);
         }
@@ -977,9 +984,9 @@ export class AgentPanel {
 function welcomeRows(s: AgentSession, cols: number): Row[] {
     const dim = (text: string): Row => ({ runs: [[cut(text, cols), theme.COMMENT]] });
     return [
-        { runs: [['✻ ', theme.MODE_AGENT], ['Claude Code', theme.FG]] },
+        { runs: [['✻ ', theme.MODE_AGENT], ['Agents', theme.FG]] },
         { runs: [] },
-        dim('Ask Claude to explain, change or plan your code.'),
+        dim('Ask the agent to explain, change or plan your code.'),
         dim(`Working in ${s.cwd}`),
         { runs: [] },
         dim('i to type · s to resume a session · m model · p mode · ? keys'),
@@ -989,7 +996,7 @@ function welcomeRows(s: AgentSession, cols: number): Row[] {
 function helpRows(cols: number): Row[] {
     const keyCols = Math.max(...HELP.map(([k]) => width(k))) + 2;
     return [
-        { runs: [['Keys in the Claude panel', theme.FG]] },
+        { runs: [['Keys in the agents panel', theme.FG]] },
         { runs: [] },
         ...HELP.map(([keys, what]): Row => ({ runs: [[keys.padEnd(keyCols), theme.MODE_AGENT], [cut(what, Math.max(cols - keyCols, 4)), theme.FG]] })),
         { runs: [] },
