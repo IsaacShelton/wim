@@ -7,8 +7,9 @@ export type ClientMessage =
     | { t: 'resize'; width: number; height: number; charW: number; lineH: number }
     /** A key: a named key (`Esc`, `Left`, ...) or one typed character. */
     | { t: 'key'; key: string; ctrl: boolean; alt: boolean }
-    /** Cmd shortcuts (Ctrl+Shift on Windows and Linux). */
-    | { t: 'command'; name: 'save' | 'copy' | 'cut' | 'paste' }
+    /** Cmd shortcuts (Ctrl+Shift on Windows and Linux). `agents` (Cmd+L)
+     * shows or hides the Claude Code panel. */
+    | { t: 'command'; name: 'save' | 'copy' | 'cut' | 'paste' | 'agents' }
     | { t: 'mouse'; kind: 'down' | 'move' | 'up'; x: number; y: number }
     /** A wheel event's deltas, with the DOM's `deltaMode`. `zoom` is set for
      * Ctrl or Cmd with the wheel, and for pinching on a trackpad. */

@@ -256,3 +256,44 @@ made where a request was open to interpretation.
      move between windows, reaching the file tree on the left. Clicking a
      window focuses it; scrolling over one scrolls it. Closing a buffer
      closes the windows showing it.
+
+
+14. Claude Code
+---------------
+14.1 An agent chat window, toggled from the right-hand side, that connects
+     to Claude Code: it manages several Claude Code sessions, shows their
+     context, and has chatting, scrolling through history, and control of
+     permissions and the model.
+     Decided: a panel on the right of the window, toggled with Cmd+L
+     (Ctrl+Shift+L on Windows and Linux, as Wim's other Cmd shortcuts), `,cc`
+     (unused in the Neovim config) and `:Claude [message]`, and by clicking
+     a `✻ Claude` badge at the right end of the status line, which also
+     shows when a session is working or waiting for an answer. Ctrl+h and
+     Ctrl+l move between it and the editor, as with the file tree.
+     Decided: sessions run through the Claude Agent SDK (the
+     @anthropic-ai/claude-agent-sdk package, which bundles Claude Code), with
+     Claude Code's system prompt, tools and settings as in the terminal, in
+     Wim's working directory. A session's process starts with its first
+     message, so opening the panel costs nothing; one that stops starts
+     again, resuming the session, with the next message.
+     Decided: sessions are tabs in the panel; `s` lists the open ones and
+     those Claude Code saved for the directory (from Wim or the terminal),
+     to resume with their history.
+     Decided: the panel has a Normal mode (reading and scrolling, single
+     keys for sessions and settings, `?` lists them) and the prompt (`i`),
+     like Vim's modes; Esc leaves the prompt. Mappings don't apply in the
+     panel. Ctrl+c interrupts Claude, as in the terminal.
+     Decided: "context" is the session's context use (percentage, and by
+     kind with `c`, as `/context` shows it) and cost. Model, permission mode
+     (Shift+Tab cycles as in the terminal) and effort come from pickers.
+     The bypass-permissions mode is offered (it is never the default).
+     Decided: permission prompts and AskUserQuestion are answered in the
+     panel, as in the terminal: Yes, Yes and don't ask again (Claude Code's
+     suggested rule), No (which stops the turn) and No with what to do
+     instead. Prompts Claude Code marks as risky start on No and can't be
+     approved with one key.
+14.2 Files Claude changes stay in step with Wim.
+     Decided: a buffer of a file Claude edited (or, after a shell command,
+     any whose file changed) is reloaded as one undoable change, as Vim's
+     `autoread` would; a buffer with unsaved changes is kept, with a warning
+     when Claude edited its file.

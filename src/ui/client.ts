@@ -247,6 +247,9 @@ function shortcut(e: KeyboardEvent): boolean {
         case 'v':
             send({ t: 'command', name: 'paste' });
             break;
+        case 'l':
+            send({ t: 'command', name: 'agents' });
+            break;
         case 'q':
         case 'w':
             send({ t: 'close' });

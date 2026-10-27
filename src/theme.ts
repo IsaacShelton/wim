@@ -48,6 +48,8 @@ const ONE_DARK = {
     MODE_REPLACE: '#e06c75',
     MODE_COMMAND: '#e5c07b',
     MODE_TREE: '#56b6c2',
+    /** The agent panel's accent, Claude's orange as One Dark has it. */
+    MODE_AGENT: '#d19a66',
 
     DIAGNOSTIC_ERROR: '#e06c75',
     DIAGNOSTIC_WARN: '#e5c07b',
@@ -110,6 +112,7 @@ const NORD: Theme = {
     MODE_REPLACE: '#EBCB8B', // aurora yellow
     MODE_COMMAND: '#B48EAD',
     MODE_TREE: '#8FBCBB',
+    MODE_AGENT: '#D08770', // aurora orange
 
     DIAGNOSTIC_ERROR: '#BF616A',
     DIAGNOSTIC_WARN: '#EBCB8B',

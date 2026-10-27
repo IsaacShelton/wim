@@ -5,9 +5,11 @@
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 
+import { AgentBackend, SdkBackend } from './agent/backend';
+import { AgentPanel, PanelAction } from './agent/panel';
 import { AudioInfo, AudioPlayer, SEEK_STEP, VOLUME_STEP, formatTime } from './audio';
 import { Clipboard, SystemClipboard } from './clipboard';
-import { bufferState, bufferStates, findBuffer, switchToBufferQuietly } from './editor/buffers';
+import { bufferState, bufferStates, findBuffer, reloadFromDisk, switchToBufferQuietly } from './editor/buffers';
 import { Buffer, Pos, isWhitespace, pos, posCmp } from './editor/buffer';
 import { awaitingMotion } from './editor/command';
 import { Editor, Selection } from './editor/editor';
@@ -28,7 +30,7 @@ import { LspFeatures, severityColor } from './lsp/features';
 import { BufferDiagnostic, LspManager } from './lsp/manager';
 import { ServerSpec, defaultServers } from './lsp/servers';
 import { SignatureHelp } from './lsp/signature';
-import { baseName, currentDir, displayName, expandTilde } from './paths';
+import { absolute, baseName, currentDir, displayName, expandTilde } from './paths';
 import { Float, Overlay, Picker, PickerItem, PreviewSource, readPreview } from './popup';
 import { AudioCommand, ClientMessage, DrawCmd } from './protocol';
 import { isThemeName, setTheme, theme, themeName, tokenColor } from './theme';
@@ -37,6 +39,12 @@ import { Direction, SplitDir, Win, WinRect, Windows } from './windows';
 const TEXT_PADDING = 6;
 /** Width of the file tree, in characters. */
 const SIDEBAR_COLS = 30;
+/** The Claude Code panel takes this share of the window, between these
+ * widths in characters (and at most AGENTS_MAX_SHARE of the window). */
+const AGENTS_SHARE = 0.4;
+const AGENTS_MIN_COLS = 44;
+const AGENTS_MAX_COLS = 100;
+const AGENTS_MAX_SHARE = 0.6;
 const FLASH_DURATION = 300;
 /** How far the mouse must move before a press becomes a drag, in pixels. */
 const DRAG_THRESHOLD = 4;
@@ -84,6 +92,8 @@ export interface Metrics {
 /** Screen geometry for one frame. */
 interface Layout {
     sidebar?: Rect;
+    /** The Claude Code panel, on the right. */
+    agents?: Rect;
     tabline?: Rect;
     /** Every window's place; `textArea` is the active one's. */
     windows: WinRect[];
@@ -98,7 +108,7 @@ interface Layout {
     treeRows: number;
 }
 
-type Focus = 'Editor' | 'Tree';
+type Focus = 'Editor' | 'Tree' | 'Agents';
 
 interface Flash {
     range: Range;
@@ -115,6 +125,9 @@ export interface AppOptions {
     /** Language servers to use (by default rust-analyzer and
      * typescript-language-server). */
     servers?: ServerSpec[];
+    /** How the Claude Code panel reaches Claude Code (by default, the Claude
+     * Agent SDK). */
+    agents?: AgentBackend;
     /** Called whenever the window should be repainted. */
     onFrame: (title: string, dirty: boolean, cmds: DrawCmd[]) => void;
     /** Called to control the window's sound player. */
@@ -178,6 +191,11 @@ export class WimApp {
     private pressedTimer: NodeJS.Timeout | undefined;
     /** How each image buffer is zoomed, by buffer id. */
     private readonly imageViews = new Map<number, { image: ImageInfo; view: ImageView }>();
+    /** Claude Code sessions, in the panel on the right. */
+    readonly agents: AgentPanel;
+    private agentsVisible = false;
+    /** The status line's Claude badge in the last frame, for clicks. */
+    private badgeHit: Rect | undefined;
 
     constructor(private readonly opts: AppOptions) {
         this.icons = opts.icons;
@@ -228,6 +246,13 @@ export class WimApp {
         const root = currentDir();
         this.tree = new FileTree(root);
         this.treeCwd = root;
+        this.agents = new AgentPanel({
+            backend: opts.agents ?? new SdkBackend(),
+            clipboard: this.clipboard,
+            cwd: currentDir,
+            refresh,
+            onFiles: (paths) => this.reloadChanged(paths),
+        });
     }
 
     // ----- Messages from the window ----------------------------------------------
@@ -245,6 +270,12 @@ export class WimApp {
                 };
                 break;
             case 'key': {
+                // Ctrl+c is Esc to the editor; in the Claude panel it
+                // interrupts Claude.
+                if (this.focus === 'Agents' && !this.picker && msg.ctrl && msg.key === 'c') {
+                    this.agents.interrupt();
+                    break;
+                }
                 const key = toKeyInput(msg);
                 if (key) this.key(key);
                 break;
@@ -268,9 +299,14 @@ export class WimApp {
         this.render();
     }
 
-    private command(name: 'save' | 'copy' | 'cut' | 'paste'): void {
+    private command(name: 'save' | 'copy' | 'cut' | 'paste' | 'agents'): void {
         this.closeWarned = false;
         switch (name) {
+            case 'agents':
+                this.picker?.dispose();
+                this.picker = undefined;
+                this.toggleAgents();
+                break;
             case 'save':
                 this.editor.handleKeys(parseKeys('<Esc>:w<CR>'));
                 break;
@@ -282,6 +318,9 @@ export class WimApp {
                 if (this.picker) {
                     const text = this.clipboard.getText();
                     if (text !== undefined) this.picker.paste(text);
+                } else if (this.focus === 'Agents') {
+                    const text = this.clipboard.getText();
+                    if (text !== undefined) this.agents.paste(text);
                 } else if (this.focus === 'Editor') {
                     const text = this.clipboard.getText();
                     if (text !== undefined) this.editor.pasteText(text);
@@ -311,6 +350,8 @@ export class WimApp {
         const under = layout.windows.find((w) => contains(w.area, msg.x, msg.y));
         if (layout.sidebar && contains(layout.sidebar, msg.x, msg.y)) {
             this.tree.scrollBy(whole);
+        } else if (layout.agents && contains(layout.agents, msg.x, msg.y)) {
+            this.agents.wheel(whole);
         } else if (under && under.win !== this.windows.active) {
             this.scrollWindow(under, whole);
         } else {
@@ -334,6 +375,12 @@ export class WimApp {
         }
         if (this.float?.focused) {
             if (!this.float.key(key)) this.float = undefined;
+            return;
+        }
+        // The panel has its own keys; mappings don't apply in it.
+        if (this.focus === 'Agents') {
+            this.mapPending = [];
+            this.agentAction(this.agents.key(key));
             return;
         }
         if (this.focus === 'Editor' && this.completion.key(key)) return;
@@ -454,6 +501,9 @@ export class WimApp {
             case 'ToggleTree':
                 this.toggleTree();
                 break;
+            case 'ToggleAgents':
+                this.toggleAgents();
+                break;
             case 'ToggleTheme':
                 setTheme(themeName() === 'nord' ? 'onedark' : 'nord');
                 this.editor.setMessage(`colorscheme ${themeName()}`);
@@ -511,6 +561,11 @@ export class WimApp {
                 if (args === 'on' || args === 'off') this.lsp.formatOnSave = args === 'on';
                 this.editor.setMessage(`Format on save is ${this.lsp.formatOnSave ? 'on' : 'off'}`);
                 return;
+            case 'Claude':
+                // `:Claude` shows the panel; `:Claude message` also sends it.
+                this.showAgents();
+                if (args !== '') this.agents.session?.send(args);
+                return;
             default:
                 fail(`E492: Not an editor command: ${name}${args ? ' ' + args : ''}`);
         }
@@ -539,6 +594,7 @@ export class WimApp {
         this.signature.close();
         this.features.dispose();
         this.lsp.dispose();
+        this.agents.dispose();
     }
 
     /** Send an (unmapped) key to whichever pane has focus. */
@@ -866,6 +922,10 @@ export class WimApp {
             if (dir === 'Right') this.focus = 'Editor';
             return;
         }
+        if (this.focus === 'Agents') {
+            if (dir === 'Left') this.focus = 'Editor';
+            return;
+        }
         this.saveWindow();
         const next = this.windows.neighbor(this.layout().windows, this.windows.active, dir);
         if (next) {
@@ -873,22 +933,86 @@ export class WimApp {
         } else if (dir === 'Left' && this.treeVisible) {
             this.editorToNormal();
             this.focus = 'Tree';
+        } else if (dir === 'Right' && this.agentsVisible) {
+            this.editorToNormal();
+            this.focus = 'Agents';
         }
     }
 
     /** `<C-w>w`/`W`: the next or previous window, with the tree (if shown)
-     * before the first. */
+     * before the first and the Claude panel (if shown) after the last. */
     private cycleFocus(delta: number): void {
         const wins = this.windows.list();
-        const stops: (Win | 'Tree')[] = this.treeVisible ? ['Tree', ...wins] : wins;
-        const at = this.focus === 'Tree' ? 0 : stops.indexOf(this.windows.active);
+        const stops: (Win | 'Tree' | 'Agents')[] = [...(this.treeVisible ? ['Tree' as const] : []), ...wins, ...(this.agentsVisible ? ['Agents' as const] : [])];
+        const at = this.focus === 'Editor' ? stops.indexOf(this.windows.active) : stops.indexOf(this.focus);
         const next = stops[(((at + delta) % stops.length) + stops.length) % stops.length];
-        if (next === 'Tree') {
+        if (next === 'Tree' || next === 'Agents') {
             this.editorToNormal();
-            this.focus = 'Tree';
+            this.focus = next;
         } else {
             this.focusWindow(next);
         }
+    }
+
+    /** Cmd+L, `,cc`: show the Claude panel and move to it; from the panel,
+     * hide it. */
+    private toggleAgents(): void {
+        this.windowCmdPending = false;
+        if (this.agentsVisible && this.focus === 'Agents') {
+            this.agentsVisible = false;
+            this.focus = 'Editor';
+            return;
+        }
+        this.showAgents();
+    }
+
+    private showAgents(): void {
+        this.editorToNormal();
+        this.agentsVisible = true;
+        this.agents.open();
+        this.focus = 'Agents';
+    }
+
+    private agentAction(action: PanelAction): void {
+        switch (action.t) {
+            case 'FocusEditor':
+                this.focus = 'Editor';
+                break;
+            case 'Hide':
+                this.agentsVisible = false;
+                this.focus = 'Editor';
+                break;
+            case 'ToggleTree':
+                this.toggleTree();
+                break;
+            case 'Cmdline':
+                this.focus = 'Editor';
+                this.editor.handleKey(ch(':'));
+                break;
+            case 'Picker':
+                this.picker = action.picker;
+                break;
+        }
+    }
+
+    /** Claude changed files (`paths`, or perhaps any, after a command):
+     * bring the buffers showing them up to date, as Vim's `autoread` does.
+     * A buffer with unsaved changes is kept, with a warning when Claude
+     * edited its file. */
+    private reloadChanged(paths: string[] | undefined): void {
+        const named = paths?.map((p) => absolute(p));
+        const reloaded: string[] = [];
+        for (const [id, st] of bufferStates(this.editor)) {
+            const file = st.filePath;
+            if (file === undefined || (named && !named.includes(file))) continue;
+            const result = reloadFromDisk(this.editor, id);
+            if (result === 'Reloaded') reloaded.push(displayName(file));
+            else if (result === 'Modified' && named) {
+                this.editor.setError(`W12: Warning: Claude changed "${displayName(file)}", and its buffer has unsaved changes too`);
+            }
+        }
+        if (reloaded.length > 0) this.editor.setMessage(`Reloaded ${reloaded.join(', ')}, changed by Claude`);
+        this.refresh();
     }
 
     private toggleTree(): void {
@@ -1092,6 +1216,21 @@ export class WimApp {
             this.editor.dragTo(this.posAt(layout, x, y));
             return;
         }
+        if (this.badgeHit && contains(this.badgeHit, x, y)) {
+            if (!this.agentsVisible) {
+                this.showAgents();
+            } else {
+                this.agentsVisible = false;
+                if (this.focus === 'Agents') this.focus = 'Editor';
+            }
+            return;
+        }
+        if (layout.agents && contains(layout.agents, x, y)) {
+            this.editorToNormal();
+            this.focus = 'Agents';
+            this.agentAction(this.agents.mouse(x, y));
+            return;
+        }
         const sidebar = layout.sidebar;
         if (sidebar && contains(sidebar, x, y)) {
             const row = Math.floor((y - sidebar.top) / layout.lineH);
@@ -1233,6 +1372,8 @@ export class WimApp {
             focus: this.focus,
             icons: this.icons,
             tree: this.tree,
+            agents: this.agentsVisible ? this.agents : undefined,
+            badge: this.agents.badge(Date.now()),
             mapPending: this.mapPending,
             highlightCache: (id) => {
                 let cache = this.highlightCaches.get(id);
@@ -1245,6 +1386,7 @@ export class WimApp {
         });
         const cmds = painter.paint();
         this.tabHits = painter.tabHits;
+        this.badgeHit = painter.badgeHit;
         this.opts.onFrame(title, dirty, cmds);
     }
 
@@ -1253,12 +1395,17 @@ export class WimApp {
         const bottom = Math.max(height - 2 * lineH, 0);
         const sidebar = this.treeVisible ? rect(0, 0, Math.min(SIDEBAR_COLS * charW, width * 0.4), bottom) : undefined;
         const editorLeft = sidebar ? sidebar.right + 1 : 0;
-        const tabline = this.editor.buffers.length > 1 ? rect(editorLeft, 0, width, lineH) : undefined;
-        const windows = this.windows.layout(rect(editorLeft, tabline ? tabline.bottom : 0, width, bottom), lineH, charW);
+        const agentsCols = Math.min(Math.max(Math.round((width / charW) * AGENTS_SHARE), AGENTS_MIN_COLS), AGENTS_MAX_COLS);
+        const agentsW = Math.round(Math.min(agentsCols * charW, width * AGENTS_MAX_SHARE));
+        const agents = this.agentsVisible ? rect(width - agentsW, 0, width, bottom) : undefined;
+        const editorRight = agents ? agents.left : width;
+        const tabline = this.editor.buffers.length > 1 ? rect(editorLeft, 0, editorRight, lineH) : undefined;
+        const windows = this.windows.layout(rect(editorLeft, tabline ? tabline.bottom : 0, editorRight, bottom), lineH, charW);
         const textArea = windows.find((w) => w.win === this.windows.active)!.area;
         const textLeft = textArea.left + this.gutterCols() * charW + TEXT_PADDING;
         return {
             sidebar,
+            agents,
             tabline,
             windows,
             textArea,
@@ -1461,6 +1608,10 @@ interface PaintState {
     focus: Focus;
     icons: boolean;
     tree: FileTree;
+    /** The Claude panel, when it is shown. */
+    agents: AgentPanel | undefined;
+    /** The Claude badge at the end of the status line. */
+    badge: { text: string; color: string; bg: string };
     mapPending: KeyInput[];
     /** Highlighter states for a buffer. */
     highlightCache: (bufferId: number) => highlight.Cache;
@@ -1488,6 +1639,8 @@ class Painter {
     private readonly cmds: DrawCmd[] = [];
     /** Where each buffer tab was drawn, for mouse clicks. */
     readonly tabHits: [Rect, number][] = [];
+    /** Where the Claude badge was drawn. */
+    badgeHit: Rect | undefined;
 
     constructor(
         private readonly ed: Editor,
@@ -1521,6 +1674,10 @@ class Painter {
         if (this.st.panes.find((p) => p.active)?.content.t === 'Text') this.paintCursor();
         this.paintTabline();
         this.paintTree();
+        const agents = this.layout.agents;
+        if (agents && this.st.agents) {
+            this.st.agents.paint(this.cmds, agents, this.layout.charW, this.layout.lineH, this.st.focus === 'Agents', Date.now());
+        }
         this.paintStatus();
         this.paintCmdline();
         this.paintPopups();
@@ -1545,7 +1702,7 @@ class Painter {
             const shown = Array.from(name).length <= cols ? name : ' …' + Array.from(name).slice(-Math.max(cols - 2, 0)).join('');
             this.text(bar.left, bar.top, shown, pane.active ? theme.FG : theme.COMMENT);
         }
-        if (area.right < this.st.metrics.width) {
+        if (area.right < (this.layout.agents?.left ?? this.st.metrics.width)) {
             const x = Math.round(area.right + cw / 2);
             this.rect(rect(x, area.top, x + 1, bar ? bar.bottom : area.bottom), theme.POPUP_BORDER);
         }
@@ -1845,8 +2002,8 @@ class Painter {
         const x = layout.textLeft + (dcol - ed.scrollLeft) * layout.charW;
         const y = layout.textArea.top + (cursor.line - ed.scrollTop) * layout.lineH;
         const cell = rect(x, y, x + layout.charW * width, y + layout.lineH);
-        if (this.st.focus === 'Tree') {
-            // Hollow cursor while the file tree has focus.
+        if (this.st.focus !== 'Editor') {
+            // Hollow cursor while the file tree or the Claude panel has focus.
             this.cmds.push(['stroke', cell.left, cell.top, cell.right - cell.left, cell.bottom - cell.top, theme.CURSOR]);
             return;
         }
@@ -1949,15 +2106,26 @@ class Painter {
 
     private paintStatus(): void {
         const { ed, layout } = this;
-        const r = layout.status;
+        const full = layout.status;
         const cw = layout.charW;
-        this.rect(r, theme.STATUS_BG);
+        this.rect(full, theme.STATUS_BG);
+
+        // At the end, the Claude badge, which shows and hides the panel.
+        const badge = this.st.badge;
+        const badgeHit = rect(full.right - Array.from(badge.text).length * cw, full.top, full.right, full.bottom);
+        this.rect(badgeHit, badge.bg);
+        this.text(badgeHit.left, full.top, badge.text, badge.color);
+        this.badgeHit = badgeHit;
+        const r = rect(full.left, full.top, badgeHit.left, full.bottom);
 
         let modeName: string;
         let modeColor: string;
         if (this.st.focus === 'Tree') {
             modeName = 'TREE';
             modeColor = theme.MODE_TREE;
+        } else if (this.st.focus === 'Agents') {
+            modeName = 'CLAUDE';
+            modeColor = theme.MODE_AGENT;
         } else {
             modeName = ed.modeName();
             switch (ed.mode) {

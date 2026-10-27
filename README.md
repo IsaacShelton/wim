@@ -58,6 +58,7 @@ one the tree shows plain folder arrows.
 | `src/finder.ts` | Finding files and searching text for the pickers, with ripgrep or without it |
 | `src/image.ts`, `src/imageview.ts` | Which files are images, their format and size, and zooming them |
 | `src/audio.ts` | Which files are sounds, and the player's state |
+| `src/agent/` | The Claude Code panel: `backend.ts` (Claude Code through the Claude Agent SDK), `session.ts` (one session: its conversation, prompts and settings), `transcript.ts` (the conversation laid out as rows), `input.ts` (the prompt), `panel.ts` (sessions, keys, mouse and painting) |
 
 Run the tests with `npm test`.
 
@@ -213,6 +214,57 @@ buffers (the status line shows it) and stops when its buffer is closed; one soun
 time. Like images, sound buffers can't be changed or written. Which formats play depends on the
 window's browser engine; if one can't, the player says so.
 
+## Claude Code
+
+Cmd+L (Ctrl+Shift+L on Windows and Linux), `,cc` or `:Claude` shows a panel on the right for
+chatting with Claude Code, and moves to it; Cmd+L from the panel hides it again. `:Claude
+message` also sends the message. The `✻ Claude` badge at the end of the status line shows and
+hides the panel too when clicked; it turns orange when a session is waiting for an answer, and
+spins while Claude works.
+
+Each session is a Claude Code session (through the
+[Claude Agent SDK](https://www.npmjs.com/package/@anthropic-ai/claude-agent-sdk), which brings
+its own copy of Claude Code), working in Wim's working directory with Claude Code's own
+settings, tools, `CLAUDE.md` and sign-in. Its process starts with the first message. Several
+can be open at once, as tabs along the top of the panel; sessions are saved by Claude Code as
+usual, so any of them (from Wim or the terminal) can be resumed with its history.
+
+The conversation shows messages, replies (Markdown, with highlighted code), thinking, and
+tool calls with a line or two of their results (a diff for edits); replies stream in, with a
+spinner, the time and the tokens while Claude works. Under the tabs are the session's model,
+permission mode, effort, context use and cost, each clickable.
+
+The panel has two modes, like Vim. In the prompt at the bottom, Enter sends (a `\` before it,
+or Option/Alt with it, makes a new line instead), Up/Down go through earlier messages, Esc
+goes to Normal mode, and the usual text field keys work (Option+Left/Right, Option+Delete,
+Ctrl+a/e/w/u). In Normal mode:
+
+| Keys | Action |
+| --- | --- |
+| `i` `a` Enter | Type in the prompt |
+| `j` `k`, Ctrl+d/u/e/y/f/b, `gg` `G`, the wheel | Scroll the conversation (it follows new replies unless scrolled up) |
+| Tab `]` `[` `gt` `gT` `1`–`9` | Next, previous or Nth session |
+| `n` / `s` / `x` | New session / pick a session, open or saved, to switch to or resume / close a session (stopping its process; twice if Claude is working) |
+| `m` / `p` / `e` | Pick the model / permission mode / effort |
+| Shift+Tab | Cycle the permission mode: default, accept edits, plan, auto (in the prompt too) |
+| `c` | Context use by kind, as `/context` shows it |
+| `y` | Copy the last reply |
+| `?` | All of these keys |
+| `q` / Esc / Ctrl+h | Hide the panel / back to the editor / back to the editor (Ctrl+l from the rightmost window returns) |
+| Ctrl+c | Interrupt Claude (or clear the prompt), in either mode |
+
+When Claude wants to use a tool that needs permission, the prompt shows what it will do (the
+command, a diff, the plan) and takes the keys: `1`–`4` or the arrows and Enter pick Yes, Yes
+and don't ask again (with Claude Code's suggested rule), No, or No and say what to do instead;
+Esc denies. A prompt Claude Code marks as risky starts on No and can't be approved with a
+single key. Questions from Claude (AskUserQuestion) are answered the same way, ticking several
+with Space where it asks for more than one, or typing another answer. Slash commands
+(`/compact`, `/clear`, ...) are sent to Claude Code.
+
+When Claude edits a file that is open in a buffer, the buffer is reloaded (as one undoable
+change), and after a command buffers whose files changed are reloaded too. A buffer with
+unsaved changes is kept, with a warning if Claude edited its file.
+
 ## Finding files and text
 
 `,a` lists the files under the working directory and `,fw` searches their text as you type,
@@ -236,6 +288,7 @@ Normal-mode mappings don't apply in the middle of a command, so `f,` still finds
 | Ctrl+h/j/k/l | Insert | Move the cursor left/down/up/right |
 | Tab / Shift+Tab | Normal | Next / previous buffer |
 | Ctrl+n | Normal | Toggle the file tree |
+| `,cc` (or Cmd+L) | Normal | Show the Claude Code panel (see [Claude Code](#claude-code)) |
 | `,th` | Normal | Switch between Wim's colors (One Dark) and Nord |
 | Ctrl+y | Normal | Forward in the jump list (`<C-i>`, which is Tab in a terminal) |
 | `,w` `,b` `,e` `,ge` | Normal, Visual, after an operator | Like `w`, `b`, `e`, `ge` for subwords (nvim-spider): camelCase humps, snake_case parts and digit runs; single punctuation is skipped |
@@ -295,7 +348,7 @@ the absolute number on the cursor line), `ignorecase`, `smartcase`, `hlsearch`,
 `clipboard=unnamed`. Each supports the `no`, `!` and `?` forms.
 
 **Desktop additions:** click to place the cursor, drag to select, Cmd+C / Cmd+X copy or cut the
-selection, Cmd+V pastes, Cmd+S saves, Cmd+= / Cmd+- / Cmd+0 zoom, Cmd+W / Cmd+Q close. On Windows
+selection, Cmd+V pastes, Cmd+S saves, Cmd+L shows the Claude Code panel, Cmd+= / Cmd+- / Cmd+0 zoom, Cmd+W / Cmd+Q close. On Windows
 and Linux these are Ctrl+Shift+C, Ctrl+Shift+V and so on, since Ctrl alone belongs to Vim. Closing
 the macOS window with unsaved changes shows a warning first; closing again discards the changes. In
 an Edge or Chrome window, the browser asks before closing with unsaved changes instead.

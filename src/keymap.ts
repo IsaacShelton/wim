@@ -20,6 +20,8 @@ export type Command =
     | 'WindowUp'
     | 'WindowDown'
     | 'ToggleTree'
+    /** The Claude Code panel on the right. */
+    | 'ToggleAgents'
     /** Between Wim's colors and Nord (`,th`, the config's theme toggle). */
     | 'ToggleTheme'
     /** Telescope's `find_files`. */
@@ -137,6 +139,7 @@ export class Keymap {
             [N, 'Ô', keys('V')],
             [N, '\u{f8ff}', keys('V')],
             [N, '<C-n>', command('ToggleTree')],
+            [N, '<leader>cc', command('ToggleAgents')],
             [N, '<leader>th', command('ToggleTheme')],
             // Subword motions (nvim-spider).
             [NVO, '<leader>w', plug('SubwordW')],

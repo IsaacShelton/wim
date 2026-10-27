@@ -122,6 +122,29 @@ export function editBuffer(ed: Editor, id: number, edit: (st: BufferState) => vo
     if (active) ed.clampCursor();
 }
 
+/** Bring buffer `id` up to date with its file after something else changed
+ * it, as one undoable change. A buffer with unsaved changes is left alone
+ * (`Modified`) when the file differs from it. */
+export function reloadFromDisk(ed: Editor, id: number): 'Reloaded' | 'Unchanged' | 'Modified' {
+    const st = bufferState(ed, id);
+    if (!st || st.filePath === undefined || st.image || st.audio) return 'Unchanged';
+    let fresh: Buffer;
+    try {
+        fresh = Buffer.fromText(fs.readFileSync(st.filePath, 'utf8'));
+    } catch {
+        return 'Unchanged';
+    }
+    if (fresh.text() === st.buffer.text()) return 'Unchanged';
+    if (st.buffer.version() !== st.savedVersion) return 'Modified';
+    editBuffer(ed, id, (s) => {
+        const { lines } = fresh.snapshot();
+        s.buffer.insertLines(0, lines);
+        s.buffer.removeLines(lines.length, s.buffer.lastLine());
+    });
+    st.savedVersion = st.buffer.version();
+    return 'Reloaded';
+}
+
 function swapSlot(ed: Editor, i: number): void {
     const slot = ed.buffers[i] as unknown as Record<string, unknown>;
     const active = ed as unknown as Record<string, unknown>;
