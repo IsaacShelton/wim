@@ -16,7 +16,7 @@ import {
     writeFile,
 } from './buffers';
 import type { Editor, Options } from './editor';
-import { EditorError, IMAGE_READONLY, fail } from './errors';
+import { EditorError, READONLY, fail } from './errors';
 import { applyOperator, joinLines, shiftLines } from './ops';
 import { lineRange } from './range';
 import * as search from './search';
@@ -33,12 +33,13 @@ export function runEx(ed: Editor, input: string): void {
         if (!(e instanceof EditorError)) throw e;
         ed.setError(e.message);
     }
-    // An image can't be changed: put back what a command like :s did.
-    if (ed.image && ed.buffer === buffer && buffer.version() !== version) {
+    // An image or sound can't be changed: put back what a command like :s
+    // did.
+    if (ed.readonly() && ed.buffer === buffer && buffer.version() !== version) {
         const s = ed.undoPending;
         buffer.restore(s.lines, s.version);
         ed.cursor = s.cursor;
-        ed.setError(IMAGE_READONLY);
+        ed.setError(READONLY);
     }
     ed.commitUndo();
     ed.clampCursor();
@@ -63,7 +64,7 @@ function exCommand(ed: Editor, input: string): void {
     switch (name) {
         case '':
             if (range) {
-                ed.marks.set("'", ed.cursor);
+                ed.markJump();
                 ed.cursor = pos(last, ed.buffer.firstNonBlank(last));
             }
             return;

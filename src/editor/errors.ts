@@ -6,4 +6,5 @@ export function fail(message: string): never {
     throw new EditorError(message);
 }
 
-export const IMAGE_READONLY = "E21: Can't make changes to an image";
+/** For images and sounds, which are shown or played, not edited. */
+export const READONLY = "E21: Cannot make changes, 'modifiable' is off";

@@ -6,6 +6,7 @@ import * as fs from 'node:fs';
 import * as path from 'node:path';
 
 import { Clipboard } from '../clipboard';
+import { AudioInfo } from '../audio';
 import { ImageInfo } from '../image';
 import { displayName, expandTilde } from '../paths';
 import * as autopairs from './autopairs';
@@ -13,7 +14,7 @@ import { Buffer, Line, Pos, isWhitespace, order, pos } from './buffer';
 import * as buffers from './buffers';
 import { BufferSlot } from './buffers';
 import { Action, Command, FindKind, parse } from './command';
-import { IMAGE_READONLY } from './errors';
+import { READONLY } from './errors';
 import { runEx } from './ex';
 import { KeyInput, ch, charOf, ctrl, isCharKey, keyEq, keyIs, keyToString, plain } from './keys';
 import * as motion from './motion';
@@ -142,6 +143,12 @@ export class Editor {
     lastVisual: LastVisual | undefined;
     marks = new Map<string, Pos>();
     globalMarks = new Map<string, GlobalMark>();
+    /** Places jumped from, oldest first, across buffers (Vim's jump list). */
+    jumps: GlobalMark[] = [];
+    /** Where `<C-o>` and `<C-i>` are in `jumps`: its length when at the end. */
+    jumpIndex = 0;
+    /** Going to a jump, which isn't itself a jump. */
+    private jumping = false;
 
     cmdline = '';
     exHistory: string[] = [];
@@ -162,6 +169,8 @@ export class Editor {
     yankFlash: Range | undefined;
     /** Set when the active buffer is an image, which can't be changed. */
     image: ImageInfo | undefined;
+    /** Set when the active buffer is a sound, which can't be changed. */
+    audio: AudioInfo | undefined;
     /** Called after a buffer is written to `path`. */
     onWrite: ((path: string) => void) | undefined;
     /** Runs a user command (`:Name args`, a name starting with a capital).
@@ -180,6 +189,12 @@ export class Editor {
     }
 
     // ----- Accessors used by the UI ------------------------------------------
+
+    /** Whether the active buffer is an image or sound, shown rather than
+     * edited. */
+    readonly(): boolean {
+        return this.image !== undefined || this.audio !== undefined;
+    }
 
     fileName(): string {
         return displayName(this.filePath);
@@ -449,8 +464,8 @@ export class Editor {
 
     private runCommand(cmd: Command, keys: KeyInput[]): void {
         const change = mayChange(cmd.action);
-        if (change && this.image) {
-            this.setError(IMAGE_READONLY);
+        if (change && this.readonly()) {
+            this.setError(READONLY);
             return;
         }
         const fromVisual = isVisual(this.mode);
@@ -583,6 +598,12 @@ export class Editor {
                 break;
             case 'AlternateBuffer':
                 buffers.alternateBuffer(this);
+                break;
+            case 'JumpOlder':
+                this.jumpOlder(count);
+                break;
+            case 'JumpNewer':
+                this.jumpNewer(count);
                 break;
             case 'VisualOp':
                 ops.visualOperate(this, a.op, false, count, cmd.register);
@@ -1037,6 +1058,56 @@ export class Editor {
         this.replaying = false;
     }
 
+    // ----- Jump list -----------------------------------------------------------------
+
+    /** About to jump (`G`, a search, `gd`, opening another file...): remember
+     * where the cursor is for `''` and `<C-o>`. */
+    markJump(): void {
+        this.marks.set("'", this.cursor);
+        if (this.jumping) return;
+        const id = this.bufferId();
+        const line = this.cursor.line;
+        // One entry per line, as in Vim: the newest.
+        this.jumps = this.jumps.filter((j) => j.bufferId !== id || j.pos.line !== line);
+        this.jumps.push({ bufferId: id, path: this.filePath, pos: this.cursor });
+        if (this.jumps.length > MAX_JUMPS) this.jumps.shift();
+        this.jumpIndex = this.jumps.length;
+    }
+
+    private jumpOlder(count: number): void {
+        if (this.jumpIndex >= this.jumps.length) {
+            // Leaving the newest place: remember it, so <C-i> can come back.
+            this.markJump();
+            this.jumpIndex = this.jumps.length - 1;
+        }
+        this.goToJump(this.jumpIndex - count);
+    }
+
+    private jumpNewer(count: number): void {
+        this.goToJump(this.jumpIndex + count);
+    }
+
+    /** Go to entry `i` of the jump list, in whichever buffer it is (opening
+     * its file again if the buffer was closed). */
+    private goToJump(i: number): void {
+        const j = this.jumps[i];
+        if (!j) return;
+        this.jumpIndex = i;
+        this.jumping = true;
+        try {
+            if (j.bufferId !== this.bufferId() && !buffers.switchToBufferQuietly(this, j.bufferId)) {
+                if (j.path === undefined) return;
+                this.openFile(j.path);
+            }
+        } finally {
+            this.jumping = false;
+        }
+        this.marks.set("'", this.cursor);
+        this.cursor = j.pos;
+        this.clampCursor();
+        this.updateWantCol();
+    }
+
     // ----- Visual mode helpers -------------------------------------------------------
 
     exitVisual(): void {
@@ -1087,6 +1158,9 @@ export class Editor {
         this.setMessage(`"${this.fileName()}"${modified} ${lines} lines --${pct}%--`);
     }
 }
+
+/** How many places the jump list keeps (Vim's is 100). */
+const MAX_JUMPS = 100;
 
 function mayChange(a: Action): boolean {
     switch (a.t) {

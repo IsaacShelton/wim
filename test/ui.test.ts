@@ -20,7 +20,7 @@ import * as icons from '../src/icons';
 import { imageSize } from '../src/image';
 import { Keymap } from '../src/keymap';
 import { ServerSpec } from '../src/lsp/servers';
-import { ClientMessage, DrawCmd } from '../src/protocol';
+import { AudioCommand, ClientMessage, DrawCmd } from '../src/protocol';
 import { startServer } from '../src/server';
 
 function tempDir(name: string): string {
@@ -308,6 +308,21 @@ test('file tree hides git-ignored files', (t) => {
 });
 
 // ----- Key map ---------------------------------------------------------------------
+
+test(',w and friends are subword motions, after operators too', () => {
+    const h = harness();
+    h.type('ifooBarBaz qux<Esc>0,w');
+    assert.equal(h.app.editor.cursor.col, 3);
+    h.type(',e');
+    assert.equal(h.app.editor.cursor.col, 5);
+    h.type(',b,b');
+    assert.equal(h.app.editor.cursor.col, 0);
+    h.type('d,w');
+    assert.equal(h.app.editor.buffer.text(), 'BarBaz qux');
+    // After an operator waiting for a character, `,` is that character.
+    h.type('0df,');
+    assert.equal(h.app.editor.buffer.text(), 'BarBaz qux');
+});
 
 test('leader mappings', () => {
     const map = Keymap.fromNeovimConfig();
@@ -607,33 +622,135 @@ test('an image opens read-only and is drawn instead of text', () => {
     }
 });
 
-test('the server serves only image files, and only with the token', async () => {
+test('the server serves only images and sounds, only with the token, in ranges', async () => {
     const dir = tempDir('serve');
     const png = path.join(dir, 'pic.png');
+    const mp3 = path.join(dir, 'song.mp3');
     const txt = path.join(dir, 'secret.txt');
     fs.writeFileSync(png, pngHeader(1, 1));
+    fs.writeFileSync(mp3, '0123456789');
     fs.writeFileSync(txt, 'secret');
     const server = await startServer({ onConnection: () => {} });
-    const get = (url: string): Promise<[number, string]> =>
+    const get = (url: string, range?: string): Promise<[number, string, string, string]> =>
         new Promise((resolve) =>
-            http.get(url, (res) => {
-                res.resume();
-                resolve([res.statusCode ?? 0, String(res.headers['content-type'])]);
+            http.get(url, { headers: range ? { range } : {} }, (res) => {
+                let body = '';
+                res.on('data', (d) => (body += d));
+                res.on('end', () =>
+                    resolve([res.statusCode ?? 0, String(res.headers['content-type']), String(res.headers['content-range']), body]),
+                );
             }),
         );
     try {
         const base = server.url.replace(/\/\?t=.*/, '');
         const token = new URL(server.url).searchParams.get('t')!;
-        assert.deepEqual(await get(`${base}/image?p=${encodeURIComponent(png)}&t=${token}`), [200, 'image/png']);
-        assert.equal((await get(`${base}/image?p=${encodeURIComponent(png)}&t=wrong`))[0], 403);
-        assert.equal((await get(`${base}/image?p=${encodeURIComponent(txt)}&t=${token}`))[0], 403);
+        const media = (file: string, t = token): string => `${base}/media?p=${encodeURIComponent(file)}&t=${t}`;
+        assert.deepEqual((await get(media(png))).slice(0, 2), [200, 'image/png']);
+        assert.deepEqual((await get(media(mp3))).slice(0, 2), [200, 'audio/mpeg']);
+        assert.equal((await get(media(png, 'wrong')))[0], 403);
+        assert.equal((await get(media(txt)))[0], 403);
+        // Byte ranges, as players ask for to seek.
+        assert.deepEqual(await get(media(mp3), 'bytes=2-5'), [206, 'audio/mpeg', 'bytes 2-5/10', '2345']);
+        assert.deepEqual((await get(media(mp3), 'bytes=7-')).slice(2), ['bytes 7-9/10', '789']);
+        assert.deepEqual((await get(media(mp3), 'bytes=-3')).slice(2), ['bytes 7-9/10', '789']);
+        assert.equal((await get(media(mp3), 'bytes=20-'))[0], 416);
     } finally {
         server.close();
         fs.rmSync(dir, { recursive: true });
     }
 });
 
-test('images zoom and pan with keys, the wheel and dragging', () => {
+test('a sound opens in a player', () => {
+    const dir = tempDir('sound');
+    const song = path.join(dir, 'song.mp3');
+    fs.writeFileSync(song, 'not really an mp3');
+    const cwd = process.cwd();
+    const sent: AudioCommand[] = [];
+    try {
+        const frames: DrawCmd[][] = [];
+        const app = new WimApp({
+            path: song,
+            icons: false,
+            clipboard: new MemoryClipboard(),
+            servers: [],
+            onFrame: (_t, _d, cmds) => frames.push(cmds),
+            onAudio: (cmd) => sent.push(cmd),
+            onQuit: () => {},
+        });
+        const send = (msg: ClientMessage): void => app.handleMessage(msg);
+        const type = (keys: string): void => {
+            for (const k of parseKeys(keys)) send({ t: 'key', key: k.key, ctrl: k.ctrl, alt: k.alt });
+        };
+        const text = (): string =>
+            frames[frames.length - 1]
+                .filter((c): c is Extract<DrawCmd, ['text', ...unknown[]]> => c[0] === 'text')
+                .map((c) => c[3])
+                .join('\n');
+        send({ t: 'resize', width: 800, height: 600, charW: 10, lineH: 20 });
+        const ed = app.editor;
+        assert.equal(ed.audio?.format, 'MP3');
+        assert.match(text(), /song\.mp3/);
+        assert.match(text(), /MP3 {2}17 B/, 'in the status line');
+        // Shown means loaded (not played).
+        assert.equal(sent.length, 1);
+        const load = sent[0];
+        assert.ok(load.op === 'load' && load.src.includes(encodeURIComponent(song)));
+        const src = load.op === 'load' ? load.src : '';
+        const report = (time: number, paused: boolean, volume = 1): void =>
+            send({ t: 'audio', src, time, duration: 180, paused, volume });
+        report(0, true);
+        assert.match(text(), /0:00\n3:00/);
+        // Space plays; the window reports back.
+        type(' ');
+        assert.deepEqual(sent[sent.length - 1], { op: 'play' });
+        report(65, false);
+        assert.match(text(), /1:05\n3:00/);
+        // Seeking and volume.
+        type('l');
+        assert.deepEqual(sent[sent.length - 1], { op: 'seek', time: 70 });
+        type('5');
+        assert.deepEqual(sent[sent.length - 1], { op: 'seek', time: 90 });
+        type('j');
+        assert.deepEqual(sent[sent.length - 1], { op: 'volume', volume: 0.9 });
+        type('m');
+        assert.deepEqual(sent[sent.length - 1], { op: 'volume', volume: 0 });
+        type('m');
+        assert.deepEqual(sent[sent.length - 1], { op: 'volume', volume: 0.9 });
+        // Clicking the scrubber halfway seeks halfway; dragging the volume
+        // bar sets the volume. (The panel is 700 pixels wide at (50, 180).)
+        const click = (x: number, y: number, to = x): void => {
+            send({ t: 'mouse', kind: 'down', x, y });
+            if (to !== x) send({ t: 'mouse', kind: 'move', x: to, y });
+            send({ t: 'mouse', kind: 'up', x: to, y });
+        };
+        click(425, 270);
+        assert.deepEqual(sent[sent.length - 1], { op: 'seek', time: 90 });
+        click(300, 310, 210);
+        assert.deepEqual(sent[sent.length - 1], { op: 'volume', volume: 0.5 });
+        click(90, 270);
+        assert.deepEqual(sent[sent.length - 1], { op: 'pause' });
+        type(' ');
+        // It can't be edited or written.
+        type('x');
+        assert.match(ed.message?.text ?? '', /E21/);
+        type(':w<CR>');
+        assert.match(ed.message?.text ?? '', /E21/);
+        assert.equal(fs.readFileSync(song, 'utf8'), 'not really an mp3');
+        // Playing on in another buffer shows in the status line.
+        report(65, false);
+        type(':enew<CR>');
+        assert.match(text(), /♪ song\.mp3 1:05/);
+        // Closing its buffer stops it.
+        type(':bd! 1<CR>');
+        assert.deepEqual(sent[sent.length - 1], { op: 'stop' });
+        app.dispose();
+    } finally {
+        process.chdir(cwd);
+        fs.rmSync(dir, { recursive: true });
+    }
+});
+
+test('images zoom and pan with keys, the wheel, dragging and buttons', async () => {
     const dir = tempDir('zoom');
     const file = path.join(dir, 'pic.png');
     fs.writeFileSync(file, pngHeader(640, 400));
@@ -645,51 +762,72 @@ test('images zoom and pan with keys, the wheel and dragging', () => {
             const cmd = h.frames[h.frames.length - 1].find((c) => c[0] === 'image')!;
             return cmd.slice(1, 5).map((n) => Math.round(Number(n)));
         };
+        // Keys glide there over a few frames.
+        const settles = (expected: number[]): Promise<void> =>
+            until(`the image at ${expected}`, () => drawn().join() === expected.join());
         // It fits, so it is drawn at its size, in the middle.
         assert.deepEqual(drawn(), [80, 80, 640, 400]);
         assert.match(h.text(), /PNG 640×400 {2}33 B {2}100%/);
         // h/j/k/l and the arrows move it (by a tenth of the view, 76 pixels),
         // as far as its edge reaching the middle of the view.
         h.type('l');
-        assert.deepEqual(drawn(), [4, 80, 640, 400]);
+        assert.notDeepEqual(drawn(), [4, 80, 640, 400], 'not there at once');
+        await settles([4, 80, 640, 400]);
         h.type('<Left>kj<Down>');
-        assert.deepEqual(drawn(), [80, 4, 640, 400]);
+        await settles([80, 4, 640, 400]);
         h.type('llllllllll');
-        assert.deepEqual(drawn(), [-240, 4, 640, 400]);
-        // = (or 0) fits it again; + and - zoom around the middle.
-        h.type('=');
-        assert.deepEqual(drawn(), [80, 80, 640, 400]);
+        await settles([-240, 4, 640, 400]);
+        // 0 fits it again; +, = and - zoom around the middle.
+        h.type('0');
+        await settles([80, 80, 640, 400]);
         h.type('+');
-        assert.deepEqual(drawn(), [0, 30, 800, 500]);
+        await settles([0, 30, 800, 500]);
         assert.match(h.text(), /125%/);
+        h.type('-=');
+        await settles([0, 30, 800, 500]);
         h.type('0-');
-        assert.match(h.text(), /80%/);
-        h.type('=');
-        assert.match(h.text(), /100%/);
-        // Scrolling zooms, around the pointer: the point under it stays.
+        await until('80%', () => /80%/.test(h.text()));
+        h.type('0');
+        await settles([80, 80, 640, 400]);
+        // Scrolling zooms at once, around the pointer: the point under it stays.
         h.send({ t: 'wheel', x: 80, y: 80, delta: -100, dx: 0, mode: 0, zoom: false });
         assert.deepEqual(drawn(), [80, 80, 800, 500]);
         assert.match(h.text(), /125%/);
         h.send({ t: 'wheel', x: 80, y: 80, delta: 100, dx: 0, mode: 0, zoom: true });
         assert.match(h.text(), /100%/);
-        // The buttons in the bottom right: +, - and =.
+        // The buttons in the bottom right: +, - and =, which fits it again.
+        // A clicked one looks pressed for a moment.
         assert.match(h.text(), /\+\n-\n=/);
+        const buttonFill = (): unknown => h.frames[h.frames.length - 1].find((c) => c[0] === 'rect' && c[1] === 712 && c[2] === 528)?.[5];
+        const unpressed = buttonFill();
         h.send({ t: 'mouse', kind: 'down', x: 724, y: 540 });
         h.send({ t: 'mouse', kind: 'up', x: 724, y: 540 });
-        assert.match(h.text(), /125%/);
+        assert.notEqual(buttonFill(), unpressed, 'pressed');
+        await settles([0, 30, 800, 500]);
+        await until('the button to come back up', () => buttonFill() === unpressed);
         h.send({ t: 'mouse', kind: 'down', x: 780, y: 540 });
         h.send({ t: 'mouse', kind: 'up', x: 780, y: 540 });
-        assert.deepEqual(drawn(), [80, 80, 640, 400]);
+        await settles([80, 80, 640, 400]);
+        // Dragging moves it at once.
         h.type('+');
-        // Dragging moves it.
-        const before = drawn();
+        await settles([0, 30, 800, 500]);
         h.send({ t: 'mouse', kind: 'down', x: 400, y: 300 });
         h.send({ t: 'mouse', kind: 'move', x: 390, y: 300 });
         h.send({ t: 'mouse', kind: 'up', x: 390, y: 300 });
-        assert.equal(drawn()[0], before[0] - 10);
+        assert.equal(drawn()[0], -10);
         // `:` still works.
         h.type(':enew<CR>');
         assert.equal(h.app.editor.image, undefined);
+        // A small image opens enlarged as many whole times as fit (the tab
+        // line leaves 500 pixels: 31 times 16).
+        const tiny = path.join(dir, 'tiny.png');
+        fs.writeFileSync(tiny, pngHeader(16, 16));
+        h.type(`:e ${tiny}<CR>`);
+        assert.deepEqual(drawn(), [152, 42, 496, 496]);
+        assert.match(h.text(), /3100%/);
+        h.type('+0');
+        await settles([152, 42, 496, 496]);
+        h.app.dispose();
     } finally {
         process.chdir(cwd);
         fs.rmSync(dir, { recursive: true });

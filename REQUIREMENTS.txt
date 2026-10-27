@@ -55,6 +55,16 @@ made where a request was open to interpretation.
      unless the cursor would come too close to (or past) the first or
      last visible line.
      Decided: the view then scrolls only as far as `scrolloff` needs.
+2.8  `<C-o>` goes back from a jump (such as going to a definition), as in
+     Neovim, and `<C-i>` forward.
+     Decided: a jump list as in Vim, across buffers (reopening closed
+     files). `<C-y>` also goes forward, as mapped in the Neovim config.
+2.9  `,w` and `,b`, like `w` and `b` for subwords, as in the Neovim config.
+     Decided: `,e` and `,ge` too, as the config maps all four (to
+     nvim-spider), in Normal and Visual mode and after an operator
+     (`d,w`). Subwords follow nvim-spider's defaults: camelCase humps,
+     snake_case parts, ALLCAPS runs and digit runs; a single punctuation
+     character is skipped, two or more (`=>`, `::`) are a stop.
 
 
 3. Buffers
@@ -90,9 +100,10 @@ made where a request was open to interpretation.
      windows, e.g. between the file tree and the editor.
 5.2  Key bindings follow the user's Neovim 0.10.4 configuration in
      ~/.config/nvim wherever Wim has the feature they use.
-     Decided: mappings for plugins Wim doesn't have (gitsigns, nvim-spider,
-     theme toggle, Rust auto-import) are left out. Telescope's pickers
-     become Wim's own picker (see 7 and 8).
+     Decided: mappings for plugins Wim doesn't have (gitsigns, theme
+     toggle, Rust auto-import) are left out. Telescope's pickers become
+     Wim's own picker (see 7 and 8), and nvim-spider's motions Wim's own
+     (2.9).
 
 
 6. macOS text editing in Insert mode
@@ -171,12 +182,19 @@ made where a request was open to interpretation.
 9.2  Images can be zoomed and moved, with the mouse and with `+`, `-`
      and `=`: scrolling zooms, dragging pans, and three small buttons in
      the buffer's bottom right corner do `+`, `-` and `=`.
-     Decided: `+` zooms in, `-` zooms out, `=` (and `0`) fits the window
-     again, for both the keys and the buttons. Scrolling and trackpad
+     Decided: the `=` key zooms in like `+` (asked for later); the `=`
+     button, and the `0` key, fit the window again. `-` zooms out. Keys
+     and buttons glide to the new zoom or place over a few frames (and a
+     clicked button looks pressed for a moment); the mouse moves it
+     directly. Scrolling and trackpad
      pinching zoom around the pointer. Dragging, `h`/`j`/`k`/`l` and the
      arrows move the image at any zoom; the middle of the window stays
      over the image. Each step is 25%. Pixels are drawn sharp from 200%.
      Zoom is kept per buffer.
+9.3  Small images start zoomed in when opened.
+     Decided: an image that would fit two or more times its size opens
+     (and fits again with `0` or the `=` button) at the most whole times
+     that fit, which keeps its pixels sharp.
 
 
 10. Signature help
@@ -189,3 +207,18 @@ made where a request was open to interpretation.
      documentation shown. It closes when the server says the cursor is
      no longer in a call, on leaving Insert mode, or on moving to
      another line.
+
+
+11. Sounds
+----------
+11.1 Music files can be played, as images are shown: with play/pause, a
+     scrubber, volume and so on.
+     Decided: MP3, WAV, FLAC, Ogg, Opus, AAC and WebM audio open in a
+     read-only buffer showing a player that Wim draws: name, format, size
+     and length, play/pause, a scrubber with times, and volume (with
+     mute), all clickable, plus keys (Space/Enter/p, h/l and arrows to
+     seek, 0-9 to jump, k/j and arrows for volume, m to mute). The window
+     plays the sound with an <audio> element from Wim's local server
+     (which now serves byte ranges, as players need). One sound plays at
+     a time; it keeps playing in other buffers, shown in the status line,
+     and stops when its buffer is closed. Sounds don't start on opening.

@@ -338,6 +338,12 @@ test('K shows hover documentation and gd goes to the definition', async () => {
         h.type('kgd');
         await h.until('the jump', () => h.app.editor.cursor.line === 0);
         assert.deepEqual(h.app.editor.cursor, pos(0, 3));
+        // <C-o> goes back from the definition; <C-y> (the config's <C-i>)
+        // forward again.
+        h.type('<C-o>');
+        assert.deepEqual(h.app.editor.cursor, pos(3, 4));
+        h.type('<C-y>');
+        assert.deepEqual(h.app.editor.cursor, pos(0, 3));
     } finally {
         h.done();
     }

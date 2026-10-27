@@ -1,7 +1,7 @@
 // The window: draws the frames Node sends on a canvas, and forwards keys,
 // mouse and resizes to Node. All editor logic lives in Node.
 
-import type { ClientMessage, DrawCmd, ServerMessage } from '../protocol';
+import type { AudioCommand, ClientMessage, DrawCmd, ServerMessage } from '../protocol';
 
 const BASE_FONT_SIZE = 15;
 const LINE_SPACING = 1.3;
@@ -343,6 +343,68 @@ window.addEventListener('beforeunload', (e) => {
     if (frame?.dirty && !quitting && socket?.readyState === WebSocket.OPEN) e.preventDefault();
 });
 
+// ----- Sound -------------------------------------------------------------------------------------
+
+/** The sound player. Node decides what it does and draws its controls; this
+ * only plays and reports back. */
+const audio = new Audio();
+audio.preload = 'auto';
+/** The address Node knows the playing file by (without the token). */
+let audioSrc = '';
+let lastReport = 0;
+
+function reportAudio(error?: string): void {
+    if (audioSrc === '') return;
+    lastReport = performance.now();
+    send({
+        t: 'audio',
+        src: audioSrc,
+        time: audio.currentTime,
+        duration: Number.isFinite(audio.duration) ? audio.duration : 0,
+        paused: audio.paused,
+        volume: audio.volume,
+        error: error ?? (audio.error ? "Can't play this file" : undefined),
+    });
+}
+
+for (const event of ['loadedmetadata', 'durationchange', 'play', 'pause', 'ended', 'seeked', 'volumechange', 'error']) {
+    audio.addEventListener(event, () => reportAudio());
+}
+// Playing, a few times a second is enough for the time and the scrubber.
+audio.addEventListener('timeupdate', () => {
+    if (performance.now() - lastReport > 250) reportAudio();
+});
+
+function audioCommand(cmd: AudioCommand): void {
+    switch (cmd.op) {
+        case 'load':
+            audioSrc = cmd.src;
+            audio.src = `${cmd.src}&t=${encodeURIComponent(token)}`;
+            audio.load();
+            break;
+        case 'play':
+            audio.play().catch((e: Error) =>
+                reportAudio(e.name === 'NotAllowedError' ? 'The window blocked playing sound: click play' : e.message),
+            );
+            break;
+        case 'pause':
+            audio.pause();
+            break;
+        case 'seek':
+            audio.currentTime = cmd.time;
+            break;
+        case 'volume':
+            audio.volume = cmd.volume;
+            break;
+        case 'stop':
+            audio.pause();
+            audioSrc = '';
+            audio.removeAttribute('src');
+            audio.load();
+            break;
+    }
+}
+
 // ----- Connection ------------------------------------------------------------------------------
 
 function connect(): void {
@@ -358,6 +420,8 @@ function connect(): void {
         } else if (msg.t === 'quit') {
             quitting = true;
             window.close();
+        } else if (msg.t === 'audio') {
+            audioCommand(msg.cmd);
         }
     });
     ws.addEventListener('close', () => queueDraw());

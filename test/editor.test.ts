@@ -7,7 +7,8 @@ import { test } from 'node:test';
 import { MemoryClipboard } from '../src/clipboard';
 import { pos } from '../src/editor/buffer';
 import { Editor } from '../src/editor/editor';
-import { parseKeys } from '../src/editor/keys';
+import { KeyInput, ch, parseKeys, plain } from '../src/editor/keys';
+import { subwords } from '../src/editor/subword';
 
 /** Build an editor from text where `|` marks the cursor. */
 function editor(text: string): Editor {
@@ -199,6 +200,88 @@ test('half-page moves scroll only when the cursor nears an edge', () => {
     ed.handleKeys(parseKeys('<C-u><C-u>'));
     assert.equal(ed.cursor.line, 0);
     assert.equal(ed.scrollTop, 0);
+});
+
+test('<C-o> and <C-i> go back and forth through jumps', () => {
+    const ed = editor('a|z\nb\nc\nd\ne\nf');
+    ed.handleKeys(parseKeys('G'));
+    ed.handleKeys(parseKeys('/c<CR>'));
+    assert.equal(ed.cursor.line, 2);
+    ed.handleKeys(parseKeys('<C-o>'));
+    assert.equal(ed.cursor.line, 5);
+    ed.handleKeys(parseKeys('<C-o>'));
+    assert.deepEqual(ed.cursor, pos(0, 1));
+    ed.handleKeys(parseKeys('<C-o>'));
+    assert.deepEqual(ed.cursor, pos(0, 1), 'nothing older');
+    ed.handleKeys(parseKeys('<C-i>'));
+    assert.equal(ed.cursor.line, 5);
+    ed.handleKeys(parseKeys('<C-i>'));
+    assert.equal(ed.cursor.line, 2);
+    // Moves that aren't jumps aren't remembered.
+    ed.handleKeys(parseKeys('jj<C-o>'));
+    assert.equal(ed.cursor.line, 5);
+    ed.handleKeys(parseKeys('<C-i><C-i>'));
+    assert.equal(ed.cursor.line, 2, 'the newest jump, and no further');
+});
+
+test('jumps go back to other files', () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'wim-jumps-'));
+    const a = path.join(dir, 'a.txt');
+    const b = path.join(dir, 'b.txt');
+    fs.writeFileSync(a, '1\n2\n3\n');
+    fs.writeFileSync(b, 'x\ny\n');
+    try {
+        const ed = new Editor(new MemoryClipboard());
+        ed.openFile(a);
+        ed.handleKeys(parseKeys('3G'));
+        ed.openFile(b);
+        ed.handleKeys(parseKeys('<C-o>'));
+        assert.equal(ed.filePath, fs.realpathSync(a));
+        assert.equal(ed.cursor.line, 2);
+        ed.handleKeys(parseKeys('<C-o>'));
+        assert.equal(ed.cursor.line, 0, 'before 3G');
+        ed.handleKeys(parseKeys('2<C-i>'));
+        assert.equal(ed.filePath, fs.realpathSync(b));
+        // A closed buffer's file opens again.
+        ed.handleKeys(parseKeys(':bd 1<CR><C-o>'));
+        assert.equal(ed.filePath, fs.realpathSync(a));
+        assert.equal(ed.cursor.line, 2);
+    } finally {
+        fs.rmSync(dir, { recursive: true });
+    }
+});
+
+test('subwords split at humps, underscores, digits and long punctuation', () => {
+    const words = (s: string): string[] => subwords(Array.from(s)).map(([a, b]) => s.slice(a, b));
+    assert.deepEqual(words('fooBarBaz'), ['foo', 'Bar', 'Baz']);
+    assert.deepEqual(words('snake_case_name'), ['snake', 'case', 'name']);
+    assert.deepEqual(words('HTMLParser x2y'), ['HTML', 'Parser', 'x', '2', 'y']);
+    assert.deepEqual(words('a.b => c::d;'), ['a', 'b', '=>', 'c', '::', 'd']);
+    assert.deepEqual(words('  ALL_CAPS  '), ['ALL', 'CAPS']);
+});
+
+test('subword motions', () => {
+    const w = plain('<Plug>SubwordW');
+    const b = plain('<Plug>SubwordB');
+    const e = plain('<Plug>SubwordE');
+    const ge = plain('<Plug>SubwordGe');
+    const run = (before: string, keys: KeyInput[], after: string): void => {
+        const ed = editor(before);
+        ed.handleKeys(keys);
+        assert.equal(state(ed), after);
+    };
+    run('|fooBar_baz qux', [w], 'foo|Bar_baz qux');
+    run('|fooBar_baz qux', [w, w], 'fooBar_|baz qux');
+    run('fooBar_baz |qux', [b, b], 'foo|Bar_baz qux');
+    run('|fooBar_baz', [e], 'fo|oBar_baz');
+    run('fooBar_|baz', [ge], 'fooBa|r_baz');
+    run('fooBa|r\nnextLine', [w], 'fooBar\n|nextLine');
+    run('|fooBar', [ch('3'), w], 'fooBa|r');
+    // With operators, in Visual mode, and repeated with `.`.
+    run('|fooBarBaz', [ch('d'), w], '|BarBaz');
+    run('|fooBarBaz', [ch('d'), w, ch('.')], '|Baz');
+    run('|fooBarBaz', [ch('c'), e, ch('x'), plain('Esc')], '|xBarBaz');
+    run('|fooBarBaz', [ch('v'), e, e, ch('d')], '|Baz');
 });
 
 test('undo and redo', () => {

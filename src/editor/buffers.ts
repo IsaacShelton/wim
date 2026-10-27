@@ -7,6 +7,7 @@
 
 import * as fs from 'node:fs';
 
+import { AudioInfo, isAudio, readAudioInfo } from '../audio';
 import { ImageInfo, formatBytes, isImage, readImageInfo } from '../image';
 import { absolute, displayName } from '../paths';
 import { Buffer, Pos, pos } from './buffer';
@@ -28,6 +29,8 @@ export class BufferSlot {
     lastVisual: LastVisual | undefined;
     /** Set for an image file, which is shown rather than edited. */
     image: ImageInfo | undefined;
+    /** Set for a sound file, which is played rather than edited. */
+    audio: AudioInfo | undefined;
 
     constructor(readonly id: number) {}
 
@@ -57,6 +60,7 @@ const SWAPPED = [
     'marks',
     'lastVisual',
     'image',
+    'audio',
 ] as const;
 
 /** A buffer's own state. The active buffer's lives in `Editor`, the others'
@@ -212,6 +216,8 @@ export function switchByName(ed: Editor, query: string): void {
  * unmodified buffer is replaced rather than kept around. */
 export function openFile(ed: Editor, p: string): void {
     const full = absolute(p);
+    // Leaving a file is a jump (not leaving Wim's first, empty buffer).
+    if (ed.filePath !== undefined && full !== ed.filePath) ed.markJump();
     const existing = ed.buffers.findIndex((s, i) => (i === ed.current ? ed.filePath : s.filePath) === full);
     if (existing >= 0) {
         activate(ed, existing);
@@ -239,6 +245,20 @@ export function loadFile(ed: Editor, p: string): void {
         ed.image = info;
         const size = info.width > 0 ? ` ${info.width}×${info.height},` : '';
         ed.setMessage(`"${name}" ${info.format}${size} ${formatBytes(info.bytes)}`);
+        return;
+    }
+    if (isAudio(p) && fs.existsSync(p)) {
+        let info: AudioInfo;
+        try {
+            info = readAudioInfo(p);
+        } catch (e) {
+            ed.setError(`E484: Can't open file ${name}: ${(e as Error).message}`);
+            return;
+        }
+        loadText(ed, '');
+        ed.filePath = p;
+        ed.audio = info;
+        ed.setMessage(`"${name}" ${info.format}, ${formatBytes(info.bytes)}`);
         return;
     }
     let bytes: globalThis.Buffer;
@@ -274,11 +294,12 @@ export function loadText(ed: Editor, text: string): void {
     ed.marks = new Map();
     ed.lastVisual = undefined;
     ed.image = undefined;
+    ed.audio = undefined;
 }
 
 export function writeFile(ed: Editor, p: string | undefined): boolean {
-    if (ed.image) {
-        ed.setError(`E21: Can't write an image buffer`);
+    if (ed.image || ed.audio) {
+        ed.setError(`E21: Can't write ${ed.image ? 'an image' : 'a sound'} buffer`);
         return false;
     }
     const target = p !== undefined ? absolute(p) : ed.filePath;

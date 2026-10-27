@@ -44,7 +44,7 @@ function motionRange(ed: Editor, motion: Motion, t: MotionTarget): Range {
             return charRange(s, pos(e.line, e.col + 1));
         case 'Exclusive':
             if (e.line > s.line && buf.line(e.line).slice(0, Math.min(e.col, buf.lineLen(e.line))).every(isWhitespace)) {
-                if (motion.t === 'WordForward') {
+                if (motion.t === 'WordForward' || (motion.t === 'Subword' && motion.motion === 'w')) {
                     // `dw` on the last word of a line stops at the line end.
                     e = pos(e.line - 1, buf.lineLen(e.line - 1));
                 } else if (e.col === 0) {

@@ -104,5 +104,5 @@ export function formatBytes(n: number): string {
 /** The window's address for an image file (the window adds the session
  * token). */
 export function imageUrl(file: string, info: ImageInfo): string {
-    return `/image?p=${encodeURIComponent(file)}&v=${Math.round(info.mtime)}`;
+    return `/media?p=${encodeURIComponent(file)}&v=${Math.round(info.mtime)}`;
 }

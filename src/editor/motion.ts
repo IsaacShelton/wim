@@ -6,6 +6,7 @@ import { FindKind, Motion, findForward, findReversed, findTill } from './command
 import type { Editor } from './editor';
 import { WANT_EOL, isInsert } from './mode';
 import * as search from './search';
+import { subwordTarget } from './subword';
 
 export type MotionKind = 'Exclusive' | 'Inclusive' | 'Linewise';
 
@@ -242,6 +243,10 @@ export function evalMotion(
             const inclusive = motion.t === 'WordEnd' || motion.t === 'WordEndBackward';
             return target(p, inclusive ? 'Inclusive' : 'Exclusive');
         }
+        case 'Subword': {
+            const inclusive = motion.motion === 'e' || motion.motion === 'ge';
+            return target(subwordTarget(buf, cur, motion.motion, n), inclusive ? 'Inclusive' : 'Exclusive');
+        }
         case 'LineStart':
             return target(pos(cur.line, 0), 'Exclusive');
         case 'FirstNonBlank':
@@ -421,7 +426,7 @@ function searchMotion(ed: Editor, sameDirection: boolean, count: number): Motion
 
 /** Move the cursor to a motion target (outside of an operator). */
 export function moveTo(ed: Editor, motion: Motion, t: MotionTarget): void {
-    if (isJump(motion) && t.pos.line !== ed.cursor.line) ed.marks.set("'", ed.cursor);
+    if (isJump(motion) && t.pos.line !== ed.cursor.line) ed.markJump();
     ed.cursor = t.pos;
     ed.clampCursor();
     if (motion.t === 'LineEnd') ed.wantCol = WANT_EOL;

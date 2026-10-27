@@ -6,6 +6,33 @@
 
 import { KeyInput, charOf, isNamedKey, keyIs } from './keys';
 import { isValidName } from './registers';
+import { SubwordMotion } from './subword';
+
+/** Keys only mappings send (never the window), for motions with no key of
+ * their own. */
+export const SUBWORD_KEYS: Readonly<Record<string, SubwordMotion>> = {
+    '<Plug>SubwordW': 'w',
+    '<Plug>SubwordB': 'b',
+    '<Plug>SubwordE': 'e',
+    '<Plug>SubwordGe': 'ge',
+};
+
+/** Whether `keys` are an operator waiting for its motion (`d`, `"a2c`,
+ * `gU`): where operator-pending mappings apply. */
+export function awaitingMotion(keys: readonly KeyInput[]): boolean {
+    const c = (i: number): string | undefined => (keys[i] && !keys[i].ctrl ? charOf(keys[i]) : undefined);
+    let i = 0;
+    if (c(0) === '"') i = 2;
+    const count = (): void => {
+        if (/^[1-9]$/.test(c(i) ?? '')) while (/^[0-9]$/.test(c(i) ?? '')) i++;
+    };
+    count();
+    if (['d', 'c', 'y', '>', '<'].includes(c(i) ?? '')) i++;
+    else if (c(i) === 'g' && ['~', 'u', 'U'].includes(c(i + 1) ?? '')) i += 2;
+    else return false;
+    count();
+    return i === keys.length;
+}
 
 export type Operator =
     | 'Delete'
@@ -81,6 +108,8 @@ export type Motion =
               | 'SearchPrev';
       }
     | { t: 'WordForward' | 'WordBackward' | 'WordEnd' | 'WordEndBackward'; big: boolean }
+    /** nvim-spider's `w`, `b`, `e` and `ge` (mapped to `,w` and so on). */
+    | { t: 'Subword'; motion: SubwordMotion }
     | { t: 'Find'; kind: FindKind; ch: string }
     /** `[{`, `[(`, `]}`, `])`: the enclosing unmatched bracket. */
     | { t: 'Unmatched'; ch: string }
@@ -133,6 +162,9 @@ export type Action =
               | 'QuitForce'
               | 'FileInfo'
               | 'AlternateBuffer'
+              /** `<C-o>`, `<C-i>`: back and forward through the jump list. */
+              | 'JumpOlder'
+              | 'JumpNewer'
               | 'VisualSwap'
               | 'VisualPaste';
       }
@@ -268,6 +300,10 @@ function parseNormal(k: Keys, key: KeyInput, counter: { count?: number }): Actio
             case '6':
             case '^':
                 return { t: 'AlternateBuffer' };
+            case 'o':
+                return { t: 'JumpOlder' };
+            case 'i':
+                return { t: 'JumpNewer' };
             default:
                 throw INVALID;
         }
@@ -529,6 +565,8 @@ function textObject(c: string): TextObject | undefined {
 /** Parse a motion starting with `key`. Returns `undefined` without consuming
  * further keys when `key` does not start a motion. */
 function parseMotion(k: Keys, key: KeyInput): Motion | undefined {
+    const subword = SUBWORD_KEYS[key.key];
+    if (subword) return { t: 'Subword', motion: subword };
     if (key.ctrl) {
         if (key.key === 'n') return { t: 'Down' };
         if (key.key === 'p') return { t: 'Up' };

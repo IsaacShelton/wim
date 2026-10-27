@@ -79,6 +79,7 @@ export async function main(argv: string[]): Promise<void> {
         path: args.path,
         icons: fontPath !== undefined,
         onFrame: (title, dirty, cmds) => send(client, { t: 'frame', title, dirty, cmds }),
+        onAudio: (cmd) => send(client, { t: 'audio', cmd }),
         onQuit: shutdown,
     });
 

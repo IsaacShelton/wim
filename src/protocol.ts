@@ -14,13 +14,35 @@ export type ClientMessage =
      * Ctrl or Cmd with the wheel, and for pinching on a trackpad. */
     | { t: 'wheel'; x: number; y: number; delta: number; dx: number; mode: number; zoom: boolean }
     /** The user asked to close the window. */
-    | { t: 'close' };
+    | { t: 'close' }
+    /** How the window's sound player is doing. */
+    | ({ t: 'audio' } & AudioReport);
 
 /** Messages from Node to the window. */
 export type ServerMessage =
     | { t: 'frame'; title: string; dirty: boolean; cmds: DrawCmd[] }
     /** Wim is exiting; the window should close. */
-    | { t: 'quit' };
+    | { t: 'quit' }
+    | { t: 'audio'; cmd: AudioCommand };
+
+/** What the window should do with its sound player (an <audio> element). */
+export type AudioCommand =
+    | { op: 'load'; src: string }
+    | { op: 'play' }
+    | { op: 'pause' }
+    | { op: 'seek'; time: number }
+    | { op: 'volume'; volume: number }
+    | { op: 'stop' };
+
+/** How the window's sound player is doing, for the file at `src`. */
+export interface AudioReport {
+    src: string;
+    time: number;
+    duration: number;
+    paused: boolean;
+    volume: number;
+    error?: string;
+}
 
 /** One drawing operation. Coordinates are CSS pixels; colors are CSS colors. */
 export type DrawCmd =

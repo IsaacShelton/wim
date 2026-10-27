@@ -10,6 +10,7 @@ import * as http from 'node:http';
 import * as path from 'node:path';
 import type { Duplex } from 'node:stream';
 
+import { audioMime } from './audio';
 import { imageMime } from './image';
 
 const WS_GUID = '258EAFA5-E914-47DA-95CA-C5AB0DC85B11';
@@ -158,15 +159,16 @@ export function startServer(opts: ServerOptions): Promise<Server> {
             fs.readFile(clientScript, (err, data) =>
                 err ? send(500, 'text/plain', 'Wim is not built: run `npm run build`.') : send(200, 'text/javascript', data),
             );
-        } else if (url.pathname === '/image') {
-            // Image files the editor shows, for this session only.
+        } else if (url.pathname === '/media') {
+            // Images and sounds the editor shows and plays, for this session
+            // only.
             const file = url.searchParams.get('p') ?? '';
-            const mime = imageMime(file);
+            const mime = imageMime(file) ?? audioMime(file);
             if (url.searchParams.get('t') !== token || mime === undefined || !path.isAbsolute(file)) {
                 send(403, 'text/plain', 'Forbidden');
                 return;
             }
-            fs.readFile(file, (err, data) => (err ? send(404, 'text/plain', '') : send(200, mime, data)));
+            serveFile(req, res, file, mime);
         } else if (url.pathname === '/icons-font' && opts.fontPath) {
             const type = opts.fontPath.toLowerCase().endsWith('.otf') ? 'font/otf' : 'font/ttf';
             fs.readFile(opts.fontPath, (err, data) => (err ? send(404, 'text/plain', '') : send(200, type, data)));
@@ -218,6 +220,34 @@ export function startServer(opts: ServerOptions): Promise<Server> {
             });
         });
     });
+}
+
+/** Send a file, or the byte range asked for: media players need ranges to
+ * seek, and WebKit won't play sound without them. */
+function serveFile(req: http.IncomingMessage, res: http.ServerResponse, file: string, mime: string): void {
+    let size: number;
+    try {
+        size = fs.statSync(file).size;
+    } catch {
+        res.writeHead(404).end();
+        return;
+    }
+    const headers = { 'content-type': mime, 'accept-ranges': 'bytes', 'cache-control': 'no-store' };
+    const m = /^bytes=(\d*)-(\d*)$/.exec(req.headers.range ?? '');
+    if (!m || (m[1] === '' && m[2] === '')) {
+        res.writeHead(200, { ...headers, 'content-length': size });
+        fs.createReadStream(file).pipe(res);
+        return;
+    }
+    // `bytes=a-b`, `bytes=a-`, or the last n bytes, `bytes=-n`.
+    const start = m[1] === '' ? Math.max(size - Number(m[2]), 0) : Number(m[1]);
+    const end = m[1] === '' || m[2] === '' ? size - 1 : Math.min(Number(m[2]), size - 1);
+    if (start > end || start >= size) {
+        res.writeHead(416, { 'content-range': `bytes */${size}` }).end();
+        return;
+    }
+    res.writeHead(206, { ...headers, 'content-range': `bytes ${start}-${end}/${size}`, 'content-length': end - start + 1 });
+    fs.createReadStream(file, { start, end }).pipe(res);
 }
 
 /** The window's page: a full-window canvas driven by `client.js`. */

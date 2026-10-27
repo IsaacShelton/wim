@@ -5,9 +5,11 @@
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 
+import { AudioInfo, AudioPlayer, SEEK_STEP, VOLUME_STEP, formatTime } from './audio';
 import { Clipboard, SystemClipboard } from './clipboard';
-import { bufferState, findBuffer } from './editor/buffers';
+import { bufferState, bufferStates, findBuffer } from './editor/buffers';
 import { Pos, isWhitespace, pos, posCmp } from './editor/buffer';
+import { awaitingMotion } from './editor/command';
 import { Editor } from './editor/editor';
 import { fail } from './editor/errors';
 import { KeyInput, ch, charOf, ctrl, isNamedKey, keyEq, keyNew, keyToString, parseKeys, plain } from './editor/keys';
@@ -28,7 +30,7 @@ import { ServerSpec, defaultServers } from './lsp/servers';
 import { SignatureHelp } from './lsp/signature';
 import { baseName, currentDir } from './paths';
 import { Float, Overlay, Picker, PickerItem, PreviewSource, readPreview } from './popup';
-import { ClientMessage, DrawCmd } from './protocol';
+import { AudioCommand, ClientMessage, DrawCmd } from './protocol';
 import { theme, tokenColor } from './theme';
 
 const TEXT_PADDING = 6;
@@ -37,9 +39,16 @@ const SIDEBAR_COLS = 30;
 const FLASH_DURATION = 300;
 /** How far the mouse must move before a press becomes a drag, in pixels. */
 const DRAG_THRESHOLD = 4;
+/** Time between frames of an animation, in ms. */
+const FRAME = 16;
+/** How long a clicked button looks pressed, in ms. */
+const BUTTON_PRESS = 150;
 /** Width of the sign column for diagnostics, in characters (shown for files
  * a language server handles, like Neovim's `signcolumn=yes`). */
 const SIGN_COLS = 2;
+/** Columns the status line keeps for the file name before giving it all
+ * to language server progress. */
+const MIN_NAME = 20;
 /** Diagnostic signs by severity, from the Neovim config, and without a Nerd
  * Font. */
 const SIGNS = ['', '\u{f0159}', '\u{f071}', '\u{f02fc}', '\u{f0335}'];
@@ -105,6 +114,8 @@ export interface AppOptions {
     servers?: ServerSpec[];
     /** Called whenever the window should be repainted. */
     onFrame: (title: string, dirty: boolean, cmds: DrawCmd[]) => void;
+    /** Called to control the window's sound player. */
+    onAudio?: (cmd: AudioCommand) => void;
     /** Called once when Wim should exit. */
     onQuit: () => void;
 }
@@ -139,7 +150,11 @@ export class WimApp {
     private closeWarned = false;
     private metrics: Metrics = { width: 1000, height: 720, charW: 9, lineH: 23 };
     /** The press that may become a drag in the text area. */
-    private press: { x: number; y: number; dragging: boolean } | undefined;
+    /** A press that may become a drag: in the text area, or on the sound
+     * player's scrubber or volume bar (`control`). */
+    private press: { x: number; y: number; dragging: boolean; control?: 'Scrub' | 'Volume' } | undefined;
+    /** The one sound that can be playing. */
+    readonly player: AudioPlayer;
     private quitting = false;
     readonly lsp: LspManager;
     private readonly features: LspFeatures;
@@ -150,6 +165,11 @@ export class WimApp {
     /** Hover documentation or diagnostics next to the cursor. */
     private float: Float | undefined;
     private refreshQueued = false;
+    /** Draws the next frame while an image glides to a new zoom or place. */
+    private imageTimer: NodeJS.Timeout | undefined;
+    /** An image zoom button just clicked, drawn pressed for a moment. */
+    private pressedButton: ImageAction | undefined;
+    private pressedTimer: NodeJS.Timeout | undefined;
     /** How each image buffer is zoomed, by buffer id. */
     private readonly imageViews = new Map<number, { image: ImageInfo; view: ImageView }>();
 
@@ -192,6 +212,7 @@ export class WimApp {
         this.completion = new Completion(this.editor, this.lsp, refresh);
         this.signature = new SignatureHelp(this.editor, this.lsp, refresh);
         this.completion.onParens = () => this.signature.trigger('(');
+        this.player = new AudioPlayer((cmd) => opts.onAudio?.(cmd), refresh);
         this.editor.userCommand = (name, args) => this.userCommand(name, args);
         if (file !== undefined) this.editor.openFile(file);
         if (dirError !== undefined) this.editor.setError(dirError);
@@ -230,6 +251,9 @@ export class WimApp {
                 break;
             case 'close':
                 this.requestClose();
+                break;
+            case 'audio':
+                this.player.update(msg);
                 break;
         }
         this.render();
@@ -331,7 +355,10 @@ export class WimApp {
      * (so `df,` still finds a comma even though `,` is the leader). */
     private currentMapMode(): MapMode | undefined {
         if (this.focus === 'Tree') return 'Normal';
-        if (this.editor.pending.length > 0 || this.windowCmdPending) return undefined;
+        if (this.windowCmdPending) return undefined;
+        if (this.editor.pending.length > 0) {
+            return this.editor.mode === 'Normal' && awaitingMotion(this.editor.pending) ? 'Operator' : undefined;
+        }
         switch (this.editor.mode) {
             case 'Normal':
                 return 'Normal';
@@ -472,6 +499,8 @@ export class WimApp {
 
     /** Stop the language servers (Wim is exiting). */
     dispose(): void {
+        if (this.imageTimer) clearTimeout(this.imageTimer);
+        if (this.pressedTimer) clearTimeout(this.pressedTimer);
         this.completion.close();
         this.signature.close();
         this.features.dispose();
@@ -491,7 +520,7 @@ export class WimApp {
             return;
         }
         if (this.focus === 'Editor') {
-            if (this.imageKey(key)) return;
+            if (this.imageKey(key) || this.audioKey(key)) return;
             this.editor.handleKey(key);
             return;
         }
@@ -544,9 +573,9 @@ export class WimApp {
         return { placement: view.place(size), scale: view.currentScale(size) };
     }
 
-    /** Zoom and pan keys for an image: `+` zooms in, `-` out, `=` (or `0`)
-     * fits the window, `h`/`j`/`k`/`l` and the arrows pan. Other keys go to
-     * the editor (`:` and buffer switching work as usual). */
+    /** Zoom and pan keys for an image: `+` or `=` zooms in, `-` out, `0` fits
+     * the window, `h`/`j`/`k`/`l` and the arrows pan, all gliding there. Other
+     * keys go to the editor (`:` and buffer switching work as usual). */
     private imageKey(key: KeyInput): boolean {
         const view = this.imageView();
         if (!view || this.editor.mode !== 'Normal' || this.editor.pending.length > 0 || key.ctrl) return false;
@@ -562,20 +591,107 @@ export class WimApp {
             j: [0, -step],
             Down: [0, -step],
         };
-        if (key.key === '+') this.imageAction(view, 'In');
+        if (key.key === '+' || key.key === '=') this.imageAction(view, 'In');
         else if (key.key === '-') this.imageAction(view, 'Out');
-        else if (key.key === '=' || key.key === '0') this.imageAction(view, 'Fit');
-        else if (key.key in pans && !key.alt) view.pan(...pans[key.key], size);
+        else if (key.key === '0') this.imageAction(view, 'Fit');
+        else if (key.key in pans && !key.alt) view.pan(...pans[key.key], size, true);
         else return false;
+        this.glideImage();
         return true;
     }
 
-    /** Zoom in, out, or back to fitting the window. */
+    /** Player keys for a sound: Space, Enter or `p` play and pause, `h`/`l`
+     * and the arrows seek, `k`/`j` and up/down change the volume, `m` mutes,
+     * and `0`-`9` go to that tenth of the way through. */
+    private audioKey(key: KeyInput): boolean {
+        const ed = this.editor;
+        const info = ed.audio;
+        if (!info || ed.filePath === undefined || ed.mode !== 'Normal' || ed.pending.length > 0 || key.ctrl || key.alt) {
+            return false;
+        }
+        const p = this.player;
+        const here = p.file === ed.filePath;
+        switch (key.key) {
+            case ' ':
+            case 'Enter':
+            case 'p':
+                p.toggle(ed.filePath, info);
+                return true;
+            case 'h':
+            case 'Left':
+            case 'l':
+            case 'Right':
+                if (here) p.seek(p.time + (key.key === 'h' || key.key === 'Left' ? -SEEK_STEP : SEEK_STEP));
+                return true;
+            case 'k':
+            case 'Up':
+            case 'j':
+            case 'Down':
+                p.setVolume(p.volume + (key.key === 'k' || key.key === 'Up' ? VOLUME_STEP : -VOLUME_STEP));
+                return true;
+            case 'm':
+                p.toggleMute();
+                return true;
+            default:
+                if (/^[0-9]$/.test(key.key) && here) {
+                    p.seek((Number(key.key) / 10) * p.duration);
+                    return true;
+                }
+                return false;
+        }
+    }
+
+    /** A click or drag on the sound player's controls. Returns whether it hit
+     * one. */
+    private audioMouse(layout: Layout, x: number, y: number, control?: 'Scrub' | 'Volume'): boolean {
+        const ed = this.editor;
+        const info = ed.audio;
+        if (!info || ed.filePath === undefined) return false;
+        const c = audioControls(layout);
+        const p = this.player;
+        const fraction = (r: Rect): number => Math.min(Math.max((x - r.left) / (r.right - r.left), 0), 1);
+        if (control === 'Scrub' || (!control && contains(c.scrubber, x, y))) {
+            if (p.file === ed.filePath) p.seek(fraction(c.scrubber) * p.duration);
+            if (this.press) this.press.control = 'Scrub';
+            return true;
+        }
+        if (control === 'Volume' || (!control && contains(c.volume, x, y))) {
+            p.setVolume(fraction(c.volume));
+            if (this.press) this.press.control = 'Volume';
+            return true;
+        }
+        if (contains(c.play, x, y)) {
+            p.toggle(ed.filePath, info);
+            return true;
+        }
+        if (contains(c.mute, x, y)) {
+            p.toggleMute();
+            return true;
+        }
+        return false;
+    }
+
+    /** Draw frames until the image has glided to where it is going. */
+    private glideImage(): void {
+        if (this.imageTimer) return;
+        const frame = (): void => {
+            this.imageTimer = undefined;
+            const view = this.imageView();
+            if (!view || this.quitting) return;
+            const moving = view.tick(rectSize(imageArea(this.layout())));
+            this.render();
+            if (moving) this.imageTimer = setTimeout(frame, FRAME);
+        };
+        this.imageTimer = setTimeout(frame, FRAME);
+    }
+
+    /** Zoom in, out, or back to fitting the window, gliding there. */
     private imageAction(view: ImageView, action: ImageAction, layout = this.layout()): void {
         const size = rectSize(imageArea(layout));
-        if (action === 'In') view.zoom(1, size);
-        else if (action === 'Out') view.zoom(-1, size);
-        else view.reset();
+        if (action === 'In') view.zoom(1, size, undefined, true);
+        else if (action === 'Out') view.zoom(-1, size, undefined, true);
+        else view.reset(size, true);
+        this.glideImage();
     }
 
     /** `<C-w>h`/`l`/`w`: move focus between the tree and the editor. */
@@ -700,7 +816,7 @@ export class WimApp {
         const ed = this.editor;
         this.editorToNormal();
         this.focus = 'Editor';
-        ed.marks.set("'", ed.cursor);
+        ed.markJump();
         if (ed.filePath !== file) ed.openFile(file);
         if (line === undefined || ed.filePath !== file) return;
         ed.cursor = pos(Math.min(line, ed.buffer.lastLine()), col);
@@ -769,6 +885,10 @@ export class WimApp {
         if (kind === 'move') {
             const p = this.press;
             if (!p) return;
+            if (p.control) {
+                this.audioMouse(layout, x, y, p.control);
+                return;
+            }
             if (!p.dragging && Math.hypot(x - p.x, y - p.y) < DRAG_THRESHOLD) return;
             p.dragging = true;
             const view = this.imageView();
@@ -779,6 +899,7 @@ export class WimApp {
                 p.y = y;
                 return;
             }
+            if (this.editor.audio) return;
             this.editor.dragTo(this.posAt(layout, x, y));
             return;
         }
@@ -807,11 +928,21 @@ export class WimApp {
             this.focus = 'Editor';
             const view = this.imageView();
             const button = view && imageButtons(layout).find(([r]) => contains(r, x, y));
+            this.press = { x, y, dragging: false };
+            if (this.audioMouse(layout, x, y)) return;
             if (view && button) {
                 this.imageAction(view, button[1], layout);
+                // Show the button pressed for a moment.
+                this.pressedButton = button[1];
+                if (this.pressedTimer) clearTimeout(this.pressedTimer);
+                this.pressedTimer = setTimeout(() => {
+                    this.pressedTimer = undefined;
+                    this.pressedButton = undefined;
+                    this.render();
+                }, BUTTON_PRESS);
                 return;
             }
-            if (!view) this.editor.click(this.posAt(layout, x, y));
+            if (!view && !this.editor.audio) this.editor.click(this.posAt(layout, x, y));
             this.press = { x, y, dragging: false };
         }
     }
@@ -864,6 +995,8 @@ export class WimApp {
             this.quitting = true;
             this.clearMapTimer();
             if (this.flashTimer) clearTimeout(this.flashTimer);
+            if (this.imageTimer) clearTimeout(this.imageTimer);
+            if (this.pressedTimer) clearTimeout(this.pressedTimer);
             this.dispose();
             this.opts.onQuit();
             return;
@@ -874,6 +1007,11 @@ export class WimApp {
         this.syncTree(layout);
         this.lsp.sync();
         this.features.cursorMoved();
+        // Ready a sound to play when its buffer is shown; stop it when its
+        // buffer is closed.
+        if (this.editor.audio && this.editor.filePath !== undefined) this.player.show(this.editor.filePath, this.editor.audio);
+        const playing = this.player.file;
+        if (playing !== undefined && !bufferStates(this.editor).some(([, st]) => st.filePath === playing)) this.player.stop(playing);
         const f = this.float;
         const ed = this.editor;
         if (f && !f.focused && (f.bufferId !== ed.bufferId() || posCmp(f.anchor, ed.cursor) !== 0 || ed.mode !== 'Normal' || this.focus !== 'Editor')) {
@@ -902,6 +1040,8 @@ export class WimApp {
             picker: this.picker,
             previewLines: (file) => this.previewLines(file),
             imageView: this.imagePlacement(layout),
+            pressedButton: this.pressedButton,
+            player: this.player,
             focus: this.focus,
             icons: this.icons,
             tree: this.tree,
@@ -965,6 +1105,38 @@ function imageArea(layout: Layout): Rect {
     return rect(r.left + pad, r.top + pad, r.right - pad, r.bottom - pad);
 }
 
+/** Where the sound player and its controls go: a panel in the middle of the
+ * text area, with rows for the title (and details under it), the play button
+ * and scrubber, the volume, and the key reminder. */
+function audioControls(layout: Layout): {
+    panel: Rect;
+    title: number;
+    play: Rect;
+    scrubber: Rect;
+    mute: Rect;
+    volume: Rect;
+    hint: number;
+} {
+    const r = layout.textArea;
+    const { charW: cw, lineH: lh } = layout;
+    const width = Math.max(Math.min(r.right - r.left - 4 * cw, 70 * cw), 30 * cw);
+    const height = 10 * lh;
+    const left = Math.round((r.left + r.right - width) / 2);
+    const top = Math.max(Math.round((r.top + r.bottom - height) / 2), r.top);
+    const row = (n: number): number => top + n * lh;
+    const play = rect(left + 2 * cw, row(4) - lh * 0.5, left + 2 * cw + 2 * lh, row(4) + lh * 1.5);
+    const scrubLeft = play.right + 8 * cw;
+    return {
+        panel: rect(left, top, left + width, top + height),
+        title: row(1),
+        play,
+        scrubber: rect(scrubLeft, row(4), Math.max(left + width - 9 * cw, scrubLeft + cw), row(5)),
+        mute: rect(left + 2 * cw, row(6), left + 2 * cw + 2 * cw, row(7)),
+        volume: rect(left + 6 * cw, row(6), left + 6 * cw + Math.min(20 * cw, width / 3), row(7)),
+        hint: row(8),
+    };
+}
+
 type ImageAction = 'In' | 'Out' | 'Fit';
 
 /** The zoom buttons in the bottom right corner of an image: where they are,
@@ -1024,6 +1196,9 @@ interface PaintState {
     /** Where the active buffer's image goes and its zoom, when it is an image
      * of known size. */
     imageView: { placement: Placement; scale: number } | undefined;
+    /** An image zoom button drawn pressed. */
+    pressedButton: ImageAction | undefined;
+    player: AudioPlayer;
 }
 
 /** Paints one frame. */
@@ -1063,6 +1238,8 @@ class Painter {
         const image = this.ed.image;
         if (image && this.ed.filePath !== undefined) {
             this.paintImage(this.ed.filePath, image);
+        } else if (this.ed.audio && this.ed.filePath !== undefined) {
+            this.paintAudio(this.ed.filePath, this.ed.audio);
         } else {
             this.paintText();
             this.paintCursor();
@@ -1073,6 +1250,67 @@ class Painter {
         this.paintCmdline();
         this.paintPopups();
         return this.cmds;
+    }
+
+    /** The sound player: the file, a play button, the scrubber with times,
+     * the volume, and a reminder of the keys. */
+    private paintAudio(file: string, info: AudioInfo): void {
+        const { charW: cw, lineH: lh } = this.layout;
+        const c = audioControls(this.layout);
+        const p = this.st.player;
+        const here = p.file === file;
+        const time = here ? p.time : 0;
+        const duration = here ? p.duration : 0;
+        const playing = here && p.playing;
+        this.rect(c.panel, theme.POPUP_BG, 6);
+        this.cmds.push(['stroke', c.panel.left, c.panel.top, c.panel.right - c.panel.left, c.panel.bottom - c.panel.top, theme.POPUP_BORDER]);
+        const x = c.panel.left + 2 * cw;
+        const icon = this.st.icons ? icons.forFile(path.basename(file)) : undefined;
+        if (icon) this.text(x, c.title, icon.glyph, rgb(icon.color));
+        this.text(x + (icon ? 2 * cw : 0), c.title, path.basename(file), theme.FG);
+        const details = [info.format, formatBytes(info.bytes), duration > 0 ? formatTime(duration) : ''].filter((s) => s !== '');
+        this.text(x, c.title + lh, details.join(' · '), theme.COMMENT);
+
+        // Play/pause: a round button with a triangle or two bars.
+        const b = c.play;
+        const size = b.right - b.left;
+        this.rect(b, theme.MODE_NORMAL, size / 2);
+        const cx = (b.left + b.right) / 2;
+        const cy = (b.top + b.bottom) / 2;
+        const s = size * 0.22;
+        if (playing) {
+            this.rect(rect(cx - s, cy - s, cx - s / 3, cy + s), theme.BG);
+            this.rect(rect(cx + s / 3, cy - s, cx + s, cy + s), theme.BG);
+        } else {
+            this.cmds.push(['poly', [cx - s * 0.7, cy - s * 1.1, cx + s * 1.1, cy, cx - s * 0.7, cy + s * 1.1], theme.BG]);
+        }
+
+        // The scrubber, with the time on either side.
+        const r = c.scrubber;
+        const mid = (r.top + r.bottom) / 2;
+        const done = duration > 0 ? Math.min(time / duration, 1) : 0;
+        this.textRight(r.left - cw, r.top, formatTime(time), theme.FG);
+        this.text(r.right + cw, r.top, duration > 0 ? formatTime(duration) : '-:--', theme.COMMENT);
+        this.rect(rect(r.left, mid - 2, r.right, mid + 2), theme.TILDE, 2);
+        const knob = r.left + (r.right - r.left) * done;
+        this.rect(rect(r.left, mid - 2, knob, mid + 2), theme.FUNCTION, 2);
+        this.rect(rect(knob - 6, mid - 6, knob + 6, mid + 6), theme.FG, 6);
+
+        // Volume: a speaker, the level and a bar.
+        const m = c.mute;
+        const my = (m.top + m.bottom) / 2;
+        const u = (m.bottom - m.top) / 6;
+        this.cmds.push(['poly', [m.left, my - u, m.left + 2 * u, my - u, m.left + 4 * u, my - 3 * u, m.left + 4 * u, my + 3 * u, m.left + 2 * u, my + u, m.left, my + u], p.volume > 0 ? theme.FG : theme.COMMENT]);
+        if (p.volume === 0) this.text(m.left + 4.5 * u, m.top, '×', theme.ERROR);
+        const v = c.volume;
+        const vmid = (v.top + v.bottom) / 2;
+        this.rect(rect(v.left, vmid - 2, v.right, vmid + 2), theme.TILDE, 2);
+        this.rect(rect(v.left, vmid - 2, v.left + (v.right - v.left) * p.volume, vmid + 2), theme.STRING, 2);
+        this.text(v.right + cw, v.top, `${Math.round(p.volume * 100)}%`, theme.COMMENT);
+
+        const error = here ? p.error : undefined;
+        const hint = 'Space play/pause   ←/→ seek   ↑/↓ volume   m mute';
+        this.text(x, c.hint, error ?? hint, error ? theme.ERROR : theme.COMMENT);
     }
 
     /** An image file, as zoomed and moved (at first shrunk to fit if it is
@@ -1091,10 +1329,13 @@ class Painter {
         this.cmds.push(['image', area.left + p.x, area.top + p.y, p.width, p.height, src]);
         this.cmds.push(['unclip']);
         const { charW: cw, lineH: lh } = this.layout;
-        for (const [b, , label] of imageButtons(this.layout)) {
-            this.rect(b, theme.POPUP_BG, 3);
-            this.cmds.push(['stroke', b.left, b.top, b.right - b.left, b.bottom - b.top, theme.POPUP_BORDER]);
-            this.text(b.left + (b.right - b.left - cw) / 2, b.top + (b.bottom - b.top - lh) / 2, label, theme.FG);
+        for (const [b, action, label] of imageButtons(this.layout)) {
+            // Pressed: lit up, and the label nudged down.
+            const pressed = this.st.pressedButton === action;
+            this.rect(b, pressed ? theme.POPUP_SELECTION : theme.POPUP_BG, 3);
+            this.cmds.push(['stroke', b.left, b.top, b.right - b.left, b.bottom - b.top, pressed ? theme.CURSOR : theme.POPUP_BORDER]);
+            const nudge = pressed ? 1 : 0;
+            this.text(b.left + (b.right - b.left - cw) / 2, b.top + nudge + (b.bottom - b.top - lh) / 2, label, theme.FG);
         }
     }
 
@@ -1438,9 +1679,6 @@ class Painter {
         this.rect(rect(r.left, r.top, pillRight, r.bottom), modeColor);
         this.text(r.left, r.top, label, theme.BG);
 
-        const modified = ed.isModified() ? ' [+]' : '';
-        this.text(pillRight, r.top, ` ${ed.fileName()}${modified}`, theme.FG);
-
         const cursor = ed.cursor;
         const lines = ed.buffer.lineCount();
         let position: string;
@@ -1450,31 +1688,59 @@ class Painter {
         else position = `${Math.floor((ed.scrollTop * 100) / (lines - layout.rows))}%`;
         const image = ed.image;
         const zoom = this.st.imageView ? `  ${Math.round(this.st.imageView.scale * 100)}%` : '';
+        const audio = ed.audio;
         const filetype = image
             ? `${image.format}${image.width > 0 ? ` ${image.width}×${image.height}` : ''}  ${formatBytes(image.bytes)}${zoom}`
-            : (highlight.detect(ed.filePath)?.name ?? '');
+            : audio
+              ? `${audio.format}  ${formatBytes(audio.bytes)}`
+              : (highlight.detect(ed.filePath)?.name ?? '');
         const pending = this.st.mapPending.map(keyToString).join('') + ed.pendingKeys();
-        // An image has no cursor or lines to place.
-        const where = image ? '' : `   ${cursor.line + 1}:${ed.displayCol(cursor.line, cursor.col) + 1}   ${position}`;
+        // An image or sound has no cursor or lines to place.
+        const where = image || audio ? '' : `   ${cursor.line + 1}:${ed.displayCol(cursor.line, cursor.col) + 1}   ${position}`;
         const right = `${pending}   ${filetype}${where} `;
         this.textRight(r.right - cw, r.top, right, theme.FG);
 
-        // Language server progress, or diagnostic counts, to the left.
-        let x = r.right - cw - Array.from(right).length * cw;
+        // Between the two, the file name and (to the right) language server
+        // progress or diagnostic counts. When short of room, the progress is
+        // cut, then left out, while the name keeps at least MIN_NAME columns;
+        // after that the name loses its start.
+        const width = (s: string): number => Array.from(s).length;
+        const room = Math.floor((r.right - r.left) / cw) - label.length - width(right) - 1;
+        const name = ` ${ed.fileName()}${ed.isModified() ? ' [+]' : ''}`;
+        let spare = room - Math.min(width(name), MIN_NAME);
         const parts: [string, string][] = [];
+        // A sound playing from another buffer.
+        const player = this.st.player;
+        if (player.playing && player.file !== undefined && player.file !== ed.filePath) {
+            const playing = `♪ ${path.basename(player.file)} ${formatTime(player.time)}`;
+            if (spare >= width(playing) + 2) {
+                parts.push([playing, theme.STRING]);
+                spare -= width(playing) + 2;
+            }
+        }
         const progress = this.st.lspProgress;
         if (progress) {
-            const chars = Array.from(progress);
-            parts.push([chars.length > 50 ? chars.slice(0, 49).join('') + '…' : progress, theme.COMMENT]);
+            const most = Math.min(50, spare - 2);
+            if (most >= 10) parts.push([width(progress) > most ? Array.from(progress).slice(0, most - 1).join('') + '…' : progress, theme.COMMENT]);
         } else {
             this.st.diagnosticCounts.forEach((n, severity) => {
-                if (n > 0) parts.push([`${(this.st.icons ? SIGNS : PLAIN_SIGNS)[severity]} ${n}`, severityColor(severity)]);
+                const text = `${(this.st.icons ? SIGNS : PLAIN_SIGNS)[severity]} ${n}`;
+                if (n > 0 && spare >= width(text) + 2) {
+                    parts.push([text, severityColor(severity)]);
+                    spare -= width(text) + 2;
+                }
             });
         }
+        let x = r.right - cw - width(right) * cw;
         for (const [text, color] of parts.reverse()) {
-            x -= (Array.from(text).length + 2) * cw;
-            this.text(x, r.top, text, color);
+            // Two spaces before each, after the name or the part before.
+            x -= (width(text) + 2) * cw;
+            this.text(x + 2 * cw, r.top, text, color);
         }
+        // Each part's width includes its two spaces of gap.
+        const nameCols = Math.floor((x - pillRight) / cw);
+        const shown = width(name) <= nameCols ? name : ' …' + Array.from(name).slice(-Math.max(nameCols - 2, 0)).join('');
+        if (nameCols > 2) this.text(pillRight, r.top, shown, theme.FG);
     }
 
     private paintCmdline(): void {

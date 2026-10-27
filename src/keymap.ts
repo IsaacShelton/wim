@@ -1,15 +1,17 @@
 // User key mappings, translated from `~/.config/nvim/init.lua` (leader `,`,
 // `timeoutlen` 300ms). Mappings to Neovim plugins Wim doesn't have
-// (gitsigns, spider) are left out; Telescope's pickers become Wim's own.
+// (gitsigns) are left out; Telescope's pickers and nvim-spider's subword
+// motions become Wim's own.
 
-import { KeyInput, keyIs, keysEq, keysStartWith, parseKeys } from './editor/keys';
+import { KeyInput, keyIs, keysEq, keysStartWith, parseKeys, plain } from './editor/keys';
 
 /** How long to wait for the rest of an ambiguous mapping (`timeoutlen`), in ms. */
 export const TIMEOUT = 300;
 
 const LEADER = ',';
 
-export type MapMode = 'Normal' | 'Visual' | 'Insert';
+/** `Operator`: after an operator, waiting for its motion (`d`, `c`...). */
+export type MapMode = 'Normal' | 'Visual' | 'Insert' | 'Operator';
 
 /** Actions handled by the window rather than the editor. */
 export type Command =
@@ -77,7 +79,9 @@ export class Keymap {
         const NV: MapMode[] = ['Normal', 'Visual'];
         const V: MapMode[] = ['Visual'];
         const I: MapMode[] = ['Insert'];
+        const NVO: MapMode[] = ['Normal', 'Visual', 'Operator'];
         const keys = (s: string): Rhs => ({ t: 'Keys', keys: parseKeys(s) });
+        const plug = (name: string): Rhs => ({ t: 'Keys', keys: [plain(`<Plug>${name}`)] });
         const command = (c: Command): Rhs => ({ t: 'Command', command: c });
         const lsp = (action: LspAction): Rhs => ({ t: 'Lsp', action });
         const maps: [MapMode[], string, Rhs][] = [
@@ -131,6 +135,13 @@ export class Keymap {
             [N, 'Ô', keys('V')],
             [N, '\u{f8ff}', keys('V')],
             [N, '<C-n>', command('ToggleTree')],
+            // Subword motions (nvim-spider).
+            [NVO, '<leader>w', plug('SubwordW')],
+            [NVO, '<leader>e', plug('SubwordE')],
+            [NVO, '<leader>b', plug('SubwordB')],
+            [NVO, '<leader>ge', plug('SubwordGe')],
+            // Jump forward, as <C-i> is <Tab> in a terminal.
+            [N, '<C-y>', keys('<C-i>')],
             // Telescope.
             [N, '<leader>a', command('FindFiles')],
             [N, '<leader>fw', command('LiveGrep')],

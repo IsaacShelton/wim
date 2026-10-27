@@ -56,7 +56,8 @@ one the tree shows plain folder arrows.
 | `src/lsp/` | Language server client: `rpc.ts` (JSON-RPC framing), `client.ts` (one server process), `servers.ts` (which servers, where to find them, project roots), `manager.ts` (keeps servers in sync with buffers, diagnostics, edits), `features.ts` (go to, hover, rename, ...), `completion.ts` |
 | `src/popup.ts` | The completion menu, hover/diagnostic floats and the picker |
 | `src/finder.ts` | Finding files and searching text for the pickers, with ripgrep or without it |
-| `src/image.ts` | Which files are images, and their format and size |
+| `src/image.ts`, `src/imageview.ts` | Which files are images, their format and size, and zooming them |
+| `src/audio.ts` | Which files are sounds, and the player's state |
 
 Run the tests with `npm test`.
 
@@ -159,15 +160,28 @@ the same project share one server.
 ## Images
 
 PNG, JPEG, WebP, GIF and BMP files open as images: shown in the middle of the window,
-shrunk to fit if larger, with the format, size and file size in the status line. Images open
+shrunk to fit if larger, with the format, size and file size in the status line. A small image
+that would fit two or more times its size opens enlarged by the most whole times that fit. Images open
 from the command line, `:e`, the tree or a picker, and pickers preview them. An image buffer
 can't be changed or written (`E21`), so it is safe to `:w` or `:wa` with one open.
 
 To zoom: scroll (or pinch on a trackpad) to zoom around the pointer, or use the `+`, `-` and
-`=` buttons in the bottom right corner, or the same keys: `+` zooms in, `-` zooms out and `=`
-(or `0`) fits the window again. Drag, or press `h`/`j`/`k`/`l` or the arrow keys, to move it;
-the middle of the window always stays over the image. Enlarged two times or more, pixels are
-drawn sharp. The status line shows the zoom.
+`=` buttons in the bottom right corner (`=` fits the window again). On the keyboard, `+` or `=`
+zooms in, `-` zooms out and `0` fits the window again. Drag, or press `h`/`j`/`k`/`l` or the
+arrow keys, to move it; the middle of the window always stays over the image. Keys and buttons
+glide to the new zoom or place; holding a key keeps going. Enlarged two times or more, pixels
+are drawn sharp. The status line shows the zoom.
+
+## Sounds
+
+MP3, WAV, FLAC, Ogg, Opus, AAC (`.m4a`, `.aac`) and WebM (`.weba`) files open in a player: the
+file's name, format, size and length, a play/pause button, a scrubber with the time, and the
+volume. Click or drag the scrubber to seek and the volume bar to set the volume. On the keyboard:
+Space, Enter or `p` play and pause; `h`/`l` or ←/→ seek 5 seconds; `0`–`9` go to that tenth of
+the way through; `k`/`j` or ↑/↓ change the volume; `m` mutes. A sound keeps playing in other
+buffers (the status line shows it) and stops when its buffer is closed; one sound plays at a
+time. Like images, sound buffers can't be changed or written. Which formats play depends on the
+window's browser engine; if one can't, the player says so.
 
 ## Finding files and text
 
@@ -192,6 +206,8 @@ Normal-mode mappings don't apply in the middle of a command, so `f,` still finds
 | Ctrl+h/j/k/l | Insert | Move the cursor left/down/up/right |
 | Tab / Shift+Tab | Normal | Next / previous buffer |
 | Ctrl+n | Normal | Toggle the file tree |
+| Ctrl+y | Normal | Forward in the jump list (`<C-i>`, which is Tab in a terminal) |
+| `,w` `,b` `,e` `,ge` | Normal, Visual, after an operator | Like `w`, `b`, `e`, `ge` for subwords (nvim-spider): camelCase humps, snake_case parts and digit runs; single punctuation is skipped |
 | `,;` `,o` `,'` | Normal | `:w` |
 | `,:` | Normal | `:wqa` |
 | `,v` / `,V` | Normal | `:q` / `:q!` |
@@ -223,15 +239,19 @@ Normal-mode mappings don't apply in the middle of a command, so `f,` still finds
 On Windows and Linux, Alt works like Option in these mappings (Alt+j is `}`, Alt+Shift+j moves
 lines, and so on).
 
-Mappings for plugins Wim doesn't have (gitsigns, nvim-spider, the theme toggle, Rust
-auto-import, inlay hints) are left out, as are `<C-y>` (jump list) and the `=` re-indent
-step of the line-moving mappings.
+Mappings for plugins Wim doesn't have (gitsigns, the theme toggle, Rust
+auto-import, inlay hints) are left out, as is the `=` re-indent step of the line-moving
+mappings.
 
 **Ex commands:** `:w [file]`, `:q[!]`, `:wq`, `:x`, `ZZ`, `ZQ`, `:e[!] [file]` (Tab completes paths),
 `:[range]s/pat/rep/[gie]` (`\1` and `&` in the replacement), `:d`, `:y`, `:m`, `:t`, `:>`, `:<`,
 `:j`, `:sort[!] [iu]`, `:noh`, `:reg`, `:pwd`, `:cd`, `:{N}`, `:undo`, `:redo`.
 Ranges: `%`, `.`, `$`, `N`, `'<,'>`, `'a`, `+N`/`-N` offsets. Buffers: `:%bd` closes all,
 `:bonly` closes all but the current one.
+
+**Jump list:** `<C-o>` goes back to where you jumped from and `<C-i>` (or `<C-y>`) forward
+again, across files: jumps are `G`, `gg`, searches, `%`, `{`/`}`, `H`/`M`/`L`, marks, `:N`,
+going to a definition or other location, picker choices and opening another file.
 
 **Marks:** `a`–`z` are per buffer; `A`–`Z` are global and jump to their file, reopening it if
 it was closed.

@@ -92,6 +92,9 @@ function run(argv) {
     win.releasedWhenClosed = false;
 
     const config = $.WKWebViewConfiguration.alloc.init;
+    // Sound starts from Node's message after a key press, not in the key's
+    // own event (WKAudiovisualMediaTypeNone).
+    config.mediaTypesRequiringUserActionForPlayback = 0;
     const view = $.WKWebView.alloc.initWithFrameConfiguration(frame, config);
     view.setValueForKey(false, 'drawsBackground');
 
@@ -192,6 +195,9 @@ function openChromium(browser: string, url: string): WindowHandle {
             '--disable-extensions',
             '--disable-sync',
             '--disable-features=Translate',
+            // Sound starts from Node's message after a key press, not in the
+            // key's own event.
+            '--autoplay-policy=no-user-gesture-required',
         ],
         { stdio: 'ignore', windowsHide: false },
     );

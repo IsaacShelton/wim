@@ -102,10 +102,16 @@ export class Overlay {
         this.rect(b, theme.POPUP_BG);
         this.cmds.push(['stroke', b.left, b.top, b.right - b.left, b.bottom - b.top, theme.POPUP_BORDER]);
         if (title) {
+            // On the top border. A titled box sits half a row off the text
+            // rows; the half rows above and below it are cleared, so no text
+            // behind is cut through or shows around the title.
             const t = ` ${title} `;
             const x = b.left + this.cw;
-            this.rect({ left: x, top: b.top - 1, right: x + width(t) * this.cw, bottom: b.top + 2 }, theme.POPUP_BG);
-            this.cmds.push(['text', x, b.top - this.lh / 2, t, theme.FG]);
+            const y = b.top - this.lh / 2;
+            this.rect({ left: b.left, top: y, right: b.right, bottom: b.top }, theme.BG);
+            this.rect({ left: b.left, top: b.bottom, right: b.right, bottom: b.bottom + this.lh / 2 }, theme.BG);
+            this.rect({ left: x, top: y, right: x + width(t) * this.cw, bottom: b.top + 2 }, theme.POPUP_BG);
+            this.cmds.push(['text', x, y, t, theme.FG]);
         }
     }
 
@@ -186,16 +192,28 @@ export class Overlay {
         const totalCols = big
             ? Math.max(Math.round(areaCols * 0.97) - 2, 10)
             : Math.max(Math.min(Math.round(areaCols * 0.8), 120, areaCols - 4), 10);
-        const rows = p.inputOnly
+        let rows = p.inputOnly
             ? 1
             : Math.max(Math.min(Math.round(areaRows * (big ? 0.9 : 0.6)), areaRows - (big ? 2 : 4)), 3);
         const preview = big && areaCols >= PREVIEW_CUTOFF;
         // The results take 60% of the width beside a preview.
         const cols = preview ? Math.floor(totalCols * 0.6) - 1 : totalCols;
         const w = (cols + 2) * this.cw;
-        const h = (rows + (p.inputOnly ? 0 : 1)) * this.lh + 2 * PAD;
+        // Whole rows, so the bottom lines up with the text too, and room for
+        // the half rows above and below (see `frame`).
+        const areaH = area.bottom - area.top;
+        const extra = p.inputOnly ? 0 : 1;
+        const h = Math.min(
+            Math.ceil(((rows + extra) * this.lh + 2 * PAD) / this.lh) * this.lh,
+            Math.floor((areaH - this.lh) / this.lh) * this.lh,
+        );
+        rows = Math.max(Math.min(rows, Math.floor((h - 2 * PAD) / this.lh) - extra), 1);
         const left = area.left + Math.floor((area.right - area.left - (totalCols + 2) * this.cw) / 2);
-        const top = p.inputOnly ? area.top + Math.floor((area.bottom - area.top) / 3) : area.top + Math.floor((area.bottom - area.top - h) / 2);
+        const middle = p.inputOnly ? area.top + Math.floor(areaH / 3) : area.top + Math.floor((areaH - h) / 2);
+        // The title's row lines up with a row of text, which it replaces
+        // whole rather than cutting through.
+        const row = Math.min(Math.max(Math.round((middle - area.top) / this.lh), 1), Math.floor((areaH - h) / this.lh));
+        const top = area.top + row * this.lh - this.lh / 2;
         const b = { left, top, right: left + w, bottom: top + h };
         this.frame(b, p.title);
         const x = b.left + this.cw;

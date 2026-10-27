@@ -1,10 +1,13 @@
 // Zooming and panning an image: which part of the image is in the middle of
-// the view, and how large it is drawn.
+// the view, and how large it is drawn. Changes from the keyboard glide there
+// over a few frames; the mouse moves it directly.
 
 /** How far one zoom step goes. */
 const STEP = 1.25;
 const MIN_SCALE = 0.02;
 const MAX_SCALE = 64;
+/** The share of the remaining distance covered each frame when gliding. */
+const EASE = 0.3;
 
 export interface Size {
     width: number;
@@ -19,74 +22,128 @@ export interface Placement {
     height: number;
 }
 
-export class ImageView {
-    /** Screen pixels per image pixel; undefined to fit the view. */
-    private scale: number | undefined;
+interface State {
+    /** Screen pixels per image pixel. */
+    scale: number;
     /** The image point (in image pixels) at the middle of the view. */
-    private cx: number;
-    private cy: number;
+    cx: number;
+    cy: number;
+}
+
+export class ImageView {
+    /** Fitting the view: the scale follows the view's size. */
+    private fit = true;
+    /** Where the view is going. */
+    private target: State;
+    /** Where it is drawn now; the same as `target` unless gliding. */
+    private shown: State;
+    private gliding = false;
 
     constructor(private readonly image: Size) {
-        this.cx = image.width / 2;
-        this.cy = image.height / 2;
+        this.target = { scale: 1, cx: image.width / 2, cy: image.height / 2 };
+        this.shown = { ...this.target };
     }
 
-    /** Shrink to fit the view, but never enlarge. */
+    /** Shrink to fit the view. A small image that would fit two or more
+     * times its size is enlarged by the most whole times that fits, which
+     * keeps its pixels square and sharp. */
     private fitScale(view: Size): number {
-        return Math.min(1, view.width / this.image.width, view.height / this.image.height);
+        const fit = Math.min(view.width / this.image.width, view.height / this.image.height);
+        return fit >= 2 ? Math.floor(fit) : Math.min(fit, 1);
+    }
+
+    /** Bring a fitting target up to date with the view's size. */
+    private settle(view: Size): void {
+        if (this.fit) this.target.scale = this.fitScale(view);
+        if (!this.gliding) this.shown = { ...this.target };
     }
 
     /** The scale it is drawn at, for the status line. */
     currentScale(view: Size): number {
-        return this.scale ?? this.fitScale(view);
-    }
-
-    get fitted(): boolean {
-        return this.scale === undefined;
-    }
-
-    /** Back to fitting the view. */
-    reset(): void {
-        this.scale = undefined;
-        this.cx = this.image.width / 2;
-        this.cy = this.image.height / 2;
-    }
-
-    /** Zoom in (`steps` > 0) or out, keeping the image point under `at` (a
-     * point in the view; its middle by default) where it is. */
-    zoom(steps: number, view: Size, at?: { x: number; y: number }): void {
-        const old = this.currentScale(view);
-        const scale = Math.min(Math.max(old * STEP ** steps, MIN_SCALE), MAX_SCALE);
-        const ax = (at?.x ?? view.width / 2) - view.width / 2;
-        const ay = (at?.y ?? view.height / 2) - view.height / 2;
-        // The image point under `at` stays there.
-        this.cx += ax / old - ax / scale;
-        this.cy += ay / old - ay / scale;
-        this.scale = scale;
-        this.clamp();
-    }
-
-    /** Move the image by screen pixels (as dragging does). */
-    pan(dx: number, dy: number, view: Size): void {
-        const s = this.currentScale(view);
-        this.cx -= dx / s;
-        this.cy -= dy / s;
-        this.clamp();
+        this.settle(view);
+        return this.shown.scale;
     }
 
     /** Keep the image in sight: the middle of the view stays over it. */
-    private clamp(): void {
-        this.cx = Math.min(Math.max(this.cx, 0), this.image.width);
-        this.cy = Math.min(Math.max(this.cy, 0), this.image.height);
+    private clamp(s: State): State {
+        return {
+            scale: s.scale,
+            cx: Math.min(Math.max(s.cx, 0), this.image.width),
+            cy: Math.min(Math.max(s.cy, 0), this.image.height),
+        };
+    }
+
+    /** Go to `next`: glide there, or jump. */
+    private go(next: State, glide: boolean): void {
+        this.target = this.clamp(next);
+        if (glide) {
+            this.gliding = true;
+        } else {
+            this.shown = { ...this.target };
+            this.gliding = false;
+        }
+    }
+
+    /** Back to fitting the view, in the middle. */
+    reset(view: Size, glide = false): void {
+        this.fit = true;
+        this.go({ scale: this.fitScale(view), cx: this.image.width / 2, cy: this.image.height / 2 }, glide);
+    }
+
+    /** Zoom in (`steps` > 0) or out, keeping the image point under `at` (a
+     * point in the view; its middle by default) where it is. Gliding steps
+     * add up, so holding a key keeps going. */
+    zoom(steps: number, view: Size, at?: { x: number; y: number }, glide = false): void {
+        this.settle(view);
+        const from = glide ? this.target : this.shown;
+        const scale = Math.min(Math.max(from.scale * STEP ** steps, MIN_SCALE), MAX_SCALE);
+        const ax = (at?.x ?? view.width / 2) - view.width / 2;
+        const ay = (at?.y ?? view.height / 2) - view.height / 2;
+        this.fit = false;
+        // The image point under `at` stays there.
+        this.go({ scale, cx: from.cx + ax / from.scale - ax / scale, cy: from.cy + ay / from.scale - ay / scale }, glide);
+    }
+
+    /** Move the image by screen pixels (as dragging does). */
+    pan(dx: number, dy: number, view: Size, glide = false): void {
+        this.settle(view);
+        const from = glide ? this.target : this.shown;
+        this.go({ scale: from.scale, cx: from.cx - dx / from.scale, cy: from.cy - dy / from.scale }, glide);
+    }
+
+    /** Glide one frame closer to the target; returns whether there is further
+     * to go. */
+    tick(view: Size): boolean {
+        if (!this.gliding) return false;
+        if (this.fit) this.target.scale = this.fitScale(view);
+        const t = this.target;
+        const s = this.shown;
+        // Zoom evenly by moving the scale's logarithm.
+        const scale = Math.exp(Math.log(s.scale) + (Math.log(t.scale) - Math.log(s.scale)) * EASE);
+        const cx = s.cx + (t.cx - s.cx) * EASE;
+        const cy = s.cy + (t.cy - s.cy) * EASE;
+        // Done once less than half a screen pixel is left to go.
+        const near =
+            Math.abs(scale - t.scale) * Math.max(this.image.width, this.image.height) < 0.5 &&
+            Math.abs(cx - t.cx) * scale < 0.5 &&
+            Math.abs(cy - t.cy) * scale < 0.5;
+        if (near) {
+            this.shown = { ...t };
+            this.gliding = false;
+            return false;
+        }
+        this.shown = { scale, cx, cy };
+        return true;
     }
 
     place(view: Size): Placement {
-        const s = this.currentScale(view);
+        this.settle(view);
+        const s = this.shown;
         return {
-            x: view.width / 2 - this.cx * s,
-            y: view.height / 2 - this.cy * s,
-            width: this.image.width * s,
-            height: this.image.height * s,
+            x: view.width / 2 - s.cx * s.scale,
+            y: view.height / 2 - s.cy * s.scale,
+            width: this.image.width * s.scale,
+            height: this.image.height * s.scale,
         };
     }
 }

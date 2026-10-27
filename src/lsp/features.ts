@@ -181,7 +181,7 @@ export class LspFeatures {
             return;
         }
         if (isVisual(ed.mode)) ed.exitVisual();
-        ed.marks.set("'", ed.cursor);
+        ed.markJump();
         if (file !== ed.filePath) ed.openFile(file);
         if (ed.filePath !== file) return;
         ed.cursor = fromPosition(ed.buffer, target.range.start, target.encoding);
