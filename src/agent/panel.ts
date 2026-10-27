@@ -6,10 +6,11 @@
 
 import { Clipboard } from '../clipboard';
 import { KeyInput, charOf } from '../editor/keys';
+import { PRESET_NAMES, Preset, PresetName } from '../config';
 import { Box, Picker, PickerItem, Run } from '../popup';
 import { DrawCmd } from '../protocol';
 import { theme } from '../theme';
-import { AgentBackend, ContextUsage, ModelInfo, PermissionMode } from './backend';
+import { AgentBackend, ContextUsage, ModelInfo, PermissionMode, UsageInfo } from './backend';
 import { TextInput } from './input';
 import { AgentSession, EFFORTS, MODES, Prompt, modeLabel } from './session';
 import { PromptView, Row, transcriptRows } from './transcript';
@@ -33,7 +34,9 @@ type Hit =
     | { t: 'Model' }
     | { t: 'Mode' }
     | { t: 'Effort' }
+    | { t: 'Preset' }
     | { t: 'Context' }
+    | { t: 'Usage' }
     | { t: 'Choice'; index: number }
     | { t: 'Input' }
     | { t: 'Transcript' };
@@ -45,6 +48,10 @@ const NONE: PanelAction = { t: 'None' };
 const INPUT_ROWS = 8;
 /** How often the spinner turns while a session works, in ms. */
 const SPIN = 120;
+/** How often the cache countdown is redrawn, in ms. */
+const CACHE_TICK = 15000;
+/** Columns of the context and usage meters. */
+const METER_COLS = 8;
 /** Widest a session's tab gets, in columns. */
 const TAB_COLS = 24;
 
@@ -76,7 +83,7 @@ export function ago(time: number, now = Date.now()): string {
 /** A model id as a name: `claude-opus-5-5` is Opus 5.5. */
 function prettyModel(id: string): string {
     const m = /^claude-([a-z]+)-(\d+)(?:-(\d{1,2}))?(?:-\d{8})?$/.exec(id);
-    if (!m) return id;
+    if (!m) return /^[a-z]+$/.test(id) ? id[0].toUpperCase() + id.slice(1) : id;
     return `${m[1][0].toUpperCase()}${m[1].slice(1)} ${m[2]}${m[3] ? '.' + m[3] : ''}`;
 }
 
@@ -125,6 +132,28 @@ function categoryColor(id: string | undefined): string {
     }
 }
 
+/** The preset's color: the cooler, the lighter the task. */
+function presetColor(name: PresetName | undefined): string {
+    switch (name) {
+        case 'low':
+            return theme.FUNCTION;
+        case 'medium':
+            return theme.TYPE;
+        case 'high':
+            return theme.MODE_AGENT;
+        default:
+            return theme.COMMENT;
+    }
+}
+
+/** How long until `time` (ms), briefly. */
+function until(time: number, now: number): string {
+    const mins = Math.ceil((time - now) / 60000);
+    if (mins >= 1440) return `${Math.round(mins / 1440)}d`;
+    if (mins >= 60) return `${Math.floor(mins / 60)}h${mins % 60 > 0 ? ` ${mins % 60}m` : ''}`;
+    return `${Math.max(mins, 1)}m`;
+}
+
 function contextColor(percent: number): string {
     return percent >= 80 ? theme.ERROR : percent >= 50 ? theme.DIAGNOSTIC_WARN : theme.STRING;
 }
@@ -145,7 +174,10 @@ const HELP: [string, string][] = [
     ['m', 'Model'],
     ['p  Shift+Tab', 'Permission mode: pick / cycle'],
     ['e', 'Effort'],
+    ['L  M  H', 'Preset for a low / medium / high complexity task'],
+    ['P', 'Presets: pick one'],
     ['c', 'Context use, by kind'],
+    ['u', 'Plan usage limits'],
     ['y', 'Copy the last reply'],
     ['q', 'Hide the panel (Cmd+L shows it)'],
     ['Ctrl+h', 'To the editor (Ctrl+l comes back)'],
@@ -190,6 +222,12 @@ export interface PanelOptions {
     refresh: () => void;
     /** A tool changed files: these, or (undefined) perhaps any. */
     onFiles: (paths: string[] | undefined) => void;
+    /** The model and effort for low, medium and high complexity tasks. */
+    presets: Record<PresetName, Preset>;
+    /** The preset new sessions start with. */
+    defaultPreset?: PresetName;
+    /** How long the prompt cache lasts after a request, in minutes. */
+    cacheMinutes: number;
 }
 
 export class AgentPanel {
@@ -204,7 +242,9 @@ export class AgentPanel {
     private promptFor: [Prompt, number] | undefined;
     private readonly promptView = { selected: 0, checked: new Set<number>(), typing: false };
     showContext = false;
+    showUsage = false;
     showHelp = false;
+    private cacheTimer: NodeJS.Timeout | undefined;
     /** The models Claude Code offers, once asked. */
     private models: ModelInfo[] | undefined;
     /** `g` was typed, for `gg`, `gt` and `gT`. */
@@ -245,10 +285,36 @@ export class AgentPanel {
         });
         this.sessions.push(s);
         this.current = this.sessions.length - 1;
+        if (!resume && this.opts.defaultPreset) this.usePreset(s, this.opts.defaultPreset);
         return s;
     }
 
+    /** Switch a session to a preset's model and effort. */
+    usePreset(s: AgentSession, name: PresetName): void {
+        const preset = this.opts.presets[name];
+        s.applyPreset(name, preset, this.presetLabel(preset));
+    }
+
+    private presetLabel(p: Preset): string {
+        return p.model === undefined ? 'default model' : this.modelName(p.model);
+    }
+
+    /** When the session's prompt cache runs out, if it has one. */
+    private cacheExpiry(s: AgentSession): number | undefined {
+        return s.lastReply === undefined ? undefined : s.lastReply + this.opts.cacheMinutes * 60000;
+    }
+
     private changed(): void {
+        // Redraw the cache countdown while some session's cache is warm.
+        const now = Date.now();
+        const warm = this.sessions.some((s) => (this.cacheExpiry(s) ?? 0) > now);
+        if (warm && !this.cacheTimer) {
+            this.cacheTimer = setInterval(() => {
+                this.opts.refresh();
+                if (!this.sessions.some((s) => (this.cacheExpiry(s) ?? 0) > Date.now())) this.stopCacheTimer();
+            }, CACHE_TICK);
+            this.cacheTimer.unref();
+        }
         const busy = this.sessions.some((s) => s.running);
         if (busy && !this.spinner) {
             this.spinner = setInterval(() => this.opts.refresh(), SPIN);
@@ -301,6 +367,10 @@ export class AgentPanel {
             else this.message = "The agent isn't working on anything";
             return NONE;
         }
+        // Ctrl+h goes to the editor from either mode, the prompt too (the
+        // panel is the rightmost window, so Ctrl+l stays).
+        if (key.ctrl && key.key === 'h') return { t: 'FocusEditor' };
+        if (key.ctrl && key.key === 'l') return NONE;
         if (s.prompt) {
             const action = this.promptKey(s, s.prompt, key);
             if (action) return action;
@@ -531,8 +601,22 @@ export class AgentPanel {
                 return this.modePicker(s);
             case 'e':
                 return this.effortPicker(s);
+            case 'L':
+                this.usePreset(s, 'low');
+                break;
+            case 'M':
+                this.usePreset(s, 'medium');
+                break;
+            case 'H':
+                this.usePreset(s, 'high');
+                break;
+            case 'P':
+                return this.presetPicker(s);
             case 'c':
                 this.showContext = !this.showContext;
+                break;
+            case 'u':
+                this.toggleUsage(s);
                 break;
             case '?':
                 this.showHelp = !this.showHelp;
@@ -645,11 +729,28 @@ export class AgentPanel {
         else this.newSession({ id, title });
     }
 
+    private modelName(id: string): string {
+        return this.models?.find((m) => m.value === id || m.resolvedModel === id)?.displayName ?? prettyModel(id);
+    }
+
     private modelLabel(s: AgentSession): string {
-        const find = (id: string): ModelInfo | undefined => this.models?.find((m) => m.value === id || m.resolvedModel === id);
-        if (s.model !== undefined) return find(s.model)?.displayName ?? prettyModel(s.model);
-        if (s.activeModel !== undefined) return find(s.activeModel)?.displayName ?? prettyModel(s.activeModel);
+        if (s.model !== undefined) return this.modelName(s.model);
+        if (s.activeModel !== undefined) return this.modelName(s.activeModel);
         return 'Default model';
+    }
+
+    private toggleUsage(s: AgentSession): void {
+        this.showUsage = !this.showUsage;
+        if (this.showUsage) void s.refreshUsage();
+    }
+
+    private presetPicker(s: AgentSession): PanelAction {
+        const items = PRESET_NAMES.map((name) => {
+            const p = this.opts.presets[name];
+            const what = [this.presetLabel(p), p.effort ? `${p.effort} effort` : undefined].filter(Boolean).join(', ');
+            return { label: name, detail: `${name === s.preset ? '(current) ' : ''}${what}`, value: name };
+        });
+        return { t: 'Picker', picker: new Picker<PresetName>('Preset', (name) => this.usePreset(s, name), { items }) as unknown as Picker<never> };
     }
 
     private modelPicker(s: AgentSession): PanelAction {
@@ -727,8 +828,13 @@ export class AgentPanel {
                 return this.modePicker(s);
             case 'Effort':
                 return this.effortPicker(s);
+            case 'Preset':
+                return this.presetPicker(s);
             case 'Context':
                 this.showContext = !this.showContext;
+                break;
+            case 'Usage':
+                this.toggleUsage(s);
                 break;
             case 'Choice':
                 this.syncPrompt();
@@ -772,8 +878,9 @@ export class AgentPanel {
         const cols = Math.max(Math.floor((r.right - x) / cw) - 1, 4);
         let y = this.paintTabs(cv, r, now);
         if (s) {
-            y = this.paintSettings(cv, s, x, y, cols);
+            y = this.paintSettings(cv, s, x, y, cols, now);
             if (this.showContext) y = this.paintContext(cv, s.context, x, y, cols);
+            if (this.showUsage) y = this.paintUsage(cv, s.usage, x, y, cols, now);
             cv.rect({ left: r.left + 1, top: y, right: r.right, bottom: y + 1 }, theme.TILDE);
             const inputTop = this.paintInput(cv, s, r, x, cols, focused);
             this.paintTranscript(cv, s, { left: r.left + 1, top: y + 4, right: r.right, bottom: inputTop - 4 }, x, cols, now);
@@ -826,33 +933,128 @@ export class AgentPanel {
         return bar.bottom;
     }
 
-    /** The session's model, permission mode, effort, context use and cost,
-     * each clickable. */
-    private paintSettings(cv: Canvas, s: AgentSession, x: number, y: number, cols: number): number {
+    /** Two rows, each part clickable where it can be changed: the session's
+     * preset, model, permission mode and effort; then its context use, plan
+     * usage, prompt cache and cost. */
+    private paintSettings(cv: Canvas, s: AgentSession, x: number, y: number, cols: number, now: number): number {
         const { cw, lh } = cv;
-        let col = 0;
-        const part = (text: string, color: string, hit?: Hit): void => {
-            if (col > 0) {
-                cv.text(x + col * cw, y, ' · ', theme.TILDE);
-                col += 3;
-            }
-            const shown = cut(text, Math.max(cols - col, 0));
-            cv.text(x + col * cw, y, shown, color);
-            if (hit) this.hits.push([{ left: x + col * cw, top: y, right: x + (col + width(shown)) * cw, bottom: y + lh }, hit]);
-            col += width(shown);
+        const row = (rowY: number) => {
+            let col = 0;
+            /** A part, after a separator; `gauge` draws a meter before it. */
+            const part = (text: string, color: string, hit?: Hit, gauge?: number): void => {
+                const meter = gauge === undefined ? 0 : METER_COLS + 1;
+                if (col > 0) {
+                    cv.text(x + col * cw, rowY, ' · ', theme.TILDE);
+                    col += 3;
+                }
+                const left = x + col * cw;
+                if (gauge !== undefined) {
+                    this.meter(cv, left, rowY, gauge, color);
+                    col += meter;
+                }
+                const shown = cut(text, Math.max(cols - col, 0));
+                cv.text(x + col * cw, rowY, shown, color);
+                col += width(shown);
+                if (hit) this.hits.push([{ left, top: rowY, right: x + col * cw, bottom: rowY + lh }, hit]);
+            };
+            return { part, room: () => cols - col };
         };
-        part(this.modelLabel(s), theme.FG, { t: 'Model' });
-        part(modeLabel(s.mode), modeColor(s.mode), { t: 'Mode' });
-        part(s.effort ?? 'effort', s.effort ? theme.FG : theme.COMMENT, { t: 'Effort' });
+
+        const top = row(y);
+        top.part(s.preset ?? 'no preset', presetColor(s.preset), { t: 'Preset' });
+        top.part(this.modelLabel(s), theme.FG, { t: 'Model' });
+        top.part(modeLabel(s.mode), modeColor(s.mode), { t: 'Mode' });
+        top.part(s.effort ?? 'effort', s.effort ? theme.FG : theme.COMMENT, { t: 'Effort' });
+
+        const bottom = row(y + lh);
         const ctx = s.context;
-        if (ctx && col + 14 < cols) {
+        if (ctx) {
             const percent = Math.round(ctx.percentage);
-            part(`${percent}% context`, contextColor(percent), { t: 'Context' });
-        } else if (col + 10 < cols) {
-            part('context', theme.COMMENT, { t: 'Context' });
+            bottom.part(`${percent}% context`, contextColor(percent), { t: 'Context' }, percent);
+        } else {
+            bottom.part('context', theme.COMMENT, { t: 'Context' });
         }
-        if (s.cost > 0 && col + 9 < cols) part(`$${s.cost.toFixed(2)}`, theme.COMMENT);
-        return y + lh;
+        const limit = this.worstLimit(s.usage);
+        if (limit && bottom.room() > METER_COLS + 12) {
+            const percent = Math.round(limit.utilization);
+            bottom.part(`${percent}% ${limit.label}`, contextColor(percent), { t: 'Usage' }, percent);
+        }
+        const expiry = this.cacheExpiry(s);
+        if (expiry !== undefined && bottom.room() > 12) {
+            const left = expiry - now;
+            if (left <= 0) bottom.part('cache cold', theme.ERROR);
+            else bottom.part(`cache ${left < 60000 ? '<1m' : until(expiry, now)}`, left < 60000 ? theme.DIAGNOSTIC_WARN : theme.STRING);
+        }
+        if (s.cost > 0 && bottom.room() > 9) bottom.part(`$${s.cost.toFixed(2)}`, theme.COMMENT);
+        return y + 2 * lh;
+    }
+
+    /** A small bar for a percentage (0-100). */
+    private meter(cv: Canvas, left: number, y: number, percent: number, color: string, cols = METER_COLS): void {
+        const { cw, lh } = cv;
+        const w = cols * cw;
+        const box = { left, top: y + lh * 0.32, right: left + w, bottom: y + lh * 0.68 };
+        cv.rect(box, theme.TILDE, 2);
+        cv.rect({ ...box, right: left + (w * Math.min(Math.max(percent, 0), 100)) / 100 }, color, 2);
+    }
+
+    /** The plan limit closest to running out: 5-hour or weekly. */
+    private worstLimit(usage: UsageInfo | undefined): { label: string; utilization: number } | undefined {
+        const limits = usage?.rate_limits;
+        if (!limits) return undefined;
+        const found = [
+            { label: '5h', utilization: limits.five_hour?.utilization },
+            { label: '7d', utilization: limits.seven_day?.utilization },
+        ].filter((l): l is { label: string; utilization: number } => typeof l.utilization === 'number');
+        return found.sort((a, b) => b.utilization - a.utilization)[0];
+    }
+
+    /** The plan's usage limits, as `/usage` shows them. */
+    private paintUsage(cv: Canvas, usage: UsageInfo | undefined, x: number, y: number, cols: number, now: number): number {
+        const { cw, lh } = cv;
+        if (!usage) {
+            cv.text(x, y, cut('Usage limits show once the agent has replied', cols), theme.COMMENT);
+            return y + lh;
+        }
+        const limits = usage.rate_limits;
+        if (!usage.rate_limits_available || !limits) {
+            cv.text(x, y, cut("Plan limits don't apply to this login (they are for Claude subscriptions)", cols), theme.COMMENT);
+            return y + lh;
+        }
+        const windows: { label: string; utilization: number | null; resets: string | null }[] = [
+            { label: '5-hour', utilization: limits.five_hour?.utilization ?? null, resets: limits.five_hour?.resets_at ?? null },
+            { label: 'Weekly', utilization: limits.seven_day?.utilization ?? null, resets: limits.seven_day?.resets_at ?? null },
+            { label: 'Weekly Opus', utilization: limits.seven_day_opus?.utilization ?? null, resets: limits.seven_day_opus?.resets_at ?? null },
+            { label: 'Weekly Sonnet', utilization: limits.seven_day_sonnet?.utilization ?? null, resets: limits.seven_day_sonnet?.resets_at ?? null },
+            ...(limits.model_scoped ?? []).map((m) => ({ label: `Weekly ${m.display_name}`, utilization: m.utilization, resets: m.resets_at })),
+        ].filter((w) => w.utilization !== null);
+        const plan = usage.subscription_type ? ` (${usage.subscription_type})` : '';
+        cv.text(x, y, cut(`Plan usage limits${plan}`, cols), theme.FG);
+        y += lh;
+        const labelCols = Math.min(Math.max(...windows.map((w) => width(w.label)), 0) + 1, Math.floor(cols / 3));
+        for (const w of windows) {
+            const percent = Math.round(w.utilization ?? 0);
+            const resets = w.resets ? Date.parse(w.resets) : NaN;
+            const reset = Number.isFinite(resets) ? (resets > now ? `resets in ${until(resets, now)}` : 'reset') : '';
+            const label = cut(w.label, labelCols - 1);
+            cv.text(x, y, label, theme.FG);
+            const barCols = Math.min(METER_COLS, Math.max(cols - labelCols - 5, 0));
+            this.meter(cv, x + labelCols * cw, y, percent, contextColor(percent), barCols);
+            const rest = `${String(percent).padStart(3)}%  ${reset}`;
+            cv.text(x + (labelCols + barCols + 1) * cw, y, cut(rest, Math.max(cols - labelCols - barCols - 1, 0)), theme.COMMENT);
+            y += lh;
+        }
+        if (windows.length === 0) {
+            cv.text(x, y, 'No limits reported', theme.COMMENT);
+            y += lh;
+        }
+        const extra = limits.extra_usage;
+        if (extra?.is_enabled) {
+            const used = extra.utilization !== null ? `${Math.round(extra.utilization)}% of the monthly limit used` : 'on';
+            cv.text(x, y, cut(`Extra usage: ${used}`, cols), theme.COMMENT);
+            y += lh;
+        }
+        return y;
     }
 
     /** Context use by kind, as `/context` shows it. */
@@ -973,10 +1175,16 @@ export class AgentPanel {
         this.hits.push([area, { t: 'Transcript' }]);
     }
 
+    private stopCacheTimer(): void {
+        if (this.cacheTimer) clearInterval(this.cacheTimer);
+        this.cacheTimer = undefined;
+    }
+
     /** Stop every session's process (Wim is exiting). */
     dispose(): void {
         if (this.spinner) clearInterval(this.spinner);
         this.spinner = undefined;
+        this.stopCacheTimer();
         for (const s of this.sessions) s.close();
     }
 }

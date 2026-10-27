@@ -91,7 +91,7 @@ function draw(): void {
                 break;
             }
             case 'text':
-                if (cmd[5]) ctx.font = `italic ${font()}`;
+                if (cmd[5]) ctx.font = `${cmd[5]} ${font()}`;
                 drawText(cmd[1], cmd[2], cmd[3], cmd[4]);
                 if (cmd[5]) ctx.font = font();
                 break;
@@ -249,6 +249,9 @@ function shortcut(e: KeyboardEvent): boolean {
             break;
         case 'l':
             send({ t: 'command', name: 'agents' });
+            break;
+        case 'j':
+            send({ t: 'command', name: 'terminal' });
             break;
         case 'q':
         case 'w':

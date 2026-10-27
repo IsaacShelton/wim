@@ -303,3 +303,62 @@ made where a request was open to interpretation.
      and the `:Agents` command; the README still says the agents are Claude
      Code sessions. Titles Claude Code itself gives a permission prompt
      ("Claude wants to…") are shown as it sends them.
+14.4 Ctrl+h and Ctrl+l move between windows, even from the agents panel's
+     prompt.
+     Decided: in the panel's prompt they move between the panel and the
+     editor, as in its Normal mode, rather than the cursor; the editor's
+     Insert mode keeps the Neovim config's Ctrl+h/l cursor keys.
+14.5 Claude Code is only used when the settings turn it on.
+     Decided: `claude.enabled` in `wim.config.json`, false by default. With
+     it off, Cmd+L, `,cc` and `:Agents` say so, and the status line has no
+     badge.
+14.6 Presets for low, medium and high complexity tasks, each a model and
+     effort set in the settings (by default Haiku 5.5 at low effort, Sonnet
+     5.5 at medium and Opus 5.5 at high), selected in the agents panel.
+     Decided: `L`, `M`, `H` in Normal mode, `P` to pick, or a click on the
+     preset in the header. A preset applies to the next request, also while
+     a session is working; picking a model or effort by hand leaves the
+     preset. `claude.defaultPreset` (unset by default, which keeps Claude
+     Code's own settings) is what new sessions start with.
+14.7 The panel's top shows context use and whether the prompt cache is
+     stale.
+     Decided: a second row under the model, mode and effort: a meter and
+     percentage for context use, and the time left in the cache, "cache
+     cold" in red once it has run out. Claude Code does not report the
+     cache, so it is estimated as `claude.cacheMinutes` (60) after the last
+     reply.
+14.8 A way to see the plan's usage limits.
+     Decided: the plan limit closest to running out (5-hour or weekly) is
+     in the second row, and `u` or a click shows all of them with when they
+     reset, from the Agent SDK's experimental usage request (the data
+     behind `/usage`). They exist for Claude subscriptions only.
+
+
+15. Settings
+------------
+15.1 A small configuration file in Wim's root directory for settings.
+     Decided: `wim.config.json` (JSON, as it needs no parser of its own).
+     It holds the theme (`onedark` or `nord`, default `onedark`), whether
+     Claude Code is enabled (14.5), the presets (14.6), the prompt cache
+     length (14.7) and the terminal's shell (16.1). Missing keys use the
+     defaults; mistakes are reported at startup and ignored.
+
+
+16. Terminal
+------------
+16.1 An integrated terminal: zsh on macOS, PowerShell on Windows.
+     Decided: it sits under the editor (Cmd+J, `,tt`, `:Terminal`). Wim has
+     no native code, so there is no pseudo-terminal: the shell runs on
+     pipes, commands are typed in Wim's prompt and the output is plain text.
+     Full-screen programs and programs that read input do not work. It is
+     a login shell (so PATH is set up) but not an interactive one, since
+     that would run ~/.zshrc, prompt themes and all, with no terminal.
+     Stopping a command restarts the shell in the same directory.
+     The Windows PowerShell setup has not been tried.
+
+
+17. Bundled font
+----------------
+17.1 The Nerd Font in use is part of the repo, so it needn't be installed.
+     Decided: FiraMono Nerd Font Mono Regular, in `fonts/` with its SIL OFL
+     license; an installed Nerd Font is only used if `fonts/` has none.

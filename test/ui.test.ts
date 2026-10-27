@@ -15,7 +15,7 @@ import { WimApp } from '../src/app';
 import { MemoryClipboard } from '../src/clipboard';
 import { parseKeys } from '../src/editor/keys';
 import { FileTree } from '../src/filetree';
-import { C, RUST, Token, highlightLine, NORMAL } from '../src/highlight';
+import { C, MARKDOWN, RUST, State, Token, detect, highlightLine, NORMAL } from '../src/highlight';
 import * as icons from '../src/icons';
 import { imageSize } from '../src/image';
 import { Keymap } from '../src/keymap';
@@ -475,6 +475,35 @@ test('block comments span lines', () => {
     const [spans, end] = highlightLine(C, Array.from('end */ y'), state);
     assert.deepEqual(spans[0], [0, 6, 'Comment']);
     assert.deepEqual(end, NORMAL);
+});
+
+test('Markdown tokens', () => {
+    assert.equal(detect('notes/README.md'), MARKDOWN);
+    const kinds = (line: string): string => tokens(MARKDOWN, line).map(([s, k]) => `${s}:${k}`).join(' ');
+    assert.equal(kinds('## A `b` c'), '##:Markup  A :Heading `:Markup b:Raw `:Markup  c:Heading');
+    assert.equal(kinds('**b** _e_ snake_case_name *i*'), '**:Markup b:Strong **:Markup _:Markup e:Emphasis _:Markup *:Markup i:Emphasis *:Markup');
+    assert.equal(kinds('- [x] see [docs](https://x.io)'), '-:ListMarker [x]:ListMarker [:Markup docs:Link ](:Markup https://x.io:Url ):Markup');
+    assert.equal(kinds('> quoted ~~old~~'), '> :Markup quoted :Quote ~~:Markup old:Strike ~~:Markup');
+    assert.equal(kinds('12. \\*not emphasis\\*'), '12.:ListMarker \\:Markup \\:Markup');
+    assert.equal(kinds('| a | b |'), '|:Markup |:Markup |:Markup');
+    assert.equal(kinds('---'), '---:Markup');
+});
+
+test('Markdown code blocks are highlighted in their language across lines', () => {
+    let state: State = NORMAL;
+    const lines = ['```rust', 'fn f() { /* a', 'b */ }', '```', '*after*'];
+    const out = lines.map((line) => {
+        const cs = Array.from(line);
+        const [spans, next] = highlightLine(MARKDOWN, cs, state);
+        state = next;
+        return spans.map(([a, b, t]) => `${cs.slice(a, b).join('')}:${t}`).join(' ');
+    });
+    assert.equal(out[0], '```:Markup rust:Type');
+    assert.match(out[1], /^fn:Keyword f:Function .*\/\* a:Comment$/);
+    assert.match(out[2], /^b \*\/:Comment/, 'the comment carries over');
+    assert.equal(out[3], '```:Markup');
+    assert.equal(out[4], '*:Markup after:Emphasis *:Markup', 'back to Markdown');
+    assert.deepEqual(state, NORMAL);
 });
 
 test('icons look up names and extensions', () => {
@@ -955,4 +984,48 @@ test(',th switches between the themes, as does :colorscheme', () => {
     assert.equal(background(), '#282c34');
     h.type(':colo solarized<CR>');
     assert.match(h.app.editor.message?.text ?? '', /E185/);
+});
+
+test(',m switches a Markdown file between editing it and reading it rendered', () => {
+    const dir = tempDir('markdown');
+    const file = path.join(dir, 'notes.md');
+    const source = ['# Title', '', 'Some **bold** text.', '', ...Array.from({ length: 60 }, (_, i) => `- item ${i}`)].join('\n');
+    fs.writeFileSync(file, source + '\n');
+    const cwd = process.cwd();
+    try {
+        const h = harness(file);
+        const ed = h.app.editor;
+        assert.match(h.text(), /^#$/m, 'the heading marker, highlighted on its own');
+        assert.match(h.text(), /markdown/, 'the filetype');
+        h.type(',m');
+        assert.match(h.text(), /VIEW/);
+        assert.doesNotMatch(h.text(), /^(#|\*\*|-)$/m, 'markup is gone');
+        assert.match(h.text(), /^Title$/m);
+        assert.match(h.text(), /^• $/m);
+        const bold = h.frames[h.frames.length - 1].find((c) => c[0] === 'text' && c[3] === 'bold');
+        assert.equal(bold?.[5], 'bold');
+        // Editing keys do nothing; mappings that edit don't either.
+        for (const keys of ['x', 'dd', 'ihello<Esc>', 'o', 'p', ',d']) {
+            h.type(keys);
+            assert.equal(ed.buffer.text(), source, keys);
+            assert.equal(ed.mode, 'Normal', keys);
+        }
+        h.type('G');
+        assert.match(h.text(), /item 59/);
+        assert.match(h.text(), /Bot/);
+        h.type('gg');
+        assert.match(h.text(), /Top/);
+        h.type('<C-d>');
+        // Back to editing, at the same place.
+        h.type(',m');
+        assert.doesNotMatch(h.text(), /VIEW/);
+        assert.ok(ed.scrollTop > 4, `scrolled to ${ed.scrollTop}`);
+        assert.ok(ed.cursor.line >= ed.scrollTop, 'the cursor is in view');
+        assert.match(h.text(), /^ item/m);
+        h.type(':e other.txt<CR>,m');
+        assert.match(ed.message?.text ?? '', /Not a Markdown file/);
+    } finally {
+        process.chdir(cwd);
+        fs.rmSync(dir, { recursive: true });
+    }
 });

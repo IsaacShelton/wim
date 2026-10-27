@@ -3,6 +3,7 @@
 // `:colorscheme` switches between them.
 
 import type { Token } from './highlight';
+import type { TextStyle } from './protocol';
 
 const ONE_DARK = {
     BG: '#282c34',
@@ -41,6 +42,17 @@ const ONE_DARK = {
     BRACKET: '#abb2bf',
     PARAMETER: '#abb2bf',
     PROPERTY: '#abb2bf',
+    // Markdown, as One Dark colors it.
+    HEADING: '#e06c75',
+    STRONG: '#d19a66',
+    EMPHASIS: '#c678dd',
+    STRIKE: '#7f848e',
+    LINK: '#61afef',
+    URL: '#56b6c2',
+    RAW: '#98c379',
+    QUOTE: '#7f848e',
+    LIST_MARKER: '#e06c75',
+    MARKUP: '#5c6370',
 
     MODE_NORMAL: '#61afef',
     MODE_INSERT: '#98c379',
@@ -105,6 +117,16 @@ const NORD: Theme = {
     BRACKET: '#88C0D0',
     PARAMETER: '#88C0D0',
     PROPERTY: '#D8DEE9',
+    HEADING: '#88C0D0',
+    STRONG: '#D8DEE9',
+    EMPHASIS: '#D8DEE9',
+    STRIKE: '#616E88',
+    LINK: '#88C0D0',
+    URL: '#81A1C1',
+    RAW: '#A3BE8C',
+    QUOTE: '#616E88',
+    LIST_MARKER: '#81A1C1',
+    MARKUP: '#616E88',
 
     MODE_NORMAL: '#88C0D0',
     MODE_INSERT: '#ECEFF4', // snow storm brightest
@@ -171,6 +193,32 @@ export function tokenColor(token: Token): string {
         Bracket: theme.BRACKET,
         Parameter: theme.PARAMETER,
         Property: theme.PROPERTY,
+        Heading: theme.HEADING,
+        Strong: theme.STRONG,
+        Emphasis: theme.EMPHASIS,
+        Strike: theme.STRIKE,
+        Link: theme.LINK,
+        Url: theme.URL,
+        Raw: theme.RAW,
+        Quote: theme.QUOTE,
+        ListMarker: theme.LIST_MARKER,
+        Markup: theme.MARKUP,
     };
     return colors[token];
+}
+
+/** How a syntax highlighting token's text is set, if not upright. */
+export function tokenStyle(token: Token): TextStyle | undefined {
+    switch (token) {
+        case 'Comment':
+            return theme.ITALIC_COMMENTS ? 'italic' : undefined;
+        case 'Heading':
+        case 'Strong':
+            return 'bold';
+        case 'Emphasis':
+        case 'Quote':
+            return 'italic';
+        default:
+            return undefined;
+    }
 }

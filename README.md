@@ -1,7 +1,12 @@
 # Wim (Windowed Vim-esque Editor)
 
-A Vim-like code editor that runs on Node.js in its own window. Not a terminal
-app: Wim opens a native window, without any native code of its own.
+A Vim-like, personalized code editor created on a wim. It's a Windowed Vim-esque Editor, basically NeoVim except better. Less bloated, supports standard features like LSP, file tree, telescope, etc. Also supports images and audio/music playback, and runs anywhere.
+
+![Wim editing a file](.github/screenshot1.png)
+
+Despite being Vim-like, Wim runs as a native window and not as a terminal app.
+
+Wim uses Node.js and opens a native window, without any native code of its own.
 
 ```sh
 npm install            # installs the TypeScript compiler (development only)
@@ -30,8 +35,39 @@ a WebSocket on localhost that only accepts this session's token.
 default browser, `none` prints the address). `WIM_BROWSER` points at a specific
 Chromium-based browser.
 
-File icons need a Nerd Font installed (for example FiraMono Nerd Font); without
-one the tree shows plain folder arrows.
+File icons use the FiraMono Nerd Font that comes with Wim in `fonts/` (with its license), so
+nothing needs installing. If `fonts/` has no Nerd Font, an installed one is used instead.
+
+## Settings
+
+`wim.config.json` in Wim's own directory holds its settings; a missing file or key means the
+default, and a mistake in it is reported at startup and ignored.
+
+```json
+{
+    "theme": "onedark",
+    "claude": {
+        "enabled": false,
+        "presets": {
+            "low": { "model": "claude-haiku-5-5", "effort": "low" },
+            "medium": { "model": "claude-sonnet-5-5", "effort": "medium" },
+            "high": { "model": "claude-opus-5-5", "effort": "high" }
+        },
+        "defaultPreset": "medium",
+        "cacheMinutes": 60
+    },
+    "terminal": { "shell": "zsh" }
+}
+```
+
+| Setting | Meaning |
+| --- | --- |
+| `theme` | `onedark` (default) or `nord`; `,th` still switches while running |
+| `claude.enabled` | Whether Wim connects to Claude Code at all (default `false`: the agents panel and its badge are off) |
+| `claude.presets` | The model (an alias such as `haiku`, or an id) and effort (`low`, `medium`, `high`, `xhigh`, `max`) for low, medium and high complexity tasks |
+| `claude.defaultPreset` | The preset new sessions start with (default: Claude Code's own settings) |
+| `claude.cacheMinutes` | How long the prompt cache lasts after a request, for the cache indicator (default 60) |
+| `terminal.shell` | The shell the terminal runs (default `zsh`, or `powershell.exe` on Windows) |
 
 ## Layout
 
@@ -58,6 +94,8 @@ one the tree shows plain folder arrows.
 | `src/finder.ts` | Finding files and searching text for the pickers, with ripgrep or without it |
 | `src/image.ts`, `src/imageview.ts` | Which files are images, their format and size, and zooming them |
 | `src/audio.ts` | Which files are sounds, and the player's state |
+| `src/config.ts` | The settings file, `wim.config.json` |
+| `src/terminal.ts` | The integrated terminal: a shell process, its output and the prompt |
 | `src/agent/` | The agents panel: `backend.ts` (Claude Code through the Claude Agent SDK), `session.ts` (one session: its conversation, prompts and settings), `transcript.ts` (the conversation laid out as rows), `input.ts` (the prompt), `panel.ts` (sessions, keys, mouse and painting) |
 
 Run the tests with `npm test`.
@@ -216,6 +254,9 @@ window's browser engine; if one can't, the player says so.
 
 ## Agents
 
+The agents panel is off until `claude.enabled` is `true` in `wim.config.json` (see
+[Settings](#settings)); until then Cmd+L, `,cc` and `:Agents` say so, and the badge is not shown.
+
 Cmd+L (Ctrl+Shift+L on Windows and Linux), `,cc` or `:Agents` shows the agents panel on the
 right for chatting with Claude Code, and moves to it; Cmd+L from the panel hides it again.
 `:Agents message` also sends the message. The `✻ Agents` badge at the end of the status line shows and
@@ -231,13 +272,24 @@ usual, so any of them (from Wim or the terminal) can be resumed with its history
 
 The conversation shows messages, replies (Markdown, with highlighted code), thinking, and
 tool calls with a line or two of their results (a diff for edits); replies stream in, with a
-spinner, the time and the tokens while Claude works. Under the tabs are the session's model,
-permission mode, effort, context use and cost, each clickable.
+spinner, the time and the tokens while Claude works. Under the tabs are two rows. The first has
+the session's preset, model, permission mode and effort, each clickable. The second has its
+context use (a meter and a percentage), the plan limit closest to running out (5 hours or the
+week), the prompt cache and the cost. The cache shows the time left (`cache 3m`; yellow in its
+last minute) and turns red as `cache cold` once it has run out, when the next message has to
+send the whole conversation again; it is counted from the last reply, so it is an estimate
+(`claude.cacheMinutes` sets its length). The meters go from green to yellow at 50% and red at 80%.
+
+**Presets** are the model and effort for a low, medium or high complexity task, set in
+`wim.config.json` (see [Settings](#settings)). `L`, `M` and `H` switch the session to one
+(even while it works: it applies to the next request), `P` or a click on the preset picks one,
+and `u` (or a click on the plan limit) shows the plan's usage limits, as `/usage` does: the
+5-hour and weekly windows with when they reset. Plan limits only exist for Claude subscriptions.
 
 The panel has two modes, like Vim. In the prompt at the bottom, Enter sends (a `\` before it,
 or Option/Alt with it, makes a new line instead), Up/Down go through earlier messages, Esc
 goes to Normal mode, and the usual text field keys work (Option+Left/Right, Option+Delete,
-Ctrl+a/e/w/u). Ctrl+c is Esc there too. In Normal mode:
+Ctrl+a/e/w/u). Ctrl+c is Esc there too, and Ctrl+h goes to the editor, as in Normal mode. In Normal mode:
 
 | Keys | Action |
 | --- | --- |
@@ -247,8 +299,10 @@ Ctrl+a/e/w/u). Ctrl+c is Esc there too. In Normal mode:
 | Tab `]` `[` `gt` `gT` `1`–`9` | Next, previous or Nth session |
 | `n` / `s` / `x` | New session / pick a session, open or saved, to switch to or resume / close a session (stopping its process; twice if Claude is working) |
 | `m` / `p` / `e` | Pick the model / permission mode / effort |
+| `L` `M` `H` / `P` | Use the low / medium / high preset / pick a preset |
 | Shift+Tab | Cycle the permission mode: default, accept edits, plan, auto (in the prompt too) |
 | `c` | Context use by kind, as `/context` shows it |
+| `u` | Plan usage limits (5-hour, weekly) |
 | `y` | Copy the last reply |
 | `?` | All of these keys |
 | `q` / Esc / Ctrl+h | Hide the panel / back to the editor / back to the editor (Ctrl+l from the rightmost window returns) |
@@ -290,6 +344,7 @@ Normal-mode mappings don't apply in the middle of a command, so `f,` still finds
 | Tab / Shift+Tab | Normal | Next / previous buffer |
 | Ctrl+n | Normal | Toggle the file tree |
 | `,cc` (or Cmd+L) | Normal | Show the agents panel (see [Agents](#agents)) |
+| `,tt` (or Cmd+J) | Normal | Show the terminal (see [Terminal](#terminal)) |
 | `,th` | Normal | Switch between Wim's colors (One Dark) and Nord |
 | Ctrl+y | Normal | Forward in the jump list (`<C-i>`, which is Tab in a terminal) |
 | `,w` `,b` `,e` `,ge` | Normal, Visual, after an operator | Like `w`, `b`, `e`, `ge` for subwords (nvim-spider): camelCase humps, snake_case parts and digit runs; single punctuation is skipped |
@@ -349,12 +404,29 @@ the absolute number on the cursor line), `ignorecase`, `smartcase`, `hlsearch`,
 `clipboard=unnamed`. Each supports the `no`, `!` and `?` forms.
 
 **Desktop additions:** click to place the cursor, drag to select, Cmd+C / Cmd+X copy or cut the
-selection, Cmd+V pastes, Cmd+S saves, Cmd+L shows the agents panel, Cmd+= / Cmd+- / Cmd+0 zoom, Cmd+W / Cmd+Q close. On Windows
+selection, Cmd+V pastes, Cmd+S saves, Cmd+L shows the agents panel, Cmd+J the terminal, Cmd+= / Cmd+- / Cmd+0 zoom, Cmd+W / Cmd+Q close. On Windows
 and Linux these are Ctrl+Shift+C, Ctrl+Shift+V and so on, since Ctrl alone belongs to Vim. Closing
 the macOS window with unsaved changes shows a warning first; closing again discards the changes. In
 an Edge or Chrome window, the browser asks before closing with unsaved changes instead.
 
+## Terminal
+
+Cmd+J (Ctrl+Shift+J on Windows and Linux), `,tt` or `:Terminal` shows a terminal under the
+editor and moves to it; the same again hides it. It runs zsh (PowerShell on Windows; set
+`terminal.shell` to change it) as a login shell in Wim's working directory, and the shell is kept
+between commands, so `cd` and variables stay. Type a command and press Enter; Up/Down go through
+earlier commands and the usual text field keys work. The wheel and PageUp/PageDown scroll the
+output, `clear` empties it, Cmd+V pastes (as one line), Esc (Ctrl+c) stops a running command, or
+else clears what is typed, or else goes back to the editor. Ctrl+k goes up to the editor, Ctrl+h to
+the tree and Ctrl+l to the agents panel, as with windows.
+
+Wim has no native code, so this is not a full terminal: output is shown as plain text (colors and
+cursor movement are dropped), and programs that take over the screen (vim, less, top) or ask for
+input while they run don't work. Stopping a command restarts the shell in the same directory, so
+variables set before are lost. The shell is a login shell but not an interactive one, so what is
+in `~/.zshrc` (aliases, prompt) does not apply. The Windows PowerShell setup is untested.
+
 ## Not supported yet
 
 Macros (`q`); Visual Block mode; line wrapping; undo of only part of an Insert session;
-resizing split windows; a config file.
+resizing split windows

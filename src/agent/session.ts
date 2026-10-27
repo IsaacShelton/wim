@@ -15,7 +15,9 @@ import {
     PermissionUpdate,
     SDKMessage,
     SDKUserMessage,
+    UsageInfo,
 } from './backend';
+import type { Preset, PresetName } from '../config';
 
 /** One item of the conversation. */
 export type Entry =
@@ -183,7 +185,15 @@ export class AgentSession {
     activeModel: string | undefined;
     mode: PermissionMode | undefined;
     effort: EffortLevel | undefined;
+    /** The preset the model and effort were last set from, until either is
+     * changed on its own. */
+    preset: PresetName | undefined;
     context: ContextUsage | undefined;
+    /** The plan's usage limits, as last asked. */
+    usage: UsageInfo | undefined;
+    /** When the API last answered, which is when the prompt cache was last
+     * refreshed (undefined before the first reply). */
+    lastReply: number | undefined;
     /** What this session has cost since Wim started it, in US dollars. */
     cost = 0;
     /** Questions waiting for the user, the first one shown. */
@@ -348,6 +358,7 @@ export class AgentSession {
                 // What was said before an interrupt still comes, after it.
                 if (!this.interrupting) this.running = true;
                 this.live = undefined;
+                this.lastReply = Date.now();
                 this.addContent('assistant', m.message.content, true);
                 if (m.error && m.error !== 'max_output_tokens') this.notice(`API error: ${m.error}`, true);
                 break;
@@ -370,6 +381,7 @@ export class AgentSession {
                 this.activeModel = m.model;
                 this.mode = m.permissionMode;
                 void this.refreshContext();
+                void this.refreshUsage();
                 break;
             case 'status':
                 if (m.permissionMode) this.mode = m.permissionMode;
@@ -393,6 +405,7 @@ export class AgentSession {
     private stream(event: StreamEvent): void {
         switch (event.type) {
             case 'message_start':
+                this.lastReply = Date.now();
                 this.live = undefined;
                 this.status = undefined;
                 break;
@@ -431,6 +444,7 @@ export class AgentSession {
             this.entries.push({ t: 'Notice', text: m.result || 'Error', error: true });
         }
         void this.refreshContext();
+        void this.refreshUsage();
         const id = this.id;
         if (id !== undefined) {
             this.opts.backend.title(id, this.cwd).then(
@@ -453,6 +467,18 @@ export class AgentSession {
             this.changed();
         } catch {
             // Older versions of Claude Code can't say.
+        }
+    }
+
+    /** Ask for the plan's usage limits. */
+    async refreshUsage(): Promise<void> {
+        const q = this.query;
+        if (!q?.getUsage) return;
+        try {
+            this.usage = await q.getUsage();
+            this.changed();
+        } catch {
+            // Not available (an API key has no plan limits).
         }
     }
 
@@ -643,6 +669,7 @@ export class AgentSession {
     /** Use another model from the next reply on. */
     setModel(model: string | undefined, label: string): void {
         this.model = model;
+        this.preset = undefined;
         this.changed();
         this.query?.setModel(model).then(
             () => this.notice(`Model set to ${label}`),
@@ -668,8 +695,23 @@ export class AgentSession {
 
     setEffort(effort: EffortLevel | undefined): void {
         this.effort = effort;
+        this.preset = undefined;
         this.changed();
         this.query?.applyFlagSettings({ effortLevel: effort ?? null }).catch((e: Error) => this.notice(`Can't change the effort: ${e.message}`, true));
+    }
+
+    /** Use a preset's model and effort, for this and later turns. */
+    applyPreset(name: PresetName, preset: Preset, label: string): void {
+        this.model = preset.model;
+        this.effort = preset.effort;
+        this.preset = name;
+        this.changed();
+        const q = this.query;
+        if (!q) return;
+        Promise.all([q.setModel(preset.model), q.applyFlagSettings({ effortLevel: preset.effort ?? null })]).then(
+            () => this.notice(`Preset ${name}: ${label}${preset.effort ? `, ${preset.effort} effort` : ''}`),
+            (e: Error) => this.notice(`Can't apply the ${name} preset: ${e.message}`, true),
+        );
     }
 
     /** The models Claude Code offers (starting it, to ask). */

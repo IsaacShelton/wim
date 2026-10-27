@@ -7,6 +7,7 @@ import * as path from 'node:path';
 
 import { AgentBackend, SdkBackend } from './agent/backend';
 import { AgentPanel, PanelAction } from './agent/panel';
+import { Config, defaultConfig } from './config';
 import { AudioInfo, AudioPlayer, SEEK_STEP, VOLUME_STEP, formatTime } from './audio';
 import { Clipboard, SystemClipboard } from './clipboard';
 import { bufferState, bufferStates, findBuffer, reloadFromDisk, switchToBufferQuietly } from './editor/buffers';
@@ -14,7 +15,7 @@ import { Buffer, Pos, isWhitespace, pos, posCmp } from './editor/buffer';
 import { awaitingMotion } from './editor/command';
 import { Editor, Selection } from './editor/editor';
 import { fail } from './editor/errors';
-import { KeyInput, ch, charOf, ctrl, isNamedKey, keyEq, keyNew, keyToString, parseKeys, plain } from './editor/keys';
+import { KeyInput, ch, charOf, ctrl, isNamedKey, keyEq, keyIs, keyNew, keyToString, parseKeys, plain } from './editor/keys';
 import { isCmdLine } from './editor/mode';
 import { Range } from './editor/range';
 import { lineMatches } from './editor/search';
@@ -25,6 +26,7 @@ import { ImageView, Placement, Size } from './imageview';
 import * as highlight from './highlight';
 import * as icons from './icons';
 import { Command, Keymap, LspAction, MapMode, Rhs, TIMEOUT } from './keymap';
+import { MarkdownView, MdRow, isMarkdown } from './markdown';
 import { Completion } from './lsp/completion';
 import { LspFeatures, severityColor } from './lsp/features';
 import { BufferDiagnostic, LspManager } from './lsp/manager';
@@ -32,8 +34,9 @@ import { ServerSpec, defaultServers } from './lsp/servers';
 import { SignatureHelp } from './lsp/signature';
 import { absolute, baseName, currentDir, displayName, expandTilde } from './paths';
 import { Float, Overlay, Picker, PickerItem, PreviewSource, readPreview } from './popup';
-import { AudioCommand, ClientMessage, DrawCmd } from './protocol';
-import { isThemeName, setTheme, theme, themeName, tokenColor } from './theme';
+import { AudioCommand, ClientMessage, DrawCmd, TextStyle } from './protocol';
+import { Terminal, TerminalAction } from './terminal';
+import { isThemeName, setTheme, theme, themeName, tokenColor, tokenStyle } from './theme';
 import { Direction, SplitDir, Win, WinRect, Windows } from './windows';
 
 const TEXT_PADDING = 6;
@@ -45,6 +48,9 @@ const AGENTS_SHARE = 0.5;
 const AGENTS_MIN_COLS = 60;
 const AGENTS_MAX_COLS = 140;
 const AGENTS_MAX_SHARE = 0.7;
+/** The terminal's share of the editor's height, and its fewest rows. */
+const TERMINAL_SHARE = 0.3;
+const TERMINAL_MIN_ROWS = 6;
 const FLASH_DURATION = 300;
 /** How far the mouse must move before a press becomes a drag, in pixels. */
 const DRAG_THRESHOLD = 4;
@@ -94,6 +100,8 @@ interface Layout {
     sidebar?: Rect;
     /** The Claude Code panel, on the right. */
     agents?: Rect;
+    /** The integrated terminal, under the windows. */
+    terminal?: Rect;
     tabline?: Rect;
     /** Every window's place; `textArea` is the active one's. */
     windows: WinRect[];
@@ -108,7 +116,7 @@ interface Layout {
     treeRows: number;
 }
 
-type Focus = 'Editor' | 'Tree' | 'Agents';
+type Focus = 'Editor' | 'Tree' | 'Agents' | 'Terminal';
 
 interface Flash {
     range: Range;
@@ -128,6 +136,10 @@ export interface AppOptions {
     /** How the Claude Code panel reaches Claude Code (by default, the Claude
      * Agent SDK). */
     agents?: AgentBackend;
+    /** Wim's settings (by default, the built-in ones). */
+    config?: Config;
+    /** Problems found in the settings file, shown at startup. */
+    configWarnings?: string[];
     /** Called whenever the window should be repainted. */
     onFrame: (title: string, dirty: boolean, cmds: DrawCmd[]) => void;
     /** Called to control the window's sound player. */
@@ -191,14 +203,24 @@ export class WimApp {
     private pressedTimer: NodeJS.Timeout | undefined;
     /** How each image buffer is zoomed, by buffer id. */
     private readonly imageViews = new Map<number, { image: ImageInfo; view: ImageView }>();
+    /** Markdown buffers shown rendered rather than as text, by buffer id. */
+    private readonly markdownViews = new Map<number, MarkdownView>();
+    /** A `g` typed in a rendered Markdown view, waiting for the second `g`. */
+    private markdownG = false;
     /** Claude Code sessions, in the panel on the right. */
     readonly agents: AgentPanel;
     private agentsVisible = false;
+    readonly config: Config;
+    /** The shell under the editor. */
+    readonly terminal: Terminal;
+    private terminalVisible = false;
     /** The status line's Claude badge in the last frame, for clicks. */
     private badgeHit: Rect | undefined;
 
     constructor(private readonly opts: AppOptions) {
         this.icons = opts.icons;
+        this.config = opts.config ?? defaultConfig();
+        setTheme(this.config.theme);
         this.clipboard = opts.clipboard ?? new SystemClipboard();
         // `wim .` or `wim some/dir`: work in that directory, with no file open.
         let file = opts.path;
@@ -252,7 +274,12 @@ export class WimApp {
             cwd: currentDir,
             refresh,
             onFiles: (paths) => this.reloadChanged(paths),
+            presets: this.config.claude.presets,
+            defaultPreset: this.config.claude.defaultPreset,
+            cacheMinutes: this.config.claude.cacheMinutes,
         });
+        this.terminal = new Terminal({ shell: this.config.terminal.shell, cwd: currentDir, refresh });
+        if (opts.configWarnings?.length) this.editor.setError(opts.configWarnings.join('; '));
     }
 
     // ----- Messages from the window ----------------------------------------------
@@ -293,13 +320,18 @@ export class WimApp {
         this.render();
     }
 
-    private command(name: 'save' | 'copy' | 'cut' | 'paste' | 'agents'): void {
+    private command(name: 'save' | 'copy' | 'cut' | 'paste' | 'agents' | 'terminal'): void {
         this.closeWarned = false;
         switch (name) {
             case 'agents':
                 this.picker?.dispose();
                 this.picker = undefined;
                 this.toggleAgents();
+                break;
+            case 'terminal':
+                this.picker?.dispose();
+                this.picker = undefined;
+                this.toggleTerminal();
                 break;
             case 'save':
                 this.editor.handleKeys(parseKeys('<Esc>:w<CR>'));
@@ -315,6 +347,9 @@ export class WimApp {
                 } else if (this.focus === 'Agents') {
                     const text = this.clipboard.getText();
                     if (text !== undefined) this.agents.paste(text);
+                } else if (this.focus === 'Terminal') {
+                    const text = this.clipboard.getText();
+                    if (text !== undefined) this.terminal.paste(text);
                 } else if (this.focus === 'Editor') {
                     const text = this.clipboard.getText();
                     if (text !== undefined) this.editor.pasteText(text);
@@ -346,8 +381,14 @@ export class WimApp {
             this.tree.scrollBy(whole);
         } else if (layout.agents && contains(layout.agents, msg.x, msg.y)) {
             this.agents.wheel(whole);
+        } else if (layout.terminal && contains(layout.terminal, msg.x, msg.y)) {
+            this.terminal.scrollBy(-whole);
         } else if (under && under.win !== this.windows.active) {
             this.scrollWindow(under, whole);
+        } else if (this.markdownView()) {
+            const view = this.markdownView()!;
+            const { rows, height } = this.markdownRows(view, layout);
+            view.scrollBy(rows, height, whole);
         } else {
             this.editor.scrollBy(whole);
         }
@@ -375,6 +416,11 @@ export class WimApp {
         if (this.focus === 'Agents') {
             this.mapPending = [];
             this.agentAction(this.agents.key(key));
+            return;
+        }
+        if (this.focus === 'Terminal') {
+            this.mapPending = [];
+            this.terminalAction(this.terminal.key(key));
             return;
         }
         if (this.focus === 'Editor' && this.completion.key(key)) return;
@@ -411,7 +457,7 @@ export class WimApp {
      * (so `df,` still finds a comma even though `,` is the leader). */
     private currentMapMode(): MapMode | undefined {
         if (this.focus === 'Tree') return 'Normal';
-        if (this.windowCmdPending) return undefined;
+        if (this.windowCmdPending || this.markdownG) return undefined;
         if (this.editor.pending.length > 0) {
             return this.editor.mode === 'Normal' && awaitingMotion(this.editor.pending) ? 'Operator' : undefined;
         }
@@ -472,6 +518,8 @@ export class WimApp {
 
     private runMapping(rhs: Rhs): void {
         if (rhs.t === 'Keys') {
+            // A rendered Markdown view can't be edited; `:` commands still work.
+            if (this.markdownView() && !(rhs.keys.length > 0 && keyIs(rhs.keys[0], ':'))) return;
             this.editor.handleKeys(rhs.keys);
             return;
         }
@@ -498,9 +546,15 @@ export class WimApp {
             case 'ToggleAgents':
                 this.toggleAgents();
                 break;
+            case 'ToggleTerminal':
+                this.toggleTerminal();
+                break;
             case 'ToggleTheme':
                 setTheme(themeName() === 'nord' ? 'onedark' : 'nord');
                 this.editor.setMessage(`colorscheme ${themeName()}`);
+                break;
+            case 'ToggleMarkdownView':
+                this.toggleMarkdown();
                 break;
             case 'FindFiles':
                 this.findFiles();
@@ -555,6 +609,12 @@ export class WimApp {
                 if (args === 'on' || args === 'off') this.lsp.formatOnSave = args === 'on';
                 this.editor.setMessage(`Format on save is ${this.lsp.formatOnSave ? 'on' : 'off'}`);
                 return;
+            case 'Terminal':
+                this.toggleTerminal();
+                return;
+            case 'MarkdownPreview':
+                this.toggleMarkdown();
+                return;
             case 'Agents':
                 // `:Agents` shows the panel; `:Agents message` also sends it.
                 this.showAgents();
@@ -589,6 +649,7 @@ export class WimApp {
         this.features.dispose();
         this.lsp.dispose();
         this.agents.dispose();
+        this.terminal.dispose();
     }
 
     /** Send an (unmapped) key to whichever pane has focus. */
@@ -604,7 +665,7 @@ export class WimApp {
             return;
         }
         if (this.focus === 'Editor') {
-            if (this.imageKey(key) || this.audioKey(key)) return;
+            if (this.imageKey(key) || this.audioKey(key) || this.markdownKey(key)) return;
             this.editor.handleKey(key);
             return;
         }
@@ -634,6 +695,76 @@ export class WimApp {
                 });
                 break;
         }
+    }
+
+    /** The active buffer's rendered view, when it's shown. */
+    private markdownView(): MarkdownView | undefined {
+        return this.markdownViews.get(this.editor.bufferId());
+    }
+
+    /** The active buffer's rendered rows and how many fit its window. */
+    private markdownRows(view: MarkdownView, layout = this.layout()): { rows: MdRow[]; height: number } {
+        const area = layout.textArea;
+        return {
+            rows: view.rows(this.editor.buffer, markdownCols(area, layout.charW)),
+            height: Math.max(Math.floor((area.bottom - area.top) / layout.lineH), 1),
+        };
+    }
+
+    /** `,m` and `:MarkdownPreview`: switch a Markdown buffer between editing
+     * it and reading it rendered, staying at the same place in it. */
+    private toggleMarkdown(): void {
+        const ed = this.editor;
+        const id = ed.bufferId();
+        const shown = this.markdownViews.get(id);
+        if (shown) {
+            const { rows, height } = this.markdownRows(shown);
+            this.markdownViews.delete(id);
+            ed.scrollTop = Math.min(shown.sourceAtTop(rows), ed.buffer.lastLine());
+            // The cursor stays if it's in view, `scrolloff` lines from the
+            // edges; otherwise it goes to the top, so the text doesn't move.
+            const so = ed.scrollTop > 0 ? Math.min(ed.options.scrolloff, Math.floor((height - 1) / 2)) : 0;
+            const visible = ed.cursor.line >= ed.scrollTop + so && ed.cursor.line < ed.scrollTop + height - so;
+            if (!visible) ed.cursor = pos(Math.min(ed.scrollTop + so, ed.buffer.lastLine()), 0);
+            ed.clampCursor();
+            return;
+        }
+        if (!isMarkdown(ed.filePath)) {
+            ed.setError('Not a Markdown file');
+            return;
+        }
+        this.editorToNormal();
+        const view = new MarkdownView();
+        const { rows, height } = this.markdownRows(view);
+        view.showSource(rows, height, ed.scrollTop);
+        this.markdownViews.set(id, view);
+        this.markdownG = false;
+    }
+
+    /** Scrolling keys for a rendered Markdown view: `j`/`k` and the arrows by
+     * a row, Ctrl+d/Ctrl+u by half a screen, Ctrl+f/Ctrl+b, Space and
+     * PageDown/PageUp by a screen, `gg` and `G` to the ends. `:` goes to the
+     * editor; other keys do nothing, as the view can't be edited. */
+    private markdownKey(key: KeyInput): boolean {
+        const view = this.markdownView();
+        if (!view || this.editor.mode !== 'Normal' || this.editor.pending.length > 0) return false;
+        if (keyIs(key, ':')) return false;
+        const { rows, height } = this.markdownRows(view);
+        const half = Math.max(Math.floor(height / 2), 1);
+        const g = this.markdownG;
+        this.markdownG = false;
+        const k = key.key;
+        if (key.ctrl) {
+            const by: Record<string, number> = { d: half, u: -half, f: height, b: -height, e: 1, y: -1 };
+            if (k in by) view.scrollBy(rows, height, by[k]);
+        } else if (k === 'j' || k === 'Down') view.scrollBy(rows, height, 1);
+        else if (k === 'k' || k === 'Up') view.scrollBy(rows, height, -1);
+        else if (k === ' ' || k === 'PageDown') view.scrollBy(rows, height, height);
+        else if (k === 'PageUp') view.scrollBy(rows, height, -height);
+        else if (k === 'G' || k === 'End') view.scrollBy(rows, height, rows.length);
+        else if ((k === 'g' && g) || k === 'Home') view.top = 0;
+        else if (k === 'g') this.markdownG = true;
+        return true;
     }
 
     /** The zoom and position of the active buffer's image, if it is an image
@@ -870,6 +1001,7 @@ export class WimApp {
         for (const w of this.windows.list()) {
             if (!open.has(w.bufferId) && w !== this.windows.active) this.windows.close(w);
         }
+        for (const id of this.markdownViews.keys()) if (!open.has(id)) this.markdownViews.delete(id);
     }
 
     /** Scroll an inactive window, keeping its cursor in view as Vim does. */
@@ -877,8 +1009,13 @@ export class WimApp {
         const win = rect.win;
         const st = bufferState(this.editor, win.bufferId);
         if (!st || st.image || st.audio) return;
-        const last = st.buffer.lastLine();
         const rows = Math.max(Math.floor((rect.area.bottom - rect.area.top) / this.metrics.lineH), 1);
+        const md = this.markdownViews.get(win.bufferId);
+        if (md) {
+            md.scrollBy(md.rows(st.buffer, markdownCols(rect.area, this.metrics.charW)), rows, lines);
+            return;
+        }
+        const last = st.buffer.lastLine();
         win.scrollTop = Math.min(Math.max(win.scrollTop + lines, 0), last);
         const line = Math.min(Math.max(win.cursor.line, win.scrollTop), Math.min(win.scrollTop + rows - 1, last));
         if (line !== win.cursor.line) win.cursor = pos(line, 0);
@@ -917,7 +1054,13 @@ export class WimApp {
             return;
         }
         if (this.focus === 'Agents') {
-            if (dir === 'Left') this.focus = 'Editor';
+            if (dir === 'Left') this.focus = this.terminalVisible ? 'Terminal' : 'Editor';
+            return;
+        }
+        if (this.focus === 'Terminal') {
+            if (dir === 'Up') this.focus = 'Editor';
+            else if (dir === 'Left' && this.treeVisible) this.focus = 'Tree';
+            else if (dir === 'Right' && this.agentsVisible) this.focus = 'Agents';
             return;
         }
         this.saveWindow();
@@ -930,6 +1073,9 @@ export class WimApp {
         } else if (dir === 'Right' && this.agentsVisible) {
             this.editorToNormal();
             this.focus = 'Agents';
+        } else if (dir === 'Down' && this.terminalVisible) {
+            this.editorToNormal();
+            this.focus = 'Terminal';
         }
     }
 
@@ -937,10 +1083,15 @@ export class WimApp {
      * before the first and the Claude panel (if shown) after the last. */
     private cycleFocus(delta: number): void {
         const wins = this.windows.list();
-        const stops: (Win | 'Tree' | 'Agents')[] = [...(this.treeVisible ? ['Tree' as const] : []), ...wins, ...(this.agentsVisible ? ['Agents' as const] : [])];
+        const stops: (Win | 'Tree' | 'Agents' | 'Terminal')[] = [
+            ...(this.treeVisible ? ['Tree' as const] : []),
+            ...wins,
+            ...(this.terminalVisible ? ['Terminal' as const] : []),
+            ...(this.agentsVisible ? ['Agents' as const] : []),
+        ];
         const at = this.focus === 'Editor' ? stops.indexOf(this.windows.active) : stops.indexOf(this.focus);
         const next = stops[(((at + delta) % stops.length) + stops.length) % stops.length];
-        if (next === 'Tree' || next === 'Agents') {
+        if (next === 'Tree' || next === 'Agents' || next === 'Terminal') {
             this.editorToNormal();
             this.focus = next;
         } else {
@@ -961,10 +1112,40 @@ export class WimApp {
     }
 
     private showAgents(): void {
+        if (!this.config.claude.enabled) {
+            this.editor.setError('Claude Code is turned off: set claude.enabled to true in wim.config.json');
+            return;
+        }
         this.editorToNormal();
         this.agentsVisible = true;
         this.agents.open();
         this.focus = 'Agents';
+    }
+
+    /** Ctrl+`, `,tt`, `:Terminal`: show the terminal and move to it; from
+     * the terminal, hide it. */
+    private toggleTerminal(): void {
+        this.windowCmdPending = false;
+        if (this.terminalVisible && this.focus === 'Terminal') {
+            this.terminalVisible = false;
+            this.focus = 'Editor';
+            return;
+        }
+        this.editorToNormal();
+        this.terminalVisible = true;
+        this.focus = 'Terminal';
+    }
+
+    private terminalAction(action: TerminalAction): void {
+        switch (action.t) {
+            case 'Move':
+                this.moveFocus(action.dir);
+                break;
+            case 'Hide':
+                this.terminalVisible = false;
+                this.focus = 'Editor';
+                break;
+        }
     }
 
     private agentAction(action: PanelAction): void {
@@ -1206,8 +1387,13 @@ export class WimApp {
                 p.y = y;
                 return;
             }
-            if (this.editor.audio) return;
+            if (this.editor.audio || this.markdownView()) return;
             this.editor.dragTo(this.posAt(layout, x, y));
+            return;
+        }
+        if (layout.terminal && contains(layout.terminal, x, y)) {
+            this.editorToNormal();
+            this.focus = 'Terminal';
             return;
         }
         if (this.badgeHit && contains(this.badgeHit, x, y)) {
@@ -1264,7 +1450,7 @@ export class WimApp {
                 }, BUTTON_PRESS);
                 return;
             }
-            if (!view && !this.editor.audio) this.editor.click(this.posAt(layout, x, y));
+            if (!view && !this.editor.audio && !this.markdownView()) this.editor.click(this.posAt(layout, x, y));
             this.press = { x, y, dragging: false };
         }
     }
@@ -1367,7 +1553,8 @@ export class WimApp {
             icons: this.icons,
             tree: this.tree,
             agents: this.agentsVisible ? this.agents : undefined,
-            badge: this.agents.badge(Date.now()),
+            terminal: this.terminalVisible ? this.terminal : undefined,
+            badge: this.config.claude.enabled ? this.agents.badge(Date.now()) : undefined,
             mapPending: this.mapPending,
             highlightCache: (id) => {
                 let cache = this.highlightCaches.get(id);
@@ -1394,12 +1581,15 @@ export class WimApp {
         const agents = this.agentsVisible ? rect(width - agentsW, 0, width, bottom) : undefined;
         const editorRight = agents ? agents.left : width;
         const tabline = this.editor.buffers.length > 1 ? rect(editorLeft, 0, editorRight, lineH) : undefined;
-        const windows = this.windows.layout(rect(editorLeft, tabline ? tabline.bottom : 0, editorRight, bottom), lineH, charW);
+        const termRows = Math.min(Math.max(Math.round((bottom / lineH) * TERMINAL_SHARE), TERMINAL_MIN_ROWS), Math.floor((bottom * 0.7) / lineH));
+        const terminal = this.terminalVisible ? rect(editorLeft, bottom - termRows * lineH, editorRight, bottom) : undefined;
+        const windows = this.windows.layout(rect(editorLeft, tabline ? tabline.bottom : 0, editorRight, terminal ? terminal.top : bottom), lineH, charW);
         const textArea = windows.find((w) => w.win === this.windows.active)!.area;
         const textLeft = textArea.left + this.gutterCols() * charW + TEXT_PADDING;
         return {
             sidebar,
             agents,
+            terminal,
             tabline,
             windows,
             textArea,
@@ -1444,6 +1634,14 @@ export class WimApp {
                 return [{ ...pane, content: { t: 'Image', file, image: st.image, placement: view?.place(area) } }];
             }
             if (st.audio && file !== undefined) return [{ ...pane, content: { t: 'Audio', file, info: st.audio } }];
+            const md = this.markdownViews.get(win.bufferId);
+            if (md) {
+                const cols = markdownCols(rect.area, cw);
+                const rows = md.rows(st.buffer, cols);
+                const height = Math.max(Math.floor((rect.area.bottom - rect.area.top) / lh), 1);
+                md.scrollBy(rows, height, 0);
+                return [{ ...pane, content: { t: 'Markdown', rows, top: md.top, cols } }];
+            }
             const buffer = st.buffer;
             const last = buffer.lastLine();
             const cursor = active ? ed.cursor : pos(Math.min(win.cursor.line, last), win.cursor.col);
@@ -1479,6 +1677,16 @@ function isDirectory(p: string): boolean {
     } catch {
         return false;
     }
+}
+
+/** The least space beside a rendered Markdown view, in columns. */
+const MARKDOWN_MARGIN = 2;
+/** The widest a rendered Markdown view's text gets, in columns. */
+const MARKDOWN_WIDTH = 100;
+
+/** How wide a rendered Markdown view is in a window's area `r`. */
+function markdownCols(r: Rect, cw: number): number {
+    return Math.max(Math.min(Math.floor((r.right - r.left) / cw) - 2 * MARKDOWN_MARGIN, MARKDOWN_WIDTH), 1);
 }
 
 /** Where an image is shown in a window's area `r`: less a margin. */
@@ -1582,7 +1790,9 @@ interface Pane {
     content:
         | { t: 'Text'; view: TextView }
         | { t: 'Image'; file: string; image: ImageInfo; placement: Placement | undefined }
-        | { t: 'Audio'; file: string; info: AudioInfo };
+        | { t: 'Audio'; file: string; info: AudioInfo }
+        /** A Markdown file's rendered view, from row `top`, `cols` wide. */
+        | { t: 'Markdown'; rows: MdRow[]; top: number; cols: number };
 }
 
 /** The display column of `col` on `line`, with tabs `tabstop` wide (as
@@ -1604,8 +1814,11 @@ interface PaintState {
     tree: FileTree;
     /** The Claude panel, when it is shown. */
     agents: AgentPanel | undefined;
-    /** The Claude badge at the end of the status line. */
-    badge: { text: string; color: string; bg: string };
+    /** The terminal, when it is shown. */
+    terminal: Terminal | undefined;
+    /** The Claude badge at the end of the status line (not with Claude Code
+     * turned off). */
+    badge: { text: string; color: string; bg: string } | undefined;
     mapPending: KeyInput[];
     /** Highlighter states for a buffer. */
     highlightCache: (bufferId: number) => highlight.Cache;
@@ -1649,8 +1862,8 @@ class Painter {
     }
 
     /** Text whose top-left cell is at `x`, in the row starting at `y`. */
-    private text(x: number, y: number, s: string, color: string, italic = false): void {
-        if (s !== '') this.cmds.push(italic ? ['text', x, y, s, color, true] : ['text', x, y, s, color]);
+    private text(x: number, y: number, s: string, color: string, style?: TextStyle): void {
+        if (s !== '') this.cmds.push(style ? ['text', x, y, s, color, style] : ['text', x, y, s, color]);
     }
 
     /** Text whose right edge is at `x`. */
@@ -1672,6 +1885,10 @@ class Painter {
         if (agents && this.st.agents) {
             this.st.agents.paint(this.cmds, agents, this.layout.charW, this.layout.lineH, this.st.focus === 'Agents', Date.now());
         }
+        const terminal = this.layout.terminal;
+        if (terminal && this.st.terminal) {
+            this.st.terminal.paint(this.cmds, terminal, this.layout.charW, this.layout.lineH, this.st.focus === 'Terminal');
+        }
         this.paintStatus();
         this.paintCmdline();
         this.paintPopups();
@@ -1687,6 +1904,7 @@ class Painter {
         this.clip(area);
         if (c.t === 'Text') this.paintText(c.view);
         else if (c.t === 'Image') this.paintImage(area, c.file, c.image, c.placement);
+        else if (c.t === 'Markdown') this.paintMarkdown(area, c.rows, c.top, c.cols);
         else this.paintAudio(area, c.file, c.info);
         this.cmds.push(['unclip']);
         if (bar) {
@@ -1699,6 +1917,40 @@ class Painter {
         if (area.right < (this.layout.agents?.left ?? this.st.metrics.width)) {
             const x = Math.round(area.right + cw / 2);
             this.rect(rect(x, area.top, x + 1, bar ? bar.bottom : area.bottom), theme.POPUP_BORDER);
+        }
+    }
+
+    /** A rendered Markdown view: its rows centered in the window, with bars
+     * for quotes, a background for code and lines for rules. */
+    private paintMarkdown(area: Rect, rows: readonly MdRow[], top: number, cols: number): void {
+        const { charW: cw, lineH: lh } = this.layout;
+        const areaCols = Math.floor((area.right - area.left) / cw);
+        const left = area.left + Math.max(Math.floor((areaCols - cols) / 2), MARKDOWN_MARGIN) * cw;
+        const right = left + cols * cw;
+        const height = Math.max(Math.floor((area.bottom - area.top) / lh), 1);
+        for (let r = 0; r < height; r++) {
+            const row = rows[top + r];
+            const y = area.top + r * lh;
+            if (!row) {
+                this.text(area.left + TEXT_PADDING, y, '~', theme.TILDE);
+                continue;
+            }
+            for (let q = 0; q < row.quote; q++) {
+                const x = left + q * 2 * cw + Math.round(cw / 3);
+                this.rect(rect(x, y, x + 3, y + lh), theme.GUTTER);
+            }
+            const x0 = left + (row.quote * 2 + row.indent) * cw;
+            if (row.kind === 'code') {
+                this.rect(rect(x0, y, Math.max(right, x0 + cw), y + lh), theme.CURSOR_LINE);
+            } else if (row.kind === 'rule') {
+                const mid = y + Math.floor(lh / 2);
+                this.rect(rect(x0, mid, right, mid + 1), theme.GUTTER);
+            }
+            let x = x0 + (row.kind === 'code' ? cw : 0);
+            for (const [s, color, style] of row.runs) {
+                this.text(x, y, s, color, style);
+                x += Array.from(s).length * cw;
+            }
         }
     }
 
@@ -1953,12 +2205,12 @@ class Painter {
         const right = left + v.cols + 1;
         let run = '';
         let runColor: string = theme.FG;
-        let runItalic = false;
+        let runStyle: TextStyle | undefined;
         let runStart = left;
         let span = 0;
         let dcol = 0;
         const flush = (): void => {
-            this.text(v.textLeft + (runStart - left) * layout.charW, y, run, runColor, runItalic);
+            this.text(v.textLeft + (runStart - left) * layout.charW, y, run, runColor, runStyle);
             run = '';
         };
         for (let i = 0; i < chars.length && dcol < right; i++) {
@@ -1966,15 +2218,15 @@ class Painter {
             while (span < spans.length && spans[span][1] <= i) span++;
             const token = span < spans.length && spans[span][0] <= i ? spans[span][2] : 'Normal';
             const color = tokenColor(token);
-            const italic = token === 'Comment' && theme.ITALIC_COMMENTS;
+            const style = tokenStyle(token);
             const cells = c === '\t' ? ts - (dcol % ts) : 1;
             for (let k = 0; k < cells; k++) {
                 const d = dcol + k;
                 if (d < left || d >= right) continue;
-                if (color !== runColor || italic !== runItalic || run === '') {
+                if (color !== runColor || style !== runStyle || run === '') {
                     if (run !== '') flush();
                     runColor = color;
-                    runItalic = italic;
+                    runStyle = style;
                     runStart = d;
                 }
                 run += c === '\t' ? ' ' : c;
@@ -2106,20 +2358,31 @@ class Painter {
 
         // At the end, the Claude badge, which shows and hides the panel.
         const badge = this.st.badge;
-        const badgeHit = rect(full.right - Array.from(badge.text).length * cw, full.top, full.right, full.bottom);
-        this.rect(badgeHit, badge.bg);
-        this.text(badgeHit.left, full.top, badge.text, badge.color);
+        let badgeHit: Rect | undefined;
+        if (badge) {
+            badgeHit = rect(full.right - Array.from(badge.text).length * cw, full.top, full.right, full.bottom);
+            this.rect(badgeHit, badge.bg);
+            this.text(badgeHit.left, full.top, badge.text, badge.color);
+        }
         this.badgeHit = badgeHit;
-        const r = rect(full.left, full.top, badgeHit.left, full.bottom);
+        const r = rect(full.left, full.top, badgeHit ? badgeHit.left : full.right, full.bottom);
 
+        const active = this.st.panes.find((p) => p.active)?.content;
+        const markdown = active?.t === 'Markdown' ? active : undefined;
         let modeName: string;
         let modeColor: string;
         if (this.st.focus === 'Tree') {
             modeName = 'TREE';
             modeColor = theme.MODE_TREE;
+        } else if (this.st.focus === 'Terminal') {
+            modeName = 'TERM';
+            modeColor = theme.MODE_TREE;
         } else if (this.st.focus === 'Agents') {
             modeName = 'AGENT';
             modeColor = theme.MODE_AGENT;
+        } else if (markdown && ed.mode === 'Normal') {
+            modeName = 'VIEW';
+            modeColor = theme.MODE_TREE;
         } else {
             modeName = ed.modeName();
             switch (ed.mode) {
@@ -2146,12 +2409,14 @@ class Painter {
         this.text(r.left, r.top, label, theme.BG);
 
         const cursor = ed.cursor;
-        const lines = ed.buffer.lineCount();
+        // A rendered Markdown view goes by its rows.
+        const lines = markdown ? markdown.rows.length : ed.buffer.lineCount();
+        const top = markdown ? markdown.top : ed.scrollTop;
         let position: string;
         if (lines <= layout.rows) position = 'All';
-        else if (ed.scrollTop === 0) position = 'Top';
-        else if (ed.scrollTop + layout.rows >= lines) position = 'Bot';
-        else position = `${Math.floor((ed.scrollTop * 100) / (lines - layout.rows))}%`;
+        else if (top === 0) position = 'Top';
+        else if (top + layout.rows >= lines) position = 'Bot';
+        else position = `${Math.floor((top * 100) / (lines - layout.rows))}%`;
         const image = ed.image;
         const zoom = this.st.imageView ? `  ${Math.round(this.st.imageView.scale * 100)}%` : '';
         const audio = ed.audio;
@@ -2162,7 +2427,12 @@ class Painter {
               : (highlight.detect(ed.filePath)?.name ?? '');
         const pending = this.st.mapPending.map(keyToString).join('') + ed.pendingKeys();
         // An image or sound has no cursor or lines to place.
-        const where = image || audio ? '' : `   ${cursor.line + 1}:${ed.displayCol(cursor.line, cursor.col) + 1}   ${position}`;
+        const where =
+            image || audio
+                ? ''
+                : markdown
+                  ? `   ${position}`
+                  : `   ${cursor.line + 1}:${ed.displayCol(cursor.line, cursor.col) + 1}   ${position}`;
         const right = `${pending}   ${filetype}${where} `;
         this.textRight(r.right - cw, r.top, right, theme.FG);
 

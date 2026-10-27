@@ -126,7 +126,9 @@ function run(argv) {
     app.delegate = delegate;
 
     win.contentView = view;
-    win.center;
+    // Fill the screen apart from the menu bar and Dock, as a window rather
+    // than in full screen mode.
+    win.setFrameDisplay($.NSScreen.mainScreen.visibleFrame, true);
     view.loadRequest($.NSURLRequest.requestWithURL($.NSURL.URLWithString($(url))));
     win.makeKeyAndOrderFront(null);
     win.makeFirstResponder(view);
@@ -190,6 +192,7 @@ function openChromium(browser: string, url: string): WindowHandle {
             `--app=${url}`,
             `--user-data-dir=${profile}`,
             `--window-size=${WIDTH},${HEIGHT}`,
+            '--start-maximized',
             '--no-first-run',
             '--no-default-browser-check',
             '--disable-extensions',

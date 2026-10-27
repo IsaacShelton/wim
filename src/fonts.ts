@@ -1,4 +1,5 @@
-// Finds an installed Nerd Font, whose glyphs draw the file icons.
+// Finds a Nerd Font, whose glyphs draw the file icons: the one bundled in
+// Wim's `fonts` directory, or else an installed one.
 
 import * as fs from 'node:fs';
 import * as os from 'node:os';
@@ -44,7 +45,20 @@ function fontFiles(dir: string): string[] {
     return files;
 }
 
+/** The font Wim ships with, from the compiled code in `dist/src`. */
+function bundledFont(): string | undefined {
+    const dir = path.join(__dirname, '..', '..', 'fonts');
+    try {
+        const name = fs.readdirSync(dir).find((n) => /NerdFont.*\.(ttf|otf)$/i.test(n));
+        return name && path.join(dir, name);
+    } catch {
+        return undefined;
+    }
+}
+
 export function findNerdFont(): string | undefined {
+    const bundled = bundledFont();
+    if (bundled) return bundled;
     const fonts = fontDirs()
         .flatMap(fontFiles)
         .filter((p) => {

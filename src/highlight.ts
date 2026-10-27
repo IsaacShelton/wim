@@ -1,6 +1,8 @@
 // A small, line-oriented syntax highlighter. It understands comments,
 // strings, numbers, keywords and a few naming conventions for a handful of
 // common languages, carrying block-comment and string state across lines.
+// Markdown has its own: block and inline markup, with fenced code
+// highlighted in the fence's language.
 
 import * as path from 'node:path';
 
@@ -34,7 +36,25 @@ export type Token =
     | 'Bracket'
     /** From a language server only: parameters and fields. */
     | 'Parameter'
-    | 'Property';
+    | 'Property'
+    // Markdown.
+    | 'Heading'
+    /** `**strong**` */
+    | 'Strong'
+    /** `*emphasis*` */
+    | 'Emphasis'
+    /** `~~strikethrough~~` */
+    | 'Strike'
+    /** A link's text. */
+    | 'Link'
+    | 'Url'
+    /** Inline code, and code blocks in no known language. */
+    | 'Raw'
+    | 'Quote'
+    /** List bullets and numbers, and task boxes. */
+    | 'ListMarker'
+    /** The punctuation of markup: `#`, `**`, `` ` ``, `](`... */
+    | 'Markup';
 
 export interface Language {
     name: string;
@@ -57,7 +77,10 @@ export type State =
     | { t: 'Normal' }
     | { t: 'BlockComment' }
     | { t: 'Str'; q: string }
-    | { t: 'TripleStr'; q: string };
+    | { t: 'TripleStr'; q: string }
+    /** Markdown: in a code block opened by `marker` (three or more
+     * backticks or tildes), with the state of its language's highlighter. */
+    | { t: 'Fence'; marker: string; lang: Language | undefined; inner: State };
 
 export const NORMAL: State = { t: 'Normal' };
 
@@ -190,6 +213,14 @@ export const LUA: Language = {
     quotes: ['"', "'"],
 };
 
+export const MARKDOWN: Language = {
+    ...BASE,
+    name: 'markdown',
+    keywords: [],
+    blockComment: ['<!--', '-->'],
+    quotes: [],
+};
+
 const BY_EXTENSION = new Map<string, Language>();
 for (const [lang, exts] of [
     [RUST, 'rs'],
@@ -202,6 +233,7 @@ for (const [lang, exts] of [
     [CONFIG, 'toml yaml yml ini cfg conf'],
     [JSON_LANG, 'json'],
     [LUA, 'lua'],
+    [MARKDOWN, 'md markdown mdx'],
 ] as const) {
     for (const ext of words(exts)) BY_EXTENSION.set(ext, lang);
 }
@@ -212,6 +244,34 @@ export function detect(p: string | undefined): Language | undefined {
     if (['makefile', 'dockerfile', '.bashrc', '.zshrc', '.profile'].includes(name)) return SHELL;
     const dot = name.lastIndexOf('.');
     return dot > 0 ? BY_EXTENSION.get(name.slice(dot + 1)) : undefined;
+}
+
+/** File extensions for the names Markdown code blocks give languages, to
+ * find a highlighter; other names are tried as extensions. */
+const FENCE_EXTENSIONS: Record<string, string> = {
+    rust: 'rs',
+    typescript: 'ts',
+    javascript: 'js',
+    typescriptreact: 'tsx',
+    javascriptreact: 'jsx',
+    python: 'py',
+    shell: 'sh',
+    bash: 'sh',
+    console: 'sh',
+    shellsession: 'sh',
+    cpp: 'cpp',
+    'c++': 'cpp',
+    golang: 'go',
+    kotlin: 'kt',
+    jsonc: 'json',
+    json5: 'json',
+};
+
+/** The highlighter for a Markdown code block's language name (`rust`, `ts`). */
+export function fenceLanguage(name: string): Language | undefined {
+    if (name === '') return undefined;
+    const lower = name.toLowerCase();
+    return detect(`x.${FENCE_EXTENSIONS[lower] ?? lower}`);
 }
 
 function startsWith(line: readonly string[], at: number, pat: string): boolean {
@@ -246,6 +306,7 @@ const DEFINERS = ['fn', 'function', 'def', 'func'];
 /** Highlight one line given the state at its start. Returns the spans
  * `[start, end, token]` in char columns and the state at the line's end. */
 export function highlightLine(lang: Language, line: readonly string[], state: State): [Span[], State] {
+    if (lang.name === 'markdown') return highlightMarkdown(line, state);
     const n = line.length;
     const spans: Span[] = [];
     let i = 0;
@@ -404,6 +465,327 @@ export function highlightLine(lang: Language, line: readonly string[], state: St
     return [spans, state];
 }
 
+/** A line's length in characters. */
+const charLen = (s: string): number => Array.from(s).length;
+
+/** Per character of a line: its token, and for markup what Markdown's
+ * rendered view shows instead (`''` drops it); unset, the character itself. */
+interface Inline {
+    tokens: (Token | undefined)[];
+    shown: (string | undefined)[];
+}
+
+/** A stretch of a Markdown line with the same token and handling: shown as
+ * is, or (`shown` set) replaced by `shown` in the rendered view. */
+export interface InlineSpan {
+    start: number;
+    end: number;
+    token: Token | undefined;
+    shown?: string;
+}
+
+function isSpace(c: string | undefined): boolean {
+    return c === undefined || /^\s$/u.test(c);
+}
+
+/** How many `c` there are in a row from `at`. */
+function runOf(line: readonly string[], at: number, to: number, c: string): number {
+    let j = at;
+    while (j < to && line[j] === c) j++;
+    return j - at;
+}
+
+/** The end of the code span whose backticks start at `at`: after a run of
+ * just as many backticks. */
+function codeSpanEnd(line: readonly string[], at: number, to: number): number | undefined {
+    const n = runOf(line, at, to, '`');
+    for (let j = at + n; j < to; j++) {
+        if (line[j] !== '`') continue;
+        const m = runOf(line, j, to, '`');
+        if (m === n) return j + m;
+        j += m - 1;
+    }
+    return undefined;
+}
+
+/** Where the `n` `c`s that close emphasis start, searching from `from`. */
+function emphasisCloser(line: readonly string[], from: number, to: number, c: string, n: number): number | undefined {
+    for (let j = from; j < to; j++) {
+        const x = line[j];
+        if (x === '\\') {
+            j++;
+        } else if (x === '`') {
+            const end = codeSpanEnd(line, j, to);
+            j = (end ?? j + runOf(line, j, to, '`')) - 1;
+        } else if (x === c) {
+            const m = runOf(line, j, to, c);
+            if (m === n && !isSpace(line[j - 1]) && (c !== '_' || !isIdent(line[j + m] ?? ' '))) return j;
+            j += m - 1;
+        }
+    }
+    return undefined;
+}
+
+/** The bracket closing the one at `open`, counting nested pairs. */
+function matching(line: readonly string[], open: number, to: number, close: string): number | undefined {
+    const o = line[open];
+    let depth = 0;
+    for (let j = open; j < to; j++) {
+        if (line[j] === '\\') j++;
+        else if (line[j] === o) depth++;
+        else if (line[j] === close && --depth === 0) return j;
+    }
+    return undefined;
+}
+
+/** Inline Markdown in `line[from..to)`, over `base` (the token of what
+ * contains it). */
+function inlineInto(line: readonly string[], from: number, to: number, base: Token | undefined, out: Inline): void {
+    const set = (s: number, e: number, token: Token | undefined, shown?: string): void => {
+        for (let k = s; k < e; k++) {
+            out.tokens[k] = token;
+            out.shown[k] = shown === undefined ? undefined : k === s ? shown : '';
+        }
+    };
+    const hide = (s: number, e: number, token: Token = 'Markup'): void => set(s, e, token, '');
+    set(from, to, base);
+    let i = from;
+    while (i < to) {
+        const c = line[i];
+        const rest = (): string => line.slice(i, to).join('');
+        if (c === '\\' && i + 1 < to && /^[!-/:-@[-`{-~]$/.test(line[i + 1])) {
+            hide(i, i + 1);
+            i += 2;
+            continue;
+        }
+        if (c === '`') {
+            const end = codeSpanEnd(line, i, to);
+            const n = runOf(line, i, to, '`');
+            if (end !== undefined) {
+                hide(i, i + n);
+                set(i + n, end - n, 'Raw');
+                hide(end - n, end);
+                i = end;
+            } else {
+                i += n;
+            }
+            continue;
+        }
+        if (c === '<') {
+            const r = rest();
+            const comment = /^<!--.*?-->/.exec(r);
+            const auto = /^<((?:https?|ftp|mailto):[^\s<>]*|[^\s<>@]+@[^\s<>@]+)>/.exec(r);
+            const tag = /^<\/?[A-Za-z][\w-]*(\s[^<>]*)?\/?>/.exec(r);
+            if (comment) {
+                const n = charLen(comment[0]);
+                hide(i, i + n, 'Comment');
+                i += n;
+                continue;
+            }
+            if (auto) {
+                const n = charLen(auto[0]);
+                hide(i, i + 1);
+                set(i + 1, i + n - 1, 'Url');
+                hide(i + n - 1, i + n);
+                i += n;
+                continue;
+            }
+            if (tag) {
+                const n = charLen(tag[0]);
+                hide(i, i + n);
+                i += n;
+                continue;
+            }
+        }
+        if (c === 'h' && (i === from || !isIdent(line[i - 1]))) {
+            const url = /^https?:\/\/[^\s<>]*[^\s<>.,:;"')\]!?*_~]/.exec(rest());
+            if (url) {
+                const n = charLen(url[0]);
+                set(i, i + n, 'Url');
+                i += n;
+                continue;
+            }
+        }
+        if (c === '[' || (c === '!' && line[i + 1] === '[')) {
+            // `[text](url)`, `![alt](src)` and `[text][ref]`.
+            const open = c === '!' ? i + 1 : i;
+            const close = matching(line, open, to, ']');
+            const after = close === undefined ? undefined : line[close + 1];
+            const end =
+                close === undefined
+                    ? undefined
+                    : after === '('
+                      ? matching(line, close + 1, to, ')')
+                      : after === '['
+                        ? matching(line, close + 1, to, ']')
+                        : undefined;
+            if (close !== undefined && end !== undefined) {
+                set(i, open + 1, 'Markup', c === '!' ? '▣ ' : '');
+                inlineInto(line, open + 1, close, 'Link', out);
+                hide(close, close + 2);
+                set(close + 2, end, after === '(' ? 'Url' : 'Markup', '');
+                hide(end, end + 1);
+                i = end + 1;
+                continue;
+            }
+        }
+        if (c === '*' || c === '_' || c === '~') {
+            // Emphasis, strong (`**`, or `***` for both) and strikethrough
+            // (`~~`). `_` doesn't work inside words (`snake_case`).
+            const n = runOf(line, i, to, c);
+            const fits = c === '~' ? n === 2 : n <= 3;
+            if (fits && !isSpace(line[i + n]) && (c !== '_' || i === 0 || !isIdent(line[i - 1]))) {
+                const j = emphasisCloser(line, i + n, to, c, n);
+                if (j !== undefined) {
+                    hide(i, i + n);
+                    inlineInto(line, i + n, j, c === '~' ? 'Strike' : n === 1 ? 'Emphasis' : 'Strong', out);
+                    hide(j, j + n);
+                    i = j + n;
+                    continue;
+                }
+            }
+            i += n;
+            continue;
+        }
+        i++;
+    }
+}
+
+/** The inline markup of `line[from..to)`, over `base`, as spans covering
+ * it all. */
+export function markdownInline(line: readonly string[], from = 0, to = line.length, base?: Token): InlineSpan[] {
+    const out: Inline = { tokens: [], shown: [] };
+    inlineInto(line, from, to, base, out);
+    const spans: InlineSpan[] = [];
+    for (let i = from; i < to; i++) {
+        const token = out.tokens[i];
+        const shown = out.shown[i];
+        const last = spans[spans.length - 1];
+        const joins = shown === '' ? last?.shown !== undefined : shown === undefined && last?.shown === undefined;
+        if (last && last.token === token && joins) last.end = i + 1;
+        else spans.push(shown === undefined ? { start: i, end: i + 1, token } : { start: i, end: i + 1, token, shown });
+    }
+    return spans;
+}
+
+/** A Markdown table's line between its header and body (`| --- | :-: |`). */
+export const TABLE_DELIMITER = /^\s*\|?\s*:?-+:?\s*(\|\s*:?-+:?\s*)+\|?\s*$/;
+
+/** Block markup (quotes, headings, lists, rules...) in `line[from..to)`,
+ * then the inline markup in what's left, into `tokens`. */
+function markdownBlock(line: readonly string[], from: number, to: number, base: Token | undefined, tokens: (Token | undefined)[]): void {
+    const text = line.slice(from, to).join('');
+    const set = (s: number, e: number, token: Token): void => {
+        for (let k = from + s; k < from + e; k++) tokens[k] = token;
+    };
+    let m: RegExpExecArray | null;
+    if ((m = /^ {0,3}>\s?/.exec(text))) {
+        set(0, charLen(m[0]), 'Markup');
+        markdownBlock(line, from + charLen(m[0]), to, 'Quote', tokens);
+        return;
+    }
+    if (/^ {0,3}([-*_])( *\1){2,} *$/.test(text) || /^ {0,3}=+ *$/.test(text) || TABLE_DELIMITER.test(text)) {
+        set(0, to - from, 'Markup');
+        return;
+    }
+    const out: Inline = { tokens, shown: [] };
+    if ((m = /^ {0,3}(#{1,6})(?=\s|$)/.exec(text))) {
+        const at = charLen(m[0]);
+        const closing = /\s#+\s*$/.exec(text.slice(m[0].length));
+        const end = closing ? to - charLen(closing[0]) : to;
+        set(0, at, 'Markup');
+        inlineInto(line, from + at, end, 'Heading', out);
+        for (let k = end; k < to; k++) tokens[k] = 'Markup';
+        return;
+    }
+    if ((m = /^(\s*)([-*+]|\d{1,9}[.)])(\s+|$)/.exec(text))) {
+        const marker = charLen(m[1]);
+        set(marker, marker + charLen(m[2]), 'ListMarker');
+        let at = charLen(m[0]);
+        if (/^\[[ xX]\](?=\s|$)/.test(text.slice(m[0].length))) {
+            set(at, at + 3, 'ListMarker');
+            at += 3;
+        }
+        markdownBlock(line, from + at, to, base, tokens);
+        return;
+    }
+    if ((m = /^( {0,3}\[)([^\]]+)(\]:\s*)(\S+)/.exec(text))) {
+        // A link reference definition: `[ref]: url`.
+        const a = charLen(m[1]);
+        const b = a + charLen(m[2]);
+        const c = b + charLen(m[3]);
+        set(0, a, 'Markup');
+        set(a, b, 'Link');
+        set(b, c, 'Markup');
+        set(c, c + charLen(m[4]), 'Url');
+        return;
+    }
+    inlineInto(line, from, to, base, out);
+    if (text.trimStart().startsWith('|')) {
+        for (let k = from; k < to; k++) if (line[k] === '|' && (tokens[k] === undefined || tokens[k] === base)) tokens[k] = 'Markup';
+    }
+}
+
+/** Where an HTML comment that doesn't close on the line opens, at or after
+ * `from`. */
+function openComment(line: readonly string[], from: number): number | undefined {
+    for (let i = from; i < line.length; i++) {
+        if (!startsWith(line, i, '<!--')) continue;
+        const j = find(line, i + 4, '-->');
+        if (j === undefined) return i;
+        i = j + 2;
+    }
+    return undefined;
+}
+
+function highlightMarkdown(line: readonly string[], state: State): [Span[], State] {
+    const n = line.length;
+    const text = line.join('');
+    if (state.t === 'Fence') {
+        const close = /^ {0,3}(`+|~+)\s*$/.exec(text);
+        if (close && close[1][0] === state.marker[0] && close[1].length >= state.marker.length) return [[[0, n, 'Markup']], NORMAL];
+        if (!state.lang) return [n > 0 ? [[0, n, 'Raw']] : [], state];
+        const [spans, inner] = highlightLine(state.lang, line, state.inner);
+        return [spans, { ...state, inner }];
+    }
+    const tokens: (Token | undefined)[] = new Array(n).fill(undefined);
+    let from = 0;
+    if (state.t === 'BlockComment') {
+        const j = find(line, 0, '-->');
+        if (j === undefined) return [n > 0 ? [[0, n, 'Comment']] : [], state];
+        from = j + 3;
+        tokens.fill('Comment', 0, from);
+    } else {
+        // A backtick fence's info string can't have backticks (that's inline
+        // code).
+        const fence = /^( {0,3})(`{3,}|~{3,})\s*([^\s`{}]*)/.exec(text);
+        if (fence && !(fence[2][0] === '`' && text.slice(fence[0].length).includes('`'))) {
+            const at = charLen(fence[0]) - charLen(fence[3]);
+            const spans: Span[] = [[0, at, 'Markup']];
+            if (fence[3] !== '') spans.push([at, at + charLen(fence[3]), 'Type']);
+            if (at + charLen(fence[3]) < n) spans.push([at + charLen(fence[3]), n, 'Markup']);
+            return [spans, { t: 'Fence', marker: fence[2], lang: fenceLanguage(fence[3]), inner: NORMAL }];
+        }
+    }
+    const open = openComment(line, from);
+    markdownBlock(line, from, open ?? n, undefined, tokens);
+    if (open !== undefined) tokens.fill('Comment', open);
+    return [tokenSpans(tokens), open !== undefined ? { t: 'BlockComment' } : NORMAL];
+}
+
+/** Spans for runs of the same token, one per character in `tokens`. */
+function tokenSpans(tokens: readonly (Token | undefined)[]): Span[] {
+    const out: Span[] = [];
+    for (let i = 0; i < tokens.length; i++) {
+        const t = tokens[i];
+        if (t === undefined) continue;
+        const last = out[out.length - 1];
+        if (last && last[1] === i && last[2] === t) last[1] = i + 1;
+        else out.push([i, i + 1, t]);
+    }
+    return out;
+}
+
 /** Caches the highlighter state at the start of each line, recomputed when
  * the buffer content changes. */
 export class Cache {
@@ -435,13 +817,5 @@ export function overlaySpans(base: readonly Span[], top: readonly Span[], n: num
     for (const spans of [base, top]) {
         for (const [s, e, t] of spans) for (let i = Math.max(s, 0); i < Math.min(e, n); i++) tokens[i] = t;
     }
-    const out: Span[] = [];
-    for (let i = 0; i < n; i++) {
-        const t = tokens[i];
-        if (t === undefined) continue;
-        const last = out[out.length - 1];
-        if (last && last[1] === i && last[2] === t) last[1] = i + 1;
-        else out.push([i, i + 1, t]);
-    }
-    return out;
+    return tokenSpans(tokens);
 }

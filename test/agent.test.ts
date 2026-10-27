@@ -20,10 +20,12 @@ import {
     PermissionUpdate,
     SDKMessage,
     StartOptions,
+    UsageInfo,
 } from '../src/agent/backend';
 import { TextInput } from '../src/agent/input';
 import { WimApp } from '../src/app';
 import { MemoryClipboard } from '../src/clipboard';
+import { defaultConfig } from '../src/config';
 import { parseKeys, plain } from '../src/editor/keys';
 import { ClientMessage, DrawCmd } from '../src/protocol';
 
@@ -117,6 +119,20 @@ class FakeQuery implements AgentQuery {
         } as unknown as ContextUsage);
     }
 
+    getUsage(): Promise<UsageInfo> {
+        const later = (ms: number): string => new Date(Date.now() + ms).toISOString();
+        return Promise.resolve({
+            session: {},
+            subscription_type: 'max',
+            rate_limits_available: true,
+            rate_limits: {
+                five_hour: { utilization: 42, resets_at: later(2 * 3600_000) },
+                seven_day: { utilization: 18, resets_at: later(3 * 86400_000) },
+            },
+            behaviors: null,
+        } as unknown as UsageInfo);
+    }
+
     close(): void {
         this.closed = true;
         this.waiting?.({ value: undefined, done: true });
@@ -198,6 +214,7 @@ function harness(file?: string): Harness {
         clipboard,
         servers: [],
         agents: backend,
+        config: { ...defaultConfig(), claude: { ...defaultConfig().claude, enabled: true } },
         onFrame: (_title, _dirty, cmds) => frames.push(cmds),
         onQuit: () => {},
     });
@@ -629,4 +646,97 @@ test('the prompt edits like a text field, with earlier messages on Up', () => {
     assert.equal(input.text, 'Xhello there\n\nend');
     keys('<Down><Down><Down>');
     assert.equal(input.text, 'draft');
+});
+
+test('Ctrl+h and Ctrl+l move between the panel and the editor, from the prompt too', () => {
+    const h = harness();
+    h.send({ t: 'command', name: 'agents' });
+    h.type('half typed<C-h>');
+    assert.match(h.text(), /NORMAL/);
+    assert.match(h.text(), /half typed/, 'the draft is kept');
+    h.type('<C-l>');
+    assert.match(h.text(), / AGENT /);
+    h.type('<C-l>!');
+    assert.match(h.text(), /half typed!/, 'still in the prompt: nothing is to its right');
+    assert.equal(h.app.agents.focus, 'Input');
+    // And after `S` starts the prompt afresh.
+    h.type('<Esc>S');
+    h.type('<C-h>');
+    assert.match(h.text(), /NORMAL/);
+});
+
+test('Claude Code is off unless the settings turn it on', () => {
+    const frames: DrawCmd[][] = [];
+    const app = new WimApp({ icons: false, clipboard: new MemoryClipboard(), servers: [], agents: new FakeBackend(), onFrame: (_t, _d, c) => frames.push(c), onQuit: () => {} });
+    app.handleMessage({ t: 'resize', width: 1400, height: 800, charW: 10, lineH: 20 });
+    app.handleMessage({ t: 'command', name: 'agents' });
+    const drawn = frames[frames.length - 1].map((c) => (c[0] === 'text' ? c[3] : '')).join('\n');
+    assert.match(drawn, /Claude Code is turned off/);
+    assert.doesNotMatch(drawn, / AGENT /);
+    assert.doesNotMatch(drawn, /✻ Agents/, 'no badge on the status line');
+});
+
+test('presets set the model and effort from a key, and show in the header', async () => {
+    const h = harness();
+    h.send({ t: 'command', name: 'agents' });
+    h.type('<Esc>');
+    h.type('H');
+    assert.match(h.text(), /high/);
+    h.type('i');
+    h.type('hello<CR>');
+    await settle();
+    const q = h.backend.last;
+    assert.equal(q.opts.model, 'claude-opus-5-5');
+    assert.equal(q.opts.effort, 'high');
+    q.emit(init());
+    await settle();
+    // Switching while the session runs changes it on the fly.
+    h.type('<Esc>L');
+    await settle();
+    assert.equal(q.model, 'claude-haiku-5-5');
+    assert.equal(q.effort, 'low');
+    assert.match(h.text(), /Preset low: Haiku 5\.5, low effort/);
+    h.type('M');
+    await settle();
+    assert.equal(q.model, 'claude-sonnet-5-5');
+    assert.equal(q.effort, 'medium');
+    // Changing the effort by hand leaves the preset.
+    h.type('e');
+    h.type('<CR>');
+    assert.doesNotMatch(h.text(), /medium · /);
+});
+
+test('the header shows context use and the prompt cache going cold', async () => {
+    const h = harness();
+    const q = await chat(h, 'hi');
+    q.emit(text('hello'));
+    q.emit(result());
+    await settle();
+    assert.match(h.text(), /3% context/);
+    assert.match(h.text(), /cache 5m/);
+    assert.match(h.text(), /42% 5h/, 'the plan limit closest to running out');
+    // Time passes beyond the cache's life.
+    const realNow = Date.now;
+    Date.now = () => realNow() + 6 * 60000;
+    try {
+        h.type('<Esc>');
+        h.type('j');
+        assert.match(h.text(), /cache cold/);
+    } finally {
+        Date.now = realNow;
+    }
+});
+
+test('u shows the plan usage limits', async () => {
+    const h = harness();
+    const q = await chat(h, 'hi');
+    q.emit(result());
+    await settle();
+    h.type('<Esc>u');
+    await settle();
+    assert.match(h.text(), /Plan usage limits \(max\)/);
+    assert.match(h.text(), /5-hour/);
+    assert.match(h.text(), /42%/);
+    assert.match(h.text(), /resets in 2h/);
+    assert.match(h.text(), /Weekly/);
 });

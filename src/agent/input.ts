@@ -1,6 +1,7 @@
 // The agent panel's prompt: text over one or more lines with a cursor,
-// edited with a text field's keys (and Wim's Insert-mode Ctrl+h/j/k/l), with
-// earlier prompts on Up and Down.
+// edited with a text field's keys (and Ctrl+j/k, as in Wim's Insert mode),
+// with earlier prompts on Up and Down. Ctrl+h and Ctrl+l are the panel's, to
+// move between windows.
 
 import { KeyInput, isCharKey } from '../editor/keys';
 
@@ -178,12 +179,6 @@ export class TextInput {
                 return true;
             case 'e':
                 this.cursor = this.lineEnd();
-                return true;
-            case 'h':
-                this.cursor = Math.max(this.cursor - 1, 0);
-                return true;
-            case 'l':
-                this.cursor = Math.min(this.cursor + 1, this.chars.length);
                 return true;
             case 'k':
                 this.vertical(-1);

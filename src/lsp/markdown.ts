@@ -6,25 +6,6 @@ import { Run } from '../popup';
 import { theme, tokenColor } from '../theme';
 import { Hover, MarkedString, MarkupContent } from './types';
 
-/** File extensions for code block languages, to find a highlighter. */
-const FENCE_EXTENSIONS: Record<string, string> = {
-    rust: 'rs',
-    typescript: 'ts',
-    javascript: 'js',
-    typescriptreact: 'tsx',
-    javascriptreact: 'jsx',
-    python: 'py',
-    shell: 'sh',
-    bash: 'sh',
-    console: 'sh',
-    cpp: 'cpp',
-};
-
-function fenceLanguage(name: string): highlight.Language | undefined {
-    if (name === '') return undefined;
-    return highlight.detect(`x.${FENCE_EXTENSIONS[name] ?? name}`);
-}
-
 /** The text of a hover as Markdown. */
 export function hoverMarkdown(hover: Hover | null): string {
     if (!hover) return '';
@@ -81,7 +62,7 @@ export function markdownLines(md: string): Run[][] {
         const line = raw.replace(/\s+$/, '');
         const marker = /^\s*(```|~~~)\s*([\w+-]*)/.exec(line);
         if (marker) {
-            fence = fence ? undefined : { lang: fenceLanguage(marker[2].toLowerCase()), state: highlight.NORMAL };
+            fence = fence ? undefined : { lang: highlight.fenceLanguage(marker[2]), state: highlight.NORMAL };
             continue;
         }
         if (fence) {

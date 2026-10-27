@@ -3,6 +3,7 @@
 // window closes.
 
 import { WimApp } from './app';
+import { loadConfig } from './config';
 import { findNerdFont } from './fonts';
 import { ClientMessage, ServerMessage } from './protocol';
 import { WebSocketConnection, startServer } from './server';
@@ -58,6 +59,7 @@ function send(conn: WebSocketConnection | undefined, msg: ServerMessage): void {
 export async function main(argv: string[]): Promise<void> {
     const args = parseArgs(argv);
     const fontPath = findNerdFont();
+    const { config, warnings } = loadConfig();
     let client: WebSocketConnection | undefined;
     let window: WindowHandle | undefined;
     let exitTimer: NodeJS.Timeout | undefined;
@@ -78,6 +80,8 @@ export async function main(argv: string[]): Promise<void> {
     const app = new WimApp({
         path: args.path,
         icons: fontPath !== undefined,
+        config,
+        configWarnings: warnings,
         onFrame: (title, dirty, cmds) => send(client, { t: 'frame', title, dirty, cmds }),
         onAudio: (cmd) => send(client, { t: 'audio', cmd }),
         onQuit: shutdown,

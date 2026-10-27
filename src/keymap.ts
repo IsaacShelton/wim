@@ -22,8 +22,12 @@ export type Command =
     | 'ToggleTree'
     /** The Claude Code panel on the right. */
     | 'ToggleAgents'
+    /** The shell under the editor. */
+    | 'ToggleTerminal'
     /** Between Wim's colors and Nord (`,th`, the config's theme toggle). */
     | 'ToggleTheme'
+    /** A Markdown file between editing it and reading it rendered. */
+    | 'ToggleMarkdownView'
     /** Telescope's `find_files`. */
     | 'FindFiles'
     /** Telescope's `live_grep`. */
@@ -140,7 +144,9 @@ export class Keymap {
             [N, '\u{f8ff}', keys('V')],
             [N, '<C-n>', command('ToggleTree')],
             [N, '<leader>cc', command('ToggleAgents')],
+            [N, '<leader>tt', command('ToggleTerminal')],
             [N, '<leader>th', command('ToggleTheme')],
+            [N, '<leader>m', command('ToggleMarkdownView')],
             // Subword motions (nvim-spider).
             [NVO, '<leader>w', plug('SubwordW')],
             [NVO, '<leader>e', plug('SubwordE')],

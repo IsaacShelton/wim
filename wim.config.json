@@ -1,0 +1,13 @@
+{
+    "theme": "onedark",
+    "claude": {
+        "enabled": true,
+        "presets": {
+            "low": { "model": "claude-haiku-5-5", "effort": "low" },
+            "medium": { "model": "claude-sonnet-5-5", "effort": "medium" },
+            "high": { "model": "claude-opus-5-5", "effort": "high" }
+        },
+        "cacheMinutes": 60
+    },
+    "terminal": {}
+}

@@ -13,6 +13,7 @@ export type {
     PermissionResult,
     PermissionUpdate,
     SDKControlGetContextUsageResponse as ContextUsage,
+    SDKControlGetUsageResponse as UsageInfo,
     SDKMessage,
     SDKUserMessage,
 } from '@anthropic-ai/claude-agent-sdk';
@@ -26,6 +27,8 @@ export interface AgentQuery extends AsyncIterable<sdk.SDKMessage> {
     applyFlagSettings(settings: { effortLevel?: sdk.EffortLevel | null }): Promise<void>;
     supportedModels(): Promise<sdk.ModelInfo[]>;
     getContextUsage(opts?: { detail?: 'summary' | 'full' }): Promise<sdk.SDKControlGetContextUsageResponse>;
+    /** The plan's usage limits (5-hour, weekly), when Claude Code can say. */
+    getUsage?(): Promise<sdk.SDKControlGetUsageResponse>;
     close(): void;
 }
 
@@ -92,7 +95,7 @@ function sessionTitle(s: sdk.SDKSessionInfo): string {
 export class SdkBackend implements AgentBackend {
     async start(opts: StartOptions): Promise<AgentQuery> {
         const { query } = await load();
-        return query({
+        const q = query({
             prompt: opts.prompt,
             options: {
                 cwd: opts.cwd,
@@ -110,6 +113,8 @@ export class SdkBackend implements AgentBackend {
                 stderr: opts.stderr,
             },
         });
+        // The SDK's name for this says it may change; keep that to one place.
+        return Object.assign(q, { getUsage: () => q.usage_EXPERIMENTAL_MAY_CHANGE_DO_NOT_RELY_ON_THIS_API_YET({ skipBehaviors: true }) });
     }
 
     async listSessions(dir: string): Promise<PastSession[]> {
