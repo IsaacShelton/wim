@@ -97,13 +97,14 @@ made where a request was open to interpretation.
 5. Windows and key bindings
 ---------------------------
 5.1  Ctrl+h and Ctrl+l (and the other Ctrl+h/j/k/l keys) move between
-     windows, e.g. between the file tree and the editor.
+     windows, e.g. between the file tree and the editor (and split
+     windows, 13).
 5.2  Key bindings follow the user's Neovim 0.10.4 configuration in
      ~/.config/nvim wherever Wim has the feature they use.
-     Decided: mappings for plugins Wim doesn't have (gitsigns, theme
-     toggle, Rust auto-import) are left out. Telescope's pickers become
-     Wim's own picker (see 7 and 8), and nvim-spider's motions Wim's own
-     (2.9).
+     Decided: mappings for plugins Wim doesn't have (gitsigns, Rust
+     auto-import) are left out. Telescope's pickers become Wim's own
+     picker (see 7 and 8), nvim-spider's motions Wim's own (2.9), and the
+     theme toggle switches Wim's themes (12).
 
 
 6. macOS text editing in Insert mode
@@ -222,3 +223,27 @@ made where a request was open to interpretation.
      (which now serves byte ranges, as players need). One sound plays at
      a time; it keeps playing in other buffers, shown in the status line,
      and stops when its buffer is closed. Sounds don't start on opening.
+
+
+12. Themes
+----------
+12.1 Switch between the current colors and Nord, as in the Neovim config.
+     Decided: `,th` (the config's toggle, there between Nord and ayu-light)
+     and `:colorscheme nord` / `:colorscheme onedark`. Nord's colors come
+     from nord.nvim with the config's options, and the mode colors from
+     lualine's Nord theme. Search matches use a darker ice than the
+     config's reversed ice, since Wim draws them behind the text. One Dark
+     stays the default, and the choice isn't saved between sessions.
+
+
+13. Split windows
+-----------------
+13.1 Horizontal and vertical splits.
+     Decided: as in Vim: `:split`/`:vsplit` (with an optional file),
+     `:new`/`:vnew`, `:only`, `:close`, and <C-w> s v n c q o w W p h j k l.
+     New windows go above or left and become active; windows share their
+     space evenly (no resizing); each has a name bar and its own cursor
+     and scroll position. `:q` closes a window before a buffer. Ctrl+h/j/k/l
+     move between windows, reaching the file tree on the left. Clicking a
+     window focuses it; scrolling over one scrolls it. Closing a buffer
+     closes the windows showing it.

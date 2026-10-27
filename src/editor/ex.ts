@@ -23,6 +23,23 @@ import * as search from './search';
 import { expandTilde } from '../paths';
 
 
+/** Commands the window handles rather than the editor (as user commands),
+ * by their abbreviations. */
+const WINDOW_COMMANDS: Record<string, string> = {
+    colo: 'colorscheme',
+    colorscheme: 'colorscheme',
+    sp: 'split',
+    split: 'split',
+    vs: 'vsplit',
+    vsp: 'vsplit',
+    vsplit: 'vsplit',
+    new: 'new',
+    vne: 'vnew',
+    vnew: 'vnew',
+    on: 'only',
+    only: 'only',
+};
+
 export function runEx(ed: Editor, input: string): void {
     if (ed.undoPending === undefined) ed.undoPending = ed.snapshot();
     const buffer = ed.buffer;
@@ -300,8 +317,11 @@ function exCommand(ed: Editor, input: string): void {
             );
             return;
         default:
-            if (/^[A-Z]/.test(name) && ed.userCommand) ed.userCommand(name, args, bang);
-            else fail(`E492: Not an editor command: ${input}`);
+            if (ed.userCommand && (/^[A-Z]/.test(name) || name in WINDOW_COMMANDS)) {
+                ed.userCommand(WINDOW_COMMANDS[name] ?? name, args, bang);
+            } else {
+                fail(`E492: Not an editor command: ${input}`);
+            }
     }
 }
 

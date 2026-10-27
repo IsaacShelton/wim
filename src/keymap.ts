@@ -1,7 +1,7 @@
 // User key mappings, translated from `~/.config/nvim/init.lua` (leader `,`,
 // `timeoutlen` 300ms). Mappings to Neovim plugins Wim doesn't have
-// (gitsigns) are left out; Telescope's pickers and nvim-spider's subword
-// motions become Wim's own.
+// (gitsigns) are left out; Telescope's pickers, nvim-spider's subword
+// motions and the theme toggle become Wim's own.
 
 import { KeyInput, keyIs, keysEq, keysStartWith, parseKeys, plain } from './editor/keys';
 
@@ -20,6 +20,8 @@ export type Command =
     | 'WindowUp'
     | 'WindowDown'
     | 'ToggleTree'
+    /** Between Wim's colors and Nord (`,th`, the config's theme toggle). */
+    | 'ToggleTheme'
     /** Telescope's `find_files`. */
     | 'FindFiles'
     /** Telescope's `live_grep`. */
@@ -135,6 +137,7 @@ export class Keymap {
             [N, 'Ô', keys('V')],
             [N, '\u{f8ff}', keys('V')],
             [N, '<C-n>', command('ToggleTree')],
+            [N, '<leader>th', command('ToggleTheme')],
             // Subword motions (nvim-spider).
             [NVO, '<leader>w', plug('SubwordW')],
             [NVO, '<leader>e', plug('SubwordE')],

@@ -173,8 +173,12 @@ export class Editor {
     audio: AudioInfo | undefined;
     /** Called after a buffer is written to `path`. */
     onWrite: ((path: string) => void) | undefined;
-    /** Runs a user command (`:Name args`, a name starting with a capital).
-     * Throws an `EditorError` to report a problem. */
+    /** Closes the active split window, unless it is the only one (returning
+     * false); `:q` closes a window before a buffer. */
+    closeWindow: (() => boolean) | undefined;
+    /** Runs a user command (`:Name args`, a name starting with a capital, or
+     * one the window handles, such as `:split`). Throws an `EditorError` to
+     * report a problem. */
     userCommand: ((name: string, args: string, bang: boolean) => void) | undefined;
 
     constructor(clipboard?: Clipboard) {
@@ -288,6 +292,7 @@ export class Editor {
     /** Close the active buffer (`:q`), or the window when it is the last one.
      * Refuses (with a message) when it has unsaved changes unless `force` is set. */
     quitBuffer(force: boolean): boolean {
+        if (this.closeWindow?.()) return true;
         if (this.buffers.length === 1) return this.requestQuit(force);
         if (this.isModified() && !force) {
             this.setError('E37: No write since last change (add ! to override)');

@@ -833,3 +833,103 @@ test('images zoom and pan with keys, the wheel, dragging and buttons', async () 
         fs.rmSync(dir, { recursive: true });
     }
 });
+
+// ----- Split windows and themes -------------------------------------------------------------
+
+test('split windows show buffers side by side and one above another', () => {
+    const dir = tempDir('splits');
+    const a = path.join(dir, 'a.txt');
+    const b = path.join(dir, 'b.txt');
+    fs.writeFileSync(a, 'alpha\nline two\n');
+    fs.writeFileSync(b, 'beta\n');
+    const cwd = process.cwd();
+    try {
+        const h = harness(a);
+        const ed = h.app.editor;
+        // Name bars, and the status line's name.
+        const names = (): string[] => h.text().split('\n').filter((t) => /^ (a|b)\.txt/.test(t));
+        // :vsplit shows the same buffer twice, each window with a name bar.
+        h.type(':vs<CR>');
+        assert.equal(h.app.windows.count, 2);
+        assert.deepEqual(names(), [' a.txt', ' a.txt', ' a.txt']);
+        // Editing shows in both; each window keeps its own cursor.
+        h.type('Aa<Esc>');
+        assert.equal((h.text().match(/alphaa/g) ?? []).length, 2);
+        h.type('j');
+        assert.equal(ed.cursor.line, 1);
+        h.type('<C-l>');
+        assert.equal(ed.cursor.line, 0, 'the other window remembers its place');
+        h.type('<C-h>');
+        assert.equal(ed.cursor.line, 1);
+        // :split with a file opens it above; Ctrl+j goes back down.
+        h.type(`:sp ${b}<CR>`);
+        assert.equal(ed.filePath, b);
+        assert.equal(h.app.windows.count, 3);
+        h.type('<C-j>');
+        assert.equal(ed.filePath, a);
+        assert.equal(ed.cursor.line, 1);
+        h.type('<C-k>');
+        assert.equal(ed.filePath, b);
+        // <C-w>w goes round them all; <C-w>p back to the previous.
+        h.type('<C-w>w');
+        assert.equal(ed.filePath, a);
+        h.type('<C-w>p');
+        assert.equal(ed.filePath, b);
+        // :q closes a window while there are others, keeping its buffer; the
+        // previous window is active again.
+        h.type(':q<CR>');
+        assert.equal(h.app.windows.count, 2);
+        assert.equal(ed.filePath, a);
+        assert.equal(ed.buffers.length, 2);
+        // <C-w>o keeps one; then <C-w>c can't close it.
+        h.type('<C-w>o');
+        assert.equal(h.app.windows.count, 1);
+        assert.deepEqual(names(), [' a.txt [+]'], 'no name bars for one window');
+        h.type('<C-w>c');
+        assert.match(ed.message?.text ?? '', /E444/);
+        // <C-w>s and <C-w>v split too; closing a buffer closes its windows.
+        h.type(`<C-w>v:e ${b}<CR>`);
+        assert.equal(h.app.windows.count, 2);
+        h.type('<C-w>l:bd 2<CR>');
+        assert.equal(h.app.windows.count, 1);
+        assert.equal(ed.filePath, a);
+    } finally {
+        process.chdir(cwd);
+        fs.rmSync(dir, { recursive: true });
+    }
+});
+
+test('clicking a window moves there, and Ctrl+h reaches the tree', () => {
+    const dir = tempDir('split-mouse');
+    const a = path.join(dir, 'a.txt');
+    fs.writeFileSync(a, 'one\ntwo\nthree\n');
+    const cwd = process.cwd();
+    try {
+        const h = harness(a);
+        h.type(':vs<CR>j');
+        // The left window is active (x < 400); click the right one's third line.
+        h.send({ t: 'mouse', kind: 'down', x: 600, y: 45 });
+        h.send({ t: 'mouse', kind: 'up', x: 600, y: 45 });
+        assert.equal(h.app.editor.cursor.line, 2);
+        h.type('<C-h><C-n><C-l><C-h><C-h>');
+        assert.match(h.text(), /TREE/);
+        h.type('<C-l>');
+        assert.match(h.text(), /NORMAL/);
+    } finally {
+        process.chdir(cwd);
+        fs.rmSync(dir, { recursive: true });
+    }
+});
+
+test(',th switches between the themes, as does :colorscheme', () => {
+    const h = harness();
+    const background = (): unknown => h.frames[h.frames.length - 1][0][5];
+    assert.equal(background(), '#282c34');
+    h.type(',th');
+    assert.equal(background(), '#2E3440');
+    assert.match(h.app.editor.message?.text ?? '', /nord/);
+    h.type(':colorscheme onedark<CR>');
+    assert.equal(background(), '#282c34');
+    h.type(':colo solarized<CR>');
+    assert.match(h.app.editor.message?.text ?? '', /E185/);
+});

@@ -172,6 +172,28 @@ arrow keys, to move it; the middle of the window always stays over the image. Ke
 glide to the new zoom or place; holding a key keeps going. Enlarged two times or more, pixels
 are drawn sharp. The status line shows the zoom.
 
+## Split windows
+
+`:sp [file]` (or `<C-w>s`) splits the window in two, one above the other; `:vs [file]` (or
+`<C-w>v`) side by side; `:new` and `:vnew` (`<C-w>n`) split with a new, empty buffer. The new
+window comes first (above or left) and is active. Windows share the space evenly, and each has
+a name bar under it. Each window has its own cursor and scroll position, even on the same
+buffer.
+
+Ctrl+h/j/k/l (or `<C-w>h`/`j`/`k`/`l`, or the arrows after `<C-w>`) move between windows; from
+the leftmost window Ctrl+h goes to the file tree. `<C-w>w`/`W` go round them all (the tree
+first), `<C-w>p` back to the previous one. Clicking a window moves there, and scrolling over
+another window scrolls it. `:q` closes a window while there are others (its buffer stays open);
+`:close` and `<C-w>c` close one, `<C-w>q` is `:q`, and `:only` or `<C-w>o` keeps only the
+active one. Closing a buffer closes the windows showing it.
+
+## Colors
+
+Wim's colors follow Atom's One Dark. `,th` (as in the Neovim config) or `:colorscheme nord`
+switches to Nord, as nord.nvim draws it with the config's settings, with lualine's Nord colors
+for the mode in the status line; `,th` again or `:colorscheme onedark` switches back. The
+choice lasts until Wim exits.
+
 ## Sounds
 
 MP3, WAV, FLAC, Ogg, Opus, AAC (`.m4a`, `.aac`) and WebM (`.weba`) files open in a player: the
@@ -202,10 +224,11 @@ Normal-mode mappings don't apply in the middle of a command, so `f,` still finds
 
 | Keys | Mode | Action |
 | --- | --- | --- |
-| Ctrl+h / Ctrl+l | Normal | Focus the window to the left / right (file tree ⇄ editor) |
+| Ctrl+h/j/k/l | Normal | Move to the window to the left / below / above / right (the file tree is leftmost) |
 | Ctrl+h/j/k/l | Insert | Move the cursor left/down/up/right |
 | Tab / Shift+Tab | Normal | Next / previous buffer |
 | Ctrl+n | Normal | Toggle the file tree |
+| `,th` | Normal | Switch between Wim's colors (One Dark) and Nord |
 | Ctrl+y | Normal | Forward in the jump list (`<C-i>`, which is Tab in a terminal) |
 | `,w` `,b` `,e` `,ge` | Normal, Visual, after an operator | Like `w`, `b`, `e`, `ge` for subwords (nvim-spider): camelCase humps, snake_case parts and digit runs; single punctuation is skipped |
 | `,;` `,o` `,'` | Normal | `:w` |
@@ -239,8 +262,8 @@ Normal-mode mappings don't apply in the middle of a command, so `f,` still finds
 On Windows and Linux, Alt works like Option in these mappings (Alt+j is `}`, Alt+Shift+j moves
 lines, and so on).
 
-Mappings for plugins Wim doesn't have (gitsigns, the theme toggle, Rust
-auto-import, inlay hints) are left out, as is the `=` re-indent step of the line-moving
+Mappings for plugins Wim doesn't have (gitsigns, Rust auto-import, inlay hints) are left
+out, as is the `=` re-indent step of the line-moving
 mappings.
 
 **Ex commands:** `:w [file]`, `:q[!]`, `:wq`, `:x`, `ZZ`, `ZQ`, `:e[!] [file]` (Tab completes paths),
@@ -271,5 +294,5 @@ an Edge or Chrome window, the browser asks before closing with unsaved changes i
 
 ## Not supported yet
 
-Splits; macros (`q`); Visual Block mode; line wrapping; undo
-of only part of an Insert session; a config file.
+Macros (`q`); Visual Block mode; line wrapping; undo of only part of an Insert session;
+resizing split windows; a config file.

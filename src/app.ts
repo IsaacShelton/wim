@@ -7,10 +7,10 @@ import * as path from 'node:path';
 
 import { AudioInfo, AudioPlayer, SEEK_STEP, VOLUME_STEP, formatTime } from './audio';
 import { Clipboard, SystemClipboard } from './clipboard';
-import { bufferState, bufferStates, findBuffer } from './editor/buffers';
-import { Pos, isWhitespace, pos, posCmp } from './editor/buffer';
+import { bufferState, bufferStates, findBuffer, switchToBufferQuietly } from './editor/buffers';
+import { Buffer, Pos, isWhitespace, pos, posCmp } from './editor/buffer';
 import { awaitingMotion } from './editor/command';
-import { Editor } from './editor/editor';
+import { Editor, Selection } from './editor/editor';
 import { fail } from './editor/errors';
 import { KeyInput, ch, charOf, ctrl, isNamedKey, keyEq, keyNew, keyToString, parseKeys, plain } from './editor/keys';
 import { isCmdLine } from './editor/mode';
@@ -28,10 +28,11 @@ import { LspFeatures, severityColor } from './lsp/features';
 import { BufferDiagnostic, LspManager } from './lsp/manager';
 import { ServerSpec, defaultServers } from './lsp/servers';
 import { SignatureHelp } from './lsp/signature';
-import { baseName, currentDir } from './paths';
+import { baseName, currentDir, displayName, expandTilde } from './paths';
 import { Float, Overlay, Picker, PickerItem, PreviewSource, readPreview } from './popup';
 import { AudioCommand, ClientMessage, DrawCmd } from './protocol';
-import { theme, tokenColor } from './theme';
+import { isThemeName, setTheme, theme, themeName, tokenColor } from './theme';
+import { Direction, SplitDir, Win, WinRect, Windows } from './windows';
 
 const TEXT_PADDING = 6;
 /** Width of the file tree, in characters. */
@@ -84,6 +85,8 @@ export interface Metrics {
 interface Layout {
     sidebar?: Rect;
     tabline?: Rect;
+    /** Every window's place; `textArea` is the active one's. */
+    windows: WinRect[];
     textArea: Rect;
     textLeft: number;
     status: Rect;
@@ -145,7 +148,8 @@ export class WimApp {
     private flashTimer: NodeJS.Timeout | undefined;
     /** Buffer tabs from the last frame, for mouse clicks. */
     private tabHits: [Rect, number][] = [];
-    private readonly highlightCache = new highlight.Cache();
+    /** Highlighter states, by buffer. */
+    private readonly highlightCaches = new Map<number, highlight.Cache>();
     private scrollRemainder = 0;
     private closeWarned = false;
     private metrics: Metrics = { width: 1000, height: 720, charW: 9, lineH: 23 };
@@ -155,6 +159,8 @@ export class WimApp {
     private press: { x: number; y: number; dragging: boolean; control?: 'Scrub' | 'Volume' } | undefined;
     /** The one sound that can be playing. */
     readonly player: AudioPlayer;
+    /** Split windows; the editor works in the active one. */
+    readonly windows: Windows;
     private quitting = false;
     readonly lsp: LspManager;
     private readonly features: LspFeatures;
@@ -215,6 +221,9 @@ export class WimApp {
         this.player = new AudioPlayer((cmd) => opts.onAudio?.(cmd), refresh);
         this.editor.userCommand = (name, args) => this.userCommand(name, args);
         if (file !== undefined) this.editor.openFile(file);
+        this.windows = new Windows(this.editor.bufferId());
+        // `:q` closes a window while there are others.
+        this.editor.closeWindow = () => this.closeWindow();
         if (dirError !== undefined) this.editor.setError(dirError);
         const root = currentDir();
         this.tree = new FileTree(root);
@@ -284,7 +293,7 @@ export class WimApp {
     private wheel(layout: Layout, msg: { x: number; y: number; delta: number; dx: number; mode: number; zoom: boolean }): void {
         const view = this.imageView();
         if (view && contains(layout.textArea, msg.x, msg.y)) {
-            const area = imageArea(layout);
+            const area = imageArea(layout.textArea, layout.lineH);
             // In pixels: a line is a line height, a page the view's height.
             const unit = msg.mode === 1 ? layout.lineH : msg.mode === 2 ? area.bottom - area.top : 1;
             // Scrolling (or pinching) zooms around the pointer: a mouse wheel
@@ -299,8 +308,14 @@ export class WimApp {
         const whole = Math.trunc(this.scrollRemainder);
         if (whole === 0) return;
         this.scrollRemainder -= whole;
-        if (layout.sidebar && contains(layout.sidebar, msg.x, msg.y)) this.tree.scrollBy(whole);
-        else this.editor.scrollBy(whole);
+        const under = layout.windows.find((w) => contains(w.area, msg.x, msg.y));
+        if (layout.sidebar && contains(layout.sidebar, msg.x, msg.y)) {
+            this.tree.scrollBy(whole);
+        } else if (under && under.win !== this.windows.active) {
+            this.scrollWindow(under, whole);
+        } else {
+            this.editor.scrollBy(whole);
+        }
     }
 
     private key(key: KeyInput): void {
@@ -425,20 +440,23 @@ export class WimApp {
         }
         switch (rhs.command) {
             case 'WindowLeft':
-                if (this.treeVisible) {
-                    this.editorToNormal();
-                    this.focus = 'Tree';
-                }
+                this.moveFocus('Left');
                 break;
             case 'WindowRight':
-                this.focus = 'Editor';
+                this.moveFocus('Right');
                 break;
-            // There are no splits above or below.
             case 'WindowUp':
+                this.moveFocus('Up');
+                break;
             case 'WindowDown':
+                this.moveFocus('Down');
                 break;
             case 'ToggleTree':
                 this.toggleTree();
+                break;
+            case 'ToggleTheme':
+                setTheme(themeName() === 'nord' ? 'onedark' : 'nord');
+                this.editor.setMessage(`colorscheme ${themeName()}`);
                 break;
             case 'FindFiles':
                 this.findFiles();
@@ -472,6 +490,22 @@ export class WimApp {
             case 'LspRestart':
                 this.lsp.restart();
                 this.editor.setMessage('Restarting language servers');
+                return;
+            case 'split':
+            case 'vsplit':
+                this.split(name === 'split' ? 'Column' : 'Row', false, args === '' ? undefined : expandTilde(args));
+                return;
+            case 'new':
+            case 'vnew':
+                this.split(name === 'new' ? 'Column' : 'Row', true);
+                return;
+            case 'only':
+                this.onlyWindow();
+                return;
+            case 'colorscheme':
+                if (args === '') this.editor.setMessage(themeName());
+                else if (isThemeName(args)) setTheme(args);
+                else fail(`E185: Cannot find color scheme '${args}' (there are onedark and nord)`);
                 return;
             case 'LspFormatOnSave':
                 if (args === 'on' || args === 'off') this.lsp.formatOnSave = args === 'on';
@@ -515,7 +549,7 @@ export class WimApp {
             return;
         }
         const editorIdle = this.editor.mode === 'Normal' && this.editor.pending.length === 0;
-        if (keyEq(key, ctrl('w')) && this.treeVisible && (this.focus === 'Tree' || editorIdle)) {
+        if (keyEq(key, ctrl('w')) && (this.focus === 'Tree' || editorIdle)) {
             this.windowCmdPending = true;
             return;
         }
@@ -557,7 +591,11 @@ export class WimApp {
     private imageView(): ImageView | undefined {
         const image = this.editor.image;
         if (!image || image.width === 0 || image.height === 0) return undefined;
-        const id = this.editor.bufferId();
+        return this.imageViewFor(this.editor.bufferId(), image);
+    }
+
+    /** The zoom and position of buffer `id`'s image. */
+    private imageViewFor(id: number, image: ImageInfo): ImageView {
         let entry = this.imageViews.get(id);
         if (!entry || entry.image !== image) {
             entry = { image, view: new ImageView(image) };
@@ -569,7 +607,7 @@ export class WimApp {
     private imagePlacement(layout: Layout): PaintState['imageView'] {
         const view = this.imageView();
         if (!view) return undefined;
-        const size = rectSize(imageArea(layout));
+        const size = rectSize(imageArea(layout.textArea, layout.lineH));
         return { placement: view.place(size), scale: view.currentScale(size) };
     }
 
@@ -579,7 +617,7 @@ export class WimApp {
     private imageKey(key: KeyInput): boolean {
         const view = this.imageView();
         if (!view || this.editor.mode !== 'Normal' || this.editor.pending.length > 0 || key.ctrl) return false;
-        const size = rectSize(imageArea(this.layout()));
+        const size = rectSize(imageArea(this.layout().textArea, this.metrics.lineH));
         const step = Math.max(size.width, size.height) / 10;
         const pans: Record<string, [number, number]> = {
             h: [step, 0],
@@ -647,7 +685,7 @@ export class WimApp {
         const ed = this.editor;
         const info = ed.audio;
         if (!info || ed.filePath === undefined) return false;
-        const c = audioControls(layout);
+        const c = audioControls(layout.textArea, layout.charW, layout.lineH);
         const p = this.player;
         const fraction = (r: Rect): number => Math.min(Math.max((x - r.left) / (r.right - r.left), 0), 1);
         if (control === 'Scrub' || (!control && contains(c.scrubber, x, y))) {
@@ -678,7 +716,7 @@ export class WimApp {
             this.imageTimer = undefined;
             const view = this.imageView();
             if (!view || this.quitting) return;
-            const moving = view.tick(rectSize(imageArea(this.layout())));
+            const moving = view.tick(rectSize(imageArea(this.layout().textArea, this.metrics.lineH)));
             this.render();
             if (moving) this.imageTimer = setTimeout(frame, FRAME);
         };
@@ -687,25 +725,169 @@ export class WimApp {
 
     /** Zoom in, out, or back to fitting the window, gliding there. */
     private imageAction(view: ImageView, action: ImageAction, layout = this.layout()): void {
-        const size = rectSize(imageArea(layout));
+        const size = rectSize(imageArea(layout.textArea, layout.lineH));
         if (action === 'In') view.zoom(1, size, undefined, true);
         else if (action === 'Out') view.zoom(-1, size, undefined, true);
         else view.reset(size, true);
         this.glideImage();
     }
 
-    /** `<C-w>h`/`l`/`w`: move focus between the tree and the editor. */
+    /** After `<C-w>`: `h`/`j`/`k`/`l` (or arrows) move to the window that way,
+     * `w`/`W` to the next/previous (the tree first, if shown), `p` to the
+     * previous one; `s`/`v` split, `n` splits with a new buffer, `c` closes,
+     * `q` quits (`:q`), `o` keeps only this one. */
     private windowCommand(key: KeyInput): void {
-        let toTree: boolean;
-        if (key.key === 'h' || key.key === 'Backspace' || key.key === 'Left') toTree = true;
-        else if (key.key === 'l' || key.key === 'Right') toTree = false;
-        else if (key.key === 'w') toTree = this.focus === 'Editor';
-        else return;
-        if (toTree) {
+        const k = key.key;
+        const moves: Record<string, Direction> = {
+            h: 'Left', Left: 'Left', Backspace: 'Left',
+            l: 'Right', Right: 'Right',
+            k: 'Up', Up: 'Up',
+            j: 'Down', Down: 'Down',
+        };
+        if (k in moves) {
+            this.moveFocus(moves[k]);
+            return;
+        }
+        switch (k) {
+            case 'w':
+            case 'W':
+                this.cycleFocus(k === 'w' ? 1 : -1);
+                break;
+            case 'p':
+                if (this.windows.previous) this.focusWindow(this.windows.previous);
+                break;
+            case 's':
+            case 'S':
+            case 'v':
+            case 'n':
+                this.focus = 'Editor';
+                this.split(k === 'v' ? 'Row' : 'Column', k === 'n');
+                break;
+            case 'c':
+                this.focus = 'Editor';
+                if (!this.closeWindow()) this.editor.setError('E444: Cannot close last window');
+                break;
+            case 'q':
+                this.focus = 'Editor';
+                this.editor.handleKeys(parseKeys(':q<CR>'));
+                break;
+            case 'o':
+                this.focus = 'Editor';
+                this.onlyWindow();
+                break;
+        }
+    }
+
+    // ----- Split windows -----------------------------------------------------------
+
+    /** Remember the active window's place, from the editor. */
+    private saveWindow(): void {
+        const w = this.windows.active;
+        const ed = this.editor;
+        w.bufferId = ed.bufferId();
+        w.cursor = ed.cursor;
+        w.scrollTop = ed.scrollTop;
+        w.scrollLeft = ed.scrollLeft;
+        w.wantCol = ed.wantCol;
+    }
+
+    /** Make `win` the active window: the editor shows its buffer, cursor and
+     * scroll position. */
+    private focusWindow(win: Win): void {
+        this.focus = 'Editor';
+        if (win === this.windows.active) return;
+        this.editorToNormal();
+        this.saveWindow();
+        this.windows.focus(win);
+        this.loadWindow(win);
+    }
+
+    private loadWindow(win: Win): void {
+        const ed = this.editor;
+        if (win.bufferId !== ed.bufferId() && !switchToBufferQuietly(ed, win.bufferId)) win.bufferId = ed.bufferId();
+        ed.cursor = win.cursor;
+        ed.scrollTop = win.scrollTop;
+        ed.scrollLeft = win.scrollLeft;
+        ed.wantCol = win.wantCol;
+        ed.clampCursor();
+    }
+
+    /** Keep the windows in step with the editor: the active one shows what it
+     * shows, and windows whose buffer was closed go too. */
+    private syncWindows(): void {
+        this.saveWindow();
+        const open = new Set(this.editor.buffers.map((s) => s.id));
+        for (const w of this.windows.list()) {
+            if (!open.has(w.bufferId) && w !== this.windows.active) this.windows.close(w);
+        }
+    }
+
+    /** Scroll an inactive window, keeping its cursor in view as Vim does. */
+    private scrollWindow(rect: WinRect, lines: number): void {
+        const win = rect.win;
+        const st = bufferState(this.editor, win.bufferId);
+        if (!st || st.image || st.audio) return;
+        const last = st.buffer.lastLine();
+        const rows = Math.max(Math.floor((rect.area.bottom - rect.area.top) / this.metrics.lineH), 1);
+        win.scrollTop = Math.min(Math.max(win.scrollTop + lines, 0), last);
+        const line = Math.min(Math.max(win.cursor.line, win.scrollTop), Math.min(win.scrollTop + rows - 1, last));
+        if (line !== win.cursor.line) win.cursor = pos(line, 0);
+    }
+
+    /** Split the active window (`:split`, `:vsplit`): the new window shows the
+     * same buffer, or `file`, or with `empty` a new buffer. */
+    private split(dir: SplitDir, empty = false, file?: string): void {
+        this.editorToNormal();
+        this.saveWindow();
+        this.windows.split(dir);
+        if (empty) this.editor.handleKeys(parseKeys(':enew<CR>'));
+        else if (file !== undefined) this.editor.openFile(file);
+    }
+
+    /** Close the active window (`:close`, and `:q` while there are others).
+     * Returns false for the last window. */
+    private closeWindow(): boolean {
+        if (this.windows.count === 1) return false;
+        this.editorToNormal();
+        this.saveWindow();
+        this.windows.close(this.windows.active);
+        this.loadWindow(this.windows.active);
+        return true;
+    }
+
+    private onlyWindow(): void {
+        this.saveWindow();
+        this.windows.only();
+    }
+
+    /** Move to the window (or the tree) in a direction (Ctrl+h/j/k/l). */
+    private moveFocus(dir: Direction): void {
+        if (this.focus === 'Tree') {
+            if (dir === 'Right') this.focus = 'Editor';
+            return;
+        }
+        this.saveWindow();
+        const next = this.windows.neighbor(this.layout().windows, this.windows.active, dir);
+        if (next) {
+            this.focusWindow(next);
+        } else if (dir === 'Left' && this.treeVisible) {
+            this.editorToNormal();
+            this.focus = 'Tree';
+        }
+    }
+
+    /** `<C-w>w`/`W`: the next or previous window, with the tree (if shown)
+     * before the first. */
+    private cycleFocus(delta: number): void {
+        const wins = this.windows.list();
+        const stops: (Win | 'Tree')[] = this.treeVisible ? ['Tree', ...wins] : wins;
+        const at = this.focus === 'Tree' ? 0 : stops.indexOf(this.windows.active);
+        const next = stops[(((at + delta) % stops.length) + stops.length) % stops.length];
+        if (next === 'Tree') {
             this.editorToNormal();
             this.focus = 'Tree';
         } else {
-            this.focus = 'Editor';
+            this.focusWindow(next);
         }
     }
 
@@ -877,6 +1059,13 @@ export class WimApp {
             this.float = undefined;
             this.completion.close();
             this.signature.close();
+            // A press in another window (or on its name bar) moves there first.
+            const hit = layout.windows.find((w) => contains(w.area, x, y) || (w.bar && contains(w.bar, x, y)));
+            if (hit && (hit.win !== this.windows.active || this.focus !== 'Editor')) {
+                this.focusWindow(hit.win);
+                layout = this.prepare();
+            }
+            if (hit?.bar && contains(hit.bar, x, y)) return;
         }
         if (kind === 'up') {
             this.press = undefined;
@@ -894,7 +1083,7 @@ export class WimApp {
             const view = this.imageView();
             if (view) {
                 // Dragging an image moves it.
-                view.pan(x - p.x, y - p.y, rectSize(imageArea(layout)));
+                view.pan(x - p.x, y - p.y, rectSize(imageArea(layout.textArea, layout.lineH)));
                 p.x = x;
                 p.y = y;
                 return;
@@ -927,7 +1116,7 @@ export class WimApp {
         if (contains(layout.textArea, x, y)) {
             this.focus = 'Editor';
             const view = this.imageView();
-            const button = view && imageButtons(layout).find(([r]) => contains(r, x, y));
+            const button = view && imageButtons(layout.textArea, layout.lineH).find(([r]) => contains(r, x, y));
             this.press = { x, y, dragging: false };
             if (this.audioMouse(layout, x, y)) return;
             if (view && button) {
@@ -1001,7 +1190,9 @@ export class WimApp {
             this.opts.onQuit();
             return;
         }
-        // Input may have changed the gutter, tabs or sidebar; lay out again.
+        // Input may have changed the gutter, tabs, sidebar or windows; lay out
+        // again.
+        this.syncWindows();
         const layout = this.prepare();
         this.editor.scrollToCursor();
         this.syncTree(layout);
@@ -1028,10 +1219,7 @@ export class WimApp {
         const dirty = this.editor.firstModifiedBuffer() !== undefined;
         const painter = new Painter(this.editor, layout, {
             metrics: this.metrics,
-            gutterCols: this.gutterCols(),
-            signCols: this.signCols(),
-            diagnostics: this.features.diagnostics(),
-            references: this.features.highlights(),
+            panes: this.panes(layout),
             diagnosticCounts: this.lsp.counts(this.editor.filePath),
             lspProgress: this.lsp.progressText(),
             completion: this.completion.visible && this.focus === 'Editor' ? this.completion : undefined,
@@ -1045,9 +1233,15 @@ export class WimApp {
             focus: this.focus,
             icons: this.icons,
             tree: this.tree,
-            flash: this.flash,
             mapPending: this.mapPending,
-            highlightCache: this.highlightCache,
+            highlightCache: (id) => {
+                let cache = this.highlightCaches.get(id);
+                if (!cache) {
+                    cache = new highlight.Cache();
+                    this.highlightCaches.set(id, cache);
+                }
+                return cache;
+            },
         });
         const cmds = painter.paint();
         this.tabHits = painter.tabHits;
@@ -1060,11 +1254,13 @@ export class WimApp {
         const sidebar = this.treeVisible ? rect(0, 0, Math.min(SIDEBAR_COLS * charW, width * 0.4), bottom) : undefined;
         const editorLeft = sidebar ? sidebar.right + 1 : 0;
         const tabline = this.editor.buffers.length > 1 ? rect(editorLeft, 0, width, lineH) : undefined;
-        const textArea = rect(editorLeft, tabline ? tabline.bottom : 0, width, bottom);
+        const windows = this.windows.layout(rect(editorLeft, tabline ? tabline.bottom : 0, width, bottom), lineH, charW);
+        const textArea = windows.find((w) => w.win === this.windows.active)!.area;
         const textLeft = textArea.left + this.gutterCols() * charW + TEXT_PADDING;
         return {
             sidebar,
             tabline,
+            windows,
             textArea,
             textLeft,
             status: rect(0, bottom, width, bottom + lineH),
@@ -1077,16 +1273,61 @@ export class WimApp {
         };
     }
 
-    private signCols(): number {
-        return this.lsp.handles(this.editor.filePath) ? SIGN_COLS : 0;
+    private signCols(file = this.editor.filePath): number {
+        return this.lsp.handles(file) ? SIGN_COLS : 0;
     }
 
-    /** The sign column and line numbers. */
-    private gutterCols(): number {
+    /** The sign column and line numbers, for the active buffer or another. */
+    private gutterCols(buffer = this.editor.buffer, file = this.editor.filePath): number {
         const o = this.editor.options;
-        if (this.editor.image) return 0;
-        if (!o.number && !o.relativenumber) return this.signCols();
-        return this.signCols() + Math.max(String(this.editor.buffer.lineCount()).length, 3) + 1;
+        if (!o.number && !o.relativenumber) return this.signCols(file);
+        return this.signCols(file) + Math.max(String(buffer.lineCount()).length, 3) + 1;
+    }
+
+    /** What each window shows, for painting. */
+    private panes(layout: Layout): Pane[] {
+        const ed = this.editor;
+        const { charW: cw, lineH: lh } = layout;
+        return layout.windows.flatMap((rect): Pane[] => {
+            const win = rect.win;
+            const active = win === this.windows.active;
+            const st = active ? ed : bufferState(ed, win.bufferId);
+            if (!st) return [];
+            const file = st.filePath;
+            const name = displayName(file);
+            const modified = st.buffer.version() !== st.savedVersion;
+            const pane = { rect, active, name, modified };
+            if (st.image && file !== undefined) {
+                const area = rectSize(imageArea(rect.area, lh));
+                const view = st.image.width > 0 && st.image.height > 0 ? this.imageViewFor(win.bufferId, st.image) : undefined;
+                return [{ ...pane, content: { t: 'Image', file, image: st.image, placement: view?.place(area) } }];
+            }
+            if (st.audio && file !== undefined) return [{ ...pane, content: { t: 'Audio', file, info: st.audio } }];
+            const buffer = st.buffer;
+            const last = buffer.lastLine();
+            const cursor = active ? ed.cursor : pos(Math.min(win.cursor.line, last), win.cursor.col);
+            const gutterCols = this.gutterCols(buffer, file);
+            const textLeft = rect.area.left + gutterCols * cw + TEXT_PADDING;
+            const view: TextView = {
+                buffer,
+                bufferId: win.bufferId,
+                filePath: file,
+                cursor,
+                scrollTop: active ? ed.scrollTop : Math.min(win.scrollTop, last),
+                scrollLeft: active ? ed.scrollLeft : win.scrollLeft,
+                selection: active ? ed.selection() : undefined,
+                area: rect.area,
+                textLeft,
+                rows: Math.max(Math.floor((rect.area.bottom - rect.area.top) / lh), 1),
+                cols: Math.max(Math.floor((rect.area.right - textLeft - TEXT_PADDING) / cw), 1),
+                gutterCols,
+                signCols: this.signCols(file),
+                diagnostics: this.lsp.diagnosticsFor(file, buffer),
+                references: active ? this.features.highlights() : [],
+                flash: active ? this.flash : undefined,
+            };
+            return [{ ...pane, content: { t: 'Text', view } }];
+        });
     }
 }
 
@@ -1098,17 +1339,16 @@ function isDirectory(p: string): boolean {
     }
 }
 
-/** Where an image is shown: the text area, less a margin. */
-function imageArea(layout: Layout): Rect {
-    const r = layout.textArea;
-    const pad = Math.min(layout.lineH, (r.right - r.left) / 4, (r.bottom - r.top) / 4);
+/** Where an image is shown in a window's area `r`: less a margin. */
+function imageArea(r: Rect, lh: number): Rect {
+    const pad = Math.min(lh, (r.right - r.left) / 4, (r.bottom - r.top) / 4);
     return rect(r.left + pad, r.top + pad, r.right - pad, r.bottom - pad);
 }
 
-/** Where the sound player and its controls go: a panel in the middle of the
- * text area, with rows for the title (and details under it), the play button
- * and scrubber, the volume, and the key reminder. */
-function audioControls(layout: Layout): {
+/** Where the sound player and its controls go: a panel in the middle of a
+ * window's area `r`, with rows for the title (and details under it), the play
+ * button and scrubber, the volume, and the key reminder. */
+function audioControls(r: Rect, cw: number, lh: number): {
     panel: Rect;
     title: number;
     play: Rect;
@@ -1117,8 +1357,6 @@ function audioControls(layout: Layout): {
     volume: Rect;
     hint: number;
 } {
-    const r = layout.textArea;
-    const { charW: cw, lineH: lh } = layout;
     const width = Math.max(Math.min(r.right - r.left - 4 * cw, 70 * cw), 30 * cw);
     const height = 10 * lh;
     const left = Math.round((r.left + r.right - width) / 2);
@@ -1139,11 +1377,10 @@ function audioControls(layout: Layout): {
 
 type ImageAction = 'In' | 'Out' | 'Fit';
 
-/** The zoom buttons in the bottom right corner of an image: where they are,
- * what they do and their labels. */
-function imageButtons(layout: Layout): [Rect, ImageAction, string][] {
-    const r = layout.textArea;
-    const size = Math.round(layout.lineH * 1.2);
+/** The zoom buttons in the bottom right corner of an image in a window's
+ * area `r`: where they are, what they do and their labels. */
+function imageButtons(r: Rect, lh: number): [Rect, ImageAction, string][] {
+    const size = Math.round(lh * 1.2);
     const gap = 4;
     const bottom = r.bottom - 8;
     const buttons: [ImageAction, string][] = [
@@ -1169,21 +1406,63 @@ function rgb(color: number): string {
     return '#' + color.toString(16).padStart(6, '0');
 }
 
+/** One window's text to paint: its buffer, where it is in it, and where it
+ * goes on screen. */
+interface TextView {
+    buffer: Buffer;
+    bufferId: number;
+    filePath: string | undefined;
+    cursor: Pos;
+    scrollTop: number;
+    scrollLeft: number;
+    /** Only the active window's. */
+    selection: Selection | undefined;
+    area: Rect;
+    /** Where the text starts, after the gutter. */
+    textLeft: number;
+    rows: number;
+    cols: number;
+    gutterCols: number;
+    signCols: number;
+    diagnostics: BufferDiagnostic[];
+    references: [Pos, Pos][];
+    flash: Flash | undefined;
+}
+
+/** A window to paint. */
+interface Pane {
+    rect: WinRect;
+    active: boolean;
+    name: string;
+    modified: boolean;
+    content:
+        | { t: 'Text'; view: TextView }
+        | { t: 'Image'; file: string; image: ImageInfo; placement: Placement | undefined }
+        | { t: 'Audio'; file: string; info: AudioInfo };
+}
+
+/** The display column of `col` on `line`, with tabs `tabstop` wide (as
+ * `Editor.displayCol`, for any buffer). */
+function displayColIn(buf: Buffer, tabstop: number, line: number, col: number): number {
+    const ts = Math.max(tabstop, 1);
+    const chars = buf.line(line);
+    let d = 0;
+    const n = Math.min(col, chars.length);
+    for (let i = 0; i < n; i++) d = chars[i] === '\t' ? (Math.floor(d / ts) + 1) * ts : d + 1;
+    return d + Math.max(col - chars.length, 0);
+}
+
 /** What the painter needs to know besides the editor. */
 interface PaintState {
     metrics: Metrics;
-    gutterCols: number;
     focus: Focus;
     icons: boolean;
     tree: FileTree;
-    flash: Flash | undefined;
     mapPending: KeyInput[];
-    highlightCache: highlight.Cache;
-    signCols: number;
-    /** The active buffer's diagnostics, sorted by position. */
-    diagnostics: BufferDiagnostic[];
-    /** Other uses of the symbol under the cursor. */
-    references: [Pos, Pos][];
+    /** Highlighter states for a buffer. */
+    highlightCache: (bufferId: number) => highlight.Cache;
+    /** Every window, the active one among them. */
+    panes: Pane[];
     /** Diagnostics by severity (1 to 4). */
     diagnosticCounts: number[];
     lspProgress: string | undefined;
@@ -1235,15 +1514,8 @@ class Painter {
 
     paint(): DrawCmd[] {
         this.rect(rect(0, 0, this.st.metrics.width, this.st.metrics.height), theme.BG);
-        const image = this.ed.image;
-        if (image && this.ed.filePath !== undefined) {
-            this.paintImage(this.ed.filePath, image);
-        } else if (this.ed.audio && this.ed.filePath !== undefined) {
-            this.paintAudio(this.ed.filePath, this.ed.audio);
-        } else {
-            this.paintText();
-            this.paintCursor();
-        }
+        for (const pane of this.st.panes) this.paintPane(pane);
+        if (this.st.panes.find((p) => p.active)?.content.t === 'Text') this.paintCursor();
         this.paintTabline();
         this.paintTree();
         this.paintStatus();
@@ -1252,11 +1524,35 @@ class Painter {
         return this.cmds;
     }
 
+    /** One window: its text, image or sound, its name bar when there are
+     * several, and a divider on its right if another window is there. */
+    private paintPane(pane: Pane): void {
+        const cw = this.layout.charW;
+        const { area, bar } = pane.rect;
+        const c = pane.content;
+        this.clip(area);
+        if (c.t === 'Text') this.paintText(c.view);
+        else if (c.t === 'Image') this.paintImage(area, c.file, c.image, c.placement);
+        else this.paintAudio(area, c.file, c.info);
+        this.cmds.push(['unclip']);
+        if (bar) {
+            this.rect(bar, pane.active ? theme.SELECTION : theme.STATUS_BG);
+            const name = ` ${pane.name}${pane.modified ? ' [+]' : ''}`;
+            const cols = Math.floor((bar.right - bar.left) / cw);
+            const shown = Array.from(name).length <= cols ? name : ' …' + Array.from(name).slice(-Math.max(cols - 2, 0)).join('');
+            this.text(bar.left, bar.top, shown, pane.active ? theme.FG : theme.COMMENT);
+        }
+        if (area.right < this.st.metrics.width) {
+            const x = Math.round(area.right + cw / 2);
+            this.rect(rect(x, area.top, x + 1, bar ? bar.bottom : area.bottom), theme.POPUP_BORDER);
+        }
+    }
+
     /** The sound player: the file, a play button, the scrubber with times,
      * the volume, and a reminder of the keys. */
-    private paintAudio(file: string, info: AudioInfo): void {
+    private paintAudio(area: Rect, file: string, info: AudioInfo): void {
         const { charW: cw, lineH: lh } = this.layout;
-        const c = audioControls(this.layout);
+        const c = audioControls(area, cw, lh);
         const p = this.st.player;
         const here = p.file === file;
         const time = here ? p.time : 0;
@@ -1315,21 +1611,17 @@ class Painter {
 
     /** An image file, as zoomed and moved (at first shrunk to fit if it is
      * larger than the window). */
-    private paintImage(file: string, image: ImageInfo): void {
-        const area = imageArea(this.layout);
+    private paintImage(pane: Rect, file: string, image: ImageInfo, p: Placement | undefined): void {
+        const { charW: cw, lineH: lh } = this.layout;
+        const area = imageArea(pane, lh);
         const src = imageUrl(file, image);
-        const view = this.st.imageView;
-        if (!view) {
+        if (!p) {
             // Its size is unknown: the window fits it.
             this.cmds.push(['image', area.left, area.top, area.right - area.left, area.bottom - area.top, src, true]);
             return;
         }
-        const p = view.placement;
-        this.clip(this.layout.textArea);
         this.cmds.push(['image', area.left + p.x, area.top + p.y, p.width, p.height, src]);
-        this.cmds.push(['unclip']);
-        const { charW: cw, lineH: lh } = this.layout;
-        for (const [b, action, label] of imageButtons(this.layout)) {
+        for (const [b, action, label] of imageButtons(pane, lh)) {
             // Pressed: lit up, and the label nudged down.
             const pressed = this.st.pressedButton === action;
             this.rect(b, pressed ? theme.POPUP_SELECTION : theme.POPUP_BG, 3);
@@ -1341,20 +1633,22 @@ class Painter {
 
     /** The buffer's lines, with the gutter, selection, search matches and
      * diagnostics. */
-    private paintText(): void {
+    private paintText(v: TextView): void {
         const { ed, layout } = this;
-        const buf = ed.buffer;
+        const buf = v.buffer;
         const opts = ed.options;
-        const cursor = ed.cursor;
-        const selection = ed.selection();
+        const cursor = v.cursor;
+        const selection = v.selection;
         const searchRe = ed.highlightRegex();
-        const lang = highlight.detect(ed.filePath);
-        const gutterCols = this.st.gutterCols;
+        const lang = highlight.detect(v.filePath);
+        const gutterCols = v.gutterCols;
         const cw = layout.charW;
         const lh = layout.lineH;
-        const left = ed.scrollLeft;
-        const colX = (dcol: number): number => layout.textLeft + Math.max(dcol - left, 0) * cw;
-        const flash = this.st.flash;
+        const left = v.scrollLeft;
+        const colX = (dcol: number): number => v.textLeft + Math.max(dcol - left, 0) * cw;
+        const ts = ed.options.tabstop;
+        const displayCol = (line: number, col: number): number => displayColIn(buf, ts, line, col);
+        const flash = v.flash;
         let flashColor: string | undefined;
         if (flash) {
             const fade = 1 - (Date.now() - flash.start) / FLASH_DURATION;
@@ -1364,12 +1658,12 @@ class Painter {
         // Fill the display columns of `line` covered by a region.
         const fillRegion = (line: number, y: number, start: Pos, end: Pos, linewise: boolean, color: string): void => {
             if (line < start.line || line > end.line) return;
-            const lineEnd = ed.displayCol(line, buf.lineLen(line)) + 1;
+            const lineEnd = displayCol(line, buf.lineLen(line)) + 1;
             let from = 0;
             let to = lineEnd;
             if (!linewise) {
-                from = line === start.line ? ed.displayCol(line, start.col) : 0;
-                to = line === end.line ? ed.displayCol(line, end.col) : lineEnd;
+                from = line === start.line ? displayCol(line, start.col) : 0;
+                to = line === end.line ? displayCol(line, end.col) : lineEnd;
             }
             from = Math.max(from, left);
             if (to > from) this.rect(rect(colX(from), y, colX(to), y + lh), color);
@@ -1377,27 +1671,28 @@ class Painter {
 
         // Diagnostics by line, most severe first.
         const lineDiagnostics = new Map<number, BufferDiagnostic[]>();
-        for (const d of this.st.diagnostics) {
-            for (let l = Math.max(d.start.line, ed.scrollTop); l <= Math.min(d.end.line, ed.scrollTop + layout.rows); l++) {
+        for (const d of v.diagnostics) {
+            for (let l = Math.max(d.start.line, v.scrollTop); l <= Math.min(d.end.line, v.scrollTop + v.rows); l++) {
                 const list = lineDiagnostics.get(l) ?? [];
                 list.push(d);
                 lineDiagnostics.set(l, list);
             }
         }
         for (const list of lineDiagnostics.values()) list.sort((a, b) => a.severity - b.severity);
-        const signCols = this.st.signCols;
-        const numbersLeft = layout.textArea.left + signCols * cw;
+        const signCols = v.signCols;
+        const area = v.area;
+        const numbersLeft = area.left + signCols * cw;
 
-        this.clip(rect(layout.textArea.left, 0, layout.textArea.right, layout.textArea.bottom));
-        for (let row = 0; row < layout.rows; row++) {
-            const line = ed.scrollTop + row;
-            const y = layout.textArea.top + row * lh;
+        this.clip(area);
+        for (let row = 0; row < v.rows; row++) {
+            const line = v.scrollTop + row;
+            const y = area.top + row * lh;
             if (line > buf.lastLine()) {
-                this.text(layout.textArea.left + TEXT_PADDING, y, '~', theme.TILDE);
+                this.text(area.left + TEXT_PADDING, y, '~', theme.TILDE);
                 continue;
             }
             if (line === cursor.line && !selection) {
-                this.rect(rect(layout.textArea.left, y, layout.textArea.right, y + lh), theme.CURSOR_LINE);
+                this.rect(rect(area.left, y, area.right, y + lh), theme.CURSOR_LINE);
             }
 
             // Line number gutter: relative numbers, with the absolute number
@@ -1408,7 +1703,7 @@ class Painter {
             const starting = diags.find((d) => d.start.line === line);
             if (starting && signCols > 0) {
                 const sign = (this.st.icons ? SIGNS : PLAIN_SIGNS)[starting.severity] ?? '';
-                this.text(layout.textArea.left + TEXT_PADDING / 2, y, sign, severityColor(starting.severity));
+                this.text(area.left + TEXT_PADDING / 2, y, sign, severityColor(starting.severity));
             }
             if (gutterCols > signCols) {
                 const current = line === cursor.line;
@@ -1418,7 +1713,7 @@ class Painter {
                 if (opts.relativenumber && opts.number && current) {
                     this.text(numbersLeft + 2, y, label, color);
                 } else {
-                    this.textRight(layout.textArea.left + (gutterCols - 1) * cw, y, label, color);
+                    this.textRight(area.left + (gutterCols - 1) * cw, y, label, color);
                 }
             }
 
@@ -1427,13 +1722,13 @@ class Painter {
                 fillRegion(line, y, selection.start, end, selection.linewise, theme.SELECTION);
             }
 
-            for (const [start, end] of this.st.references) fillRegion(line, y, start, end, false, theme.REFERENCE);
+            for (const [start, end] of v.references) fillRegion(line, y, start, end, false, theme.REFERENCE);
 
             const chars = buf.line(line);
             if (searchRe) {
                 for (const [s, e] of lineMatches(searchRe, chars)) {
-                    const ds = ed.displayCol(line, s);
-                    const de = ed.displayCol(line, e);
+                    const ds = displayCol(line, s);
+                    const de = displayCol(line, e);
                     if (de > ds && de >= left) this.rect(rect(colX(Math.max(ds, left)), y, colX(de), y + lh), theme.SEARCH, 2);
                 }
             }
@@ -1442,27 +1737,28 @@ class Painter {
 
             let spans: highlight.Span[] = [];
             if (lang) {
-                const state = this.st.highlightCache.stateAt(lang, ed.bufferId(), buf.version(), line, (i) => buf.line(i));
+                const state = this.st.highlightCache(v.bufferId).stateAt(lang, v.bufferId, buf.version(), line, (i) => buf.line(i));
                 spans = highlight.highlightLine(lang, chars, state)[0];
             }
-            this.lineText(chars, spans, y);
-            this.lineDiagnostics(line, y, diags);
+            this.lineText(v, chars, spans, y);
+            this.lineDiagnostics(v, line, y, diags);
         }
         this.cmds.push(['unclip']);
     }
 
     /** Underline a line's diagnostics and show the most severe message after
      * its end (Neovim's `underline` and `virtual_text`). */
-    private lineDiagnostics(line: number, y: number, diags: readonly BufferDiagnostic[]): void {
+    private lineDiagnostics(v: TextView, line: number, y: number, diags: readonly BufferDiagnostic[]): void {
         if (diags.length === 0) return;
         const { ed, layout } = this;
         const cw = layout.charW;
-        const left = ed.scrollLeft;
-        const lineEnd = ed.displayCol(line, ed.buffer.lineLen(line));
-        const x = (dcol: number): number => layout.textLeft + (dcol - left) * cw;
+        const left = v.scrollLeft;
+        const displayCol = (l: number, col: number): number => displayColIn(v.buffer, ed.options.tabstop, l, col);
+        const lineEnd = displayCol(line, v.buffer.lineLen(line));
+        const x = (dcol: number): number => v.textLeft + (dcol - left) * cw;
         for (const d of [...diags].reverse()) {
-            let from = d.start.line === line ? ed.displayCol(line, d.start.col) : 0;
-            let to = d.end.line === line ? ed.displayCol(line, d.end.col) : lineEnd;
+            let from = d.start.line === line ? displayCol(line, d.start.col) : 0;
+            let to = d.end.line === line ? displayCol(line, d.end.col) : lineEnd;
             // An empty range marks the character there.
             if (to <= from) to = from + 1;
             from = Math.max(from, left);
@@ -1494,18 +1790,18 @@ class Painter {
     }
 
     /** Draw the visible part of a line in its colors, expanding tabs. */
-    private lineText(chars: readonly string[], spans: highlight.Span[], y: number): void {
+    private lineText(v: TextView, chars: readonly string[], spans: highlight.Span[], y: number): void {
         const { ed, layout } = this;
         const ts = Math.max(ed.options.tabstop, 1);
-        const left = ed.scrollLeft;
-        const right = left + layout.cols + 1;
+        const left = v.scrollLeft;
+        const right = left + v.cols + 1;
         let run = '';
         let runColor: string = theme.FG;
         let runStart = left;
         let span = 0;
         let dcol = 0;
         const flush = (): void => {
-            this.text(layout.textLeft + (runStart - left) * layout.charW, y, run, runColor);
+            this.text(v.textLeft + (runStart - left) * layout.charW, y, run, runColor);
             run = '';
         };
         for (let i = 0; i < chars.length && dcol < right; i++) {
