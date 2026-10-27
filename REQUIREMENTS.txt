@@ -234,6 +234,15 @@ made where a request was open to interpretation.
      lualine's Nord theme. Search matches use a darker ice than the
      config's reversed ice, since Wim draws them behind the text. One Dark
      stays the default, and the choice isn't saved between sessions.
+12.2 Highlighting in Nord matches Neovim's (tree-sitter and LSP semantic
+     tokens with nord.nvim).
+     Decided: Wim's syntax highlighter sorts code into tree-sitter's kinds
+     of token, each with its nord.nvim color, and semantic tokens from the
+     language server are laid over it, mapped as nord.nvim maps
+     `@lsp.type.*` (types it leaves alone, such as variables and structs,
+     keep their syntax color). Checked against a screenshot of Neovim:
+     the colors of about 40 sampled tokens of each kind match. Comments are italic in Nord (the
+     config's `styles.comments`). One Dark looks as before.
 
 
 13. Split windows

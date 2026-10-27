@@ -4,7 +4,37 @@
 
 import * as path from 'node:path';
 
-export type Token = 'Normal' | 'Keyword' | 'Type' | 'Constant' | 'String' | 'Comment' | 'Number' | 'Function' | 'Macro';
+export type Token =
+    | 'Normal'
+    | 'Keyword'
+    | 'Type'
+    /** Types built into the language (`f32`, `usize`). */
+    | 'BuiltinType'
+    /** Rust's `Self`. */
+    | 'SelfType'
+    /** ALL_CAPS names. */
+    | 'Constant'
+    /** Constants built into the language (`true`, `None`). */
+    | 'BuiltinConstant'
+    | 'String'
+    | 'Comment'
+    | 'Number'
+    | 'Function'
+    | 'Macro'
+    /** Rust lifetimes (`'a`). */
+    | 'Lifetime'
+    /** A path's leading modules (`std::`). */
+    | 'Module'
+    /** Attribute names (`#[derive]`), and the language's own (`#[inline]`). */
+    | 'Attribute'
+    | 'BuiltinAttribute'
+    | 'Operator'
+    /** `;` `,` `.` `::` `->` */
+    | 'Delimiter'
+    | 'Bracket'
+    /** From a language server only: parameters and fields. */
+    | 'Parameter'
+    | 'Property';
 
 export interface Language {
     name: string;
@@ -19,6 +49,8 @@ export interface Language {
     lifetimes: boolean;
     /** Rust: `name!` is a macro invocation. */
     bangMacros: boolean;
+    /** Rust: attributes built into the language, as opposed to `derive`. */
+    attributes: readonly string[];
 }
 
 export type State =
@@ -31,7 +63,7 @@ export const NORMAL: State = { t: 'Normal' };
 
 export type Span = [start: number, end: number, token: Token];
 
-const BASE = { types: [], constants: [], lineComments: [], tripleQuotes: false, lifetimes: false, bangMacros: false };
+const BASE = { types: [], constants: [], lineComments: [], tripleQuotes: false, lifetimes: false, bangMacros: false, attributes: [] };
 
 const words = (s: string): string[] => s.split(/\s+/).filter((w) => w !== '');
 
@@ -47,6 +79,10 @@ export const RUST: Language = {
     quotes: ['"', "'"],
     lifetimes: true,
     bangMacros: true,
+    attributes: words(`allow warn deny forbid expect cfg cfg_attr test inline cold must_use deprecated doc path
+        repr non_exhaustive no_mangle export_name link link_name used macro_export macro_use proc_macro
+        proc_macro_derive proc_macro_attribute global_allocator track_caller automatically_derived ignore
+        should_panic bench no_std no_main recursion_limit feature crate_type crate_name windows_subsystem`),
 };
 
 export const C: Language = {
@@ -204,6 +240,9 @@ function isAsciiDigit(c: string | undefined): boolean {
     return c !== undefined && c >= '0' && c <= '9';
 }
 
+/** Keywords that a function's name follows. */
+const DEFINERS = ['fn', 'function', 'def', 'func'];
+
 /** Highlight one line given the state at its start. Returns the spans
  * `[start, end, token]` in char columns and the state at the line's end. */
 export function highlightLine(lang: Language, line: readonly string[], state: State): [Span[], State] {
@@ -211,6 +250,12 @@ export function highlightLine(lang: Language, line: readonly string[], state: St
     const spans: Span[] = [];
     let i = 0;
     let seg = 0;
+    /** The last word, for names after `fn`. */
+    let prevWord = '';
+    /** Just after `#[` (Rust): the attribute's name comes next. */
+    let attributeNext = false;
+    // In a Rust `use`, capitalized names are types, even all in capitals.
+    const inUse = lang.name === 'rust' && /^\s*(pub(\([^)]*\))?\s+)?use\s/.test(line.join(''));
     while (i < n) {
         if (state.t === 'BlockComment') {
             const end = lang.blockComment?.[1] ?? '*/';
@@ -284,7 +329,7 @@ export function highlightLine(lang: Language, line: readonly string[], state: St
                         let j = i + 1;
                         while (j < n && isIdent(line[j])) j++;
                         const end = Math.max(j, i + 1);
-                        spans.push([i, end, 'Macro']);
+                        spans.push([i, end, 'Lifetime']);
                         i = end;
                         continue;
                     }
@@ -295,9 +340,18 @@ export function highlightLine(lang: Language, line: readonly string[], state: St
             }
             if (isAsciiDigit(c) && (i === 0 || !isIdent(line[i - 1]))) {
                 let j = i + 1;
-                while (j < n && (isIdent(line[j]) || (line[j] === '.' && isAsciiDigit(line[j + 1])))) j++;
-                spans.push([i, j, 'Number']);
+                // `self.0`: a tuple field, not a number.
+                const field = line[i - 1] === '.' && (isIdent(line[i - 2] ?? ' ') || line[i - 2] === ')');
+                while (j < n && (isIdent(line[j]) || (!field && line[j] === '.' && isAsciiDigit(line[j + 1])))) j++;
+                spans.push([i, j, field ? 'Property' : 'Number']);
                 i = j;
+                continue;
+            }
+            // A Rust attribute: `#[...]` or `#![...]`.
+            if (c === '#' && lang.attributes.length > 0 && (line[i + 1] === '[' || (line[i + 1] === '!' && line[i + 2] === '['))) {
+                spans.push([i, i + 1, 'Operator']);
+                attributeNext = true;
+                i++;
                 continue;
             }
             if (isIdent(c) || (c === '#' && lang.name === 'c') || (c === '@' && lang.name !== 'c')) {
@@ -306,25 +360,44 @@ export function highlightLine(lang: Language, line: readonly string[], state: St
                 const word = line.slice(i, j).join('');
                 const next = line.slice(j).find((x) => !/^\s$/u.test(x));
                 let token: Token;
-                if (lang.keywords.includes(word)) {
+                if (attributeNext) {
+                    token = lang.attributes.includes(word) ? 'BuiltinAttribute' : 'Attribute';
+                } else if (word === 'Self' && lang.name === 'rust') {
+                    token = 'SelfType';
+                } else if (lang.keywords.includes(word)) {
                     token = 'Keyword';
                 } else if (lang.constants.includes(word)) {
-                    token = 'Constant';
+                    token = 'BuiltinConstant';
                 } else if (c === '@' || (lang.bangMacros && line[j] === '!')) {
                     token = 'Macro';
-                } else if (lang.types.includes(word) || isUpper(c)) {
+                } else if (lang.types.includes(word)) {
+                    token = 'BuiltinType';
+                } else if (isUpper(c)) {
                     const allCaps = Array.from(word).every((x) => isUpper(x) || isAsciiDigit(x) || x === '_');
-                    token = word.length > 1 && allCaps ? 'Constant' : 'Type';
-                } else if (next === '(') {
+                    token = word.length > 1 && allCaps && !inUse ? 'Constant' : 'Type';
+                } else if (next === '(' || DEFINERS.includes(prevWord)) {
                     token = 'Function';
+                } else if (line[j] === ':' && line[j + 1] === ':') {
+                    token = 'Module';
                 } else {
                     token = 'Normal';
                 }
+                attributeNext = false;
+                prevWord = word;
                 const end = token === 'Macro' && line[j] === '!' ? j + 1 : j;
                 spans.push([i, end, token]);
                 i = end;
                 continue;
             }
+            const two = c + (line[i + 1] ?? '');
+            if (two === '->' || two === '::') {
+                spans.push([i, i + 2, 'Delimiter']);
+                i += 2;
+                continue;
+            }
+            if ('()[]{}'.includes(c)) spans.push([i, i + 1, 'Bracket']);
+            else if (';,.:'.includes(c)) spans.push([i, i + 1, 'Delimiter']);
+            else if ('=+-*/%<>!&|^~?'.includes(c)) spans.push([i, i + 1, 'Operator']);
             i++;
         }
     }
@@ -351,4 +424,24 @@ export class Cache {
         }
         return this.states[line];
     }
+}
+
+/** `top`'s spans laid over `base`'s, on a line `n` characters long: where
+ * `top` has a token it wins (as a language server's semantic tokens do over
+ * syntax highlighting). */
+export function overlaySpans(base: readonly Span[], top: readonly Span[], n: number): Span[] {
+    if (top.length === 0) return base.slice();
+    const tokens: (Token | undefined)[] = new Array(n).fill(undefined);
+    for (const spans of [base, top]) {
+        for (const [s, e, t] of spans) for (let i = Math.max(s, 0); i < Math.min(e, n); i++) tokens[i] = t;
+    }
+    const out: Span[] = [];
+    for (let i = 0; i < n; i++) {
+        const t = tokens[i];
+        if (t === undefined) continue;
+        const last = out[out.length - 1];
+        if (last && last[1] === i && last[2] === t) last[1] = i + 1;
+        else out.push([i, i + 1, t]);
+    }
+    return out;
 }

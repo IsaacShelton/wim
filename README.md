@@ -194,6 +194,14 @@ switches to Nord, as nord.nvim draws it with the config's settings, with lualine
 for the mode in the status line; `,th` again or `:colorscheme onedark` switches back. The
 choice lasts until Wim exits.
 
+Highlighting works as in Neovim: syntax highlighting sorts code into the kinds tree-sitter
+does (keywords, types and builtin types, functions, modules, attributes, constants, numbers,
+operators, delimiters, brackets...), and a language server's semantic tokens, when it sends
+them (rust-analyzer and typescript-language-server do), refine it: parameters, functions,
+methods, namespaces and so on, as nord.nvim colors `@lsp.type.*`. A line that changed uses
+syntax highlighting until fresh tokens come. Nord draws comments in italics, as the Neovim
+config sets it.
+
 ## Sounds
 
 MP3, WAV, FLAC, Ogg, Opus, AAC (`.m4a`, `.aac`) and WebM (`.weba`) files open in a player: the

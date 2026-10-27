@@ -184,6 +184,7 @@ function handle(msg) {
                 completionProvider: { triggerCharacters: ['.'], resolveProvider: true },
                 hoverProvider: true, definitionProvider: true, renameProvider: true, documentFormattingProvider: true,
                 signatureHelpProvider: { triggerCharacters: ['(', ','], retriggerCharacters: [')'] },
+                semanticTokensProvider: { legend: { tokenTypes: ['variable', 'parameter'], tokenModifiers: [] }, full: true },
             } };
         case 'textDocument/didOpen': docs.set(p.textDocument.uri, p.textDocument.text); publish(p.textDocument.uri); return;
         case 'textDocument/didChange': docs.set(p.textDocument.uri, p.contentChanges[0].text); publish(p.textDocument.uri); return;
@@ -217,6 +218,21 @@ function handle(msg) {
                 }
             }
             return null;
+        }
+        case 'textDocument/semanticTokens/full': {
+            // Every 'arg' is a parameter and every 'v' a variable.
+            const data = [];
+            let prevLine = 0, prevStart = 0;
+            lines(p.textDocument.uri).forEach((l, line) => {
+                const re = /\b(arg|v)\b/g;
+                let m;
+                while ((m = re.exec(l))) {
+                    data.push(line - prevLine, line === prevLine ? m.index - prevStart : m.index, m[1].length, m[1] === 'arg' ? 1 : 0, 0);
+                    prevLine = line;
+                    prevStart = m.index;
+                }
+            });
+            return { data };
         }
         case 'completionItem/resolve':
             return p.label === 'foobar' ? { ...p, additionalTextEdits: [{ range: { start: { line: 0, character: 0 }, end: { line: 0, character: 0 } }, newText: 'use foo;\n' }] } : p;
@@ -255,6 +271,7 @@ interface LspHarness {
     type: (keys: string) => void;
     /** All text drawn in the last frame. */
     text: () => string;
+    frame: () => DrawCmd[];
     until: (what: string, cond: () => boolean) => Promise<void>;
     done: () => void;
 }
@@ -297,6 +314,7 @@ function lspHarness(content: string): LspHarness {
             for (const k of parseKeys(keys)) app.handleMessage({ t: 'key', key: k.key, ctrl: k.ctrl, alt: k.alt });
         },
         text,
+        frame: () => frame,
         until: async (what, cond) => {
             const start = Date.now();
             while (!cond()) {
@@ -390,6 +408,29 @@ test('signature help follows the call being typed', async () => {
         h.type('<Esc>');
         assert.equal(h.app.editor.buffer.line(1).join(''), '    helper(1, 2)');
     } finally {
+        h.done();
+    }
+});
+
+test('semantic tokens color what syntax alone cannot', async () => {
+    const h = lspHarness('fn f(arg: i32) {\n    let v = arg;\n}\n');
+    // The color of each drawn run of text with the word in it (a run is
+    // text of one color).
+    const colors = (word: string): string[] =>
+        h.frame()
+            .filter((c) => c[0] === 'text' && new RegExp(`\\b${word}\\b`).test(String(c[3])))
+            .map((c) => String(c[4]));
+    try {
+        // In Nord, parameters are ice and variables keep their syntax color.
+        h.type(',th');
+        await h.until('semantic tokens', () => colors('arg').join() === '#88C0D0,#88C0D0');
+        assert.deepEqual(colors('v'), ['#D8DEE9']);
+        // Until new tokens come, a changed line has syntax colors only.
+        h.type('2GAx<Esc>');
+        assert.deepEqual(colors('arg'), ['#88C0D0', '#D8DEE9']);
+        await h.until('new tokens', () => colors('arg').join() === '#88C0D0,#88C0D0');
+    } finally {
+        h.type(',th');
         h.done();
     }
 });

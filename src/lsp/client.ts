@@ -18,6 +18,8 @@ export interface ClientEvents {
     onMessage: (text: string, error: boolean) => void;
     /** The server's state or progress changed. */
     onChange: () => void;
+    /** The server's semantic tokens are out of date. */
+    onSemanticRefresh?: (client: LanguageClient) => void;
 }
 
 export type ClientState = 'starting' | 'running' | 'failed' | 'stopped';
@@ -251,6 +253,22 @@ export class LanguageClient {
                     },
                     formatting: {},
                     rename: {},
+                    semanticTokens: {
+                        requests: { full: true },
+                        tokenTypes: [
+                            'namespace', 'type', 'class', 'enum', 'interface', 'struct', 'typeParameter', 'parameter',
+                            'variable', 'property', 'enumMember', 'event', 'function', 'method', 'macro', 'keyword',
+                            'modifier', 'comment', 'string', 'number', 'regexp', 'operator', 'decorator',
+                        ],
+                        tokenModifiers: [
+                            'declaration', 'definition', 'readonly', 'static', 'deprecated', 'abstract', 'async',
+                            'modification', 'documentation', 'defaultLibrary',
+                        ],
+                        formats: ['relative'],
+                        overlappingTokenSupport: false,
+                        multilineTokenSupport: false,
+                        augmentsSyntaxTokens: true,
+                    },
                 },
             },
         };
@@ -300,8 +318,10 @@ export class LanguageClient {
             case 'client/registerCapability':
             case 'client/unregisterCapability':
             case 'window/showMessageRequest':
-            case 'workspace/codeLens/refresh':
             case 'workspace/semanticTokens/refresh':
+                this.events.onSemanticRefresh?.(this);
+                return null;
+            case 'workspace/codeLens/refresh':
             case 'workspace/inlayHint/refresh':
             case 'workspace/diagnostic/refresh':
                 return null;

@@ -1325,6 +1325,7 @@ export class WimApp {
                 diagnostics: this.lsp.diagnosticsFor(file, buffer),
                 references: active ? this.features.highlights() : [],
                 flash: active ? this.flash : undefined,
+                semantic: (line, chars) => this.lsp.semanticFor(file, line, chars),
             };
             return [{ ...pane, content: { t: 'Text', view } }];
         });
@@ -1427,6 +1428,8 @@ interface TextView {
     diagnostics: BufferDiagnostic[];
     references: [Pos, Pos][];
     flash: Flash | undefined;
+    /** A language server's semantic token spans for a line, if it has them. */
+    semantic: (line: number, chars: readonly string[]) => highlight.Span[] | undefined;
 }
 
 /** A window to paint. */
@@ -1499,8 +1502,8 @@ class Painter {
     }
 
     /** Text whose top-left cell is at `x`, in the row starting at `y`. */
-    private text(x: number, y: number, s: string, color: string): void {
-        if (s !== '') this.cmds.push(['text', x, y, s, color]);
+    private text(x: number, y: number, s: string, color: string, italic = false): void {
+        if (s !== '') this.cmds.push(italic ? ['text', x, y, s, color, true] : ['text', x, y, s, color]);
     }
 
     /** Text whose right edge is at `x`. */
@@ -1740,6 +1743,8 @@ class Painter {
                 const state = this.st.highlightCache(v.bufferId).stateAt(lang, v.bufferId, buf.version(), line, (i) => buf.line(i));
                 spans = highlight.highlightLine(lang, chars, state)[0];
             }
+            const semantic = v.semantic(line, chars);
+            if (semantic) spans = highlight.overlaySpans(spans, semantic, chars.length);
             this.lineText(v, chars, spans, y);
             this.lineDiagnostics(v, line, y, diags);
         }
@@ -1797,11 +1802,12 @@ class Painter {
         const right = left + v.cols + 1;
         let run = '';
         let runColor: string = theme.FG;
+        let runItalic = false;
         let runStart = left;
         let span = 0;
         let dcol = 0;
         const flush = (): void => {
-            this.text(v.textLeft + (runStart - left) * layout.charW, y, run, runColor);
+            this.text(v.textLeft + (runStart - left) * layout.charW, y, run, runColor, runItalic);
             run = '';
         };
         for (let i = 0; i < chars.length && dcol < right; i++) {
@@ -1809,13 +1815,15 @@ class Painter {
             while (span < spans.length && spans[span][1] <= i) span++;
             const token = span < spans.length && spans[span][0] <= i ? spans[span][2] : 'Normal';
             const color = tokenColor(token);
+            const italic = token === 'Comment' && theme.ITALIC_COMMENTS;
             const cells = c === '\t' ? ts - (dcol % ts) : 1;
             for (let k = 0; k < cells; k++) {
                 const d = dcol + k;
                 if (d < left || d >= right) continue;
-                if (color !== runColor || run === '') {
+                if (color !== runColor || italic !== runItalic || run === '') {
                     if (run !== '') flush();
                     runColor = color;
+                    runItalic = italic;
                     runStart = d;
                 }
                 run += c === '\t' ? ' ' : c;

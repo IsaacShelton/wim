@@ -15,11 +15,12 @@ import {
     writeBuffer,
 } from '../editor/buffers';
 import type { Editor } from '../editor/editor';
+import { Span, Token } from '../highlight';
 import { displayName } from '../paths';
 import { LanguageClient } from './client';
 import { isStale } from './rpc';
 import { ServerSpec } from './servers';
-import { Encoding, applyTextEdits, fromRange, pathFromUri, uriFromPath } from './text';
+import { Encoding, applyTextEdits, fromCharacter, fromRange, pathFromUri, uriFromPath } from './text';
 import { CreateFile, DeleteFile, Diagnostic, RenameFile, Severity, TextEdit, WorkspaceEdit } from './types';
 
 export interface LspHost {
@@ -61,6 +62,10 @@ export class LspManager {
     private readonly diagnostics = new Map<string, FileDiagnostics>();
     /** Files written since the last sync. */
     private readonly saved = new Set<string>();
+    /** Semantic token spans by file, then by line, with the line's text they
+     * are for. */
+    private readonly semantic = new Map<string, Map<number, { text: string; spans: Span[] }>>();
+    private readonly semanticTimers = new Map<string, NodeJS.Timeout>();
     /** Files Wim is writing again after formatting them, which shouldn't be
      * formatted again. */
     private readonly formatWrites = new Set<string>();
@@ -101,6 +106,9 @@ export class LspManager {
             onApplyEdit: (c, edit) => this.applyWorkspaceEdit(c, edit),
             onMessage: (text, error) => this.message(text, error),
             onChange: () => this.host.refresh(),
+            onSemanticRefresh: (c) => {
+                for (const doc of this.docs.values()) if (doc.client === c) this.scheduleSemantic(doc);
+            },
         });
         this.clients.push(client);
         return client;
@@ -139,10 +147,13 @@ export class LspManager {
         this.clients = [];
         this.docs.clear();
         this.diagnostics.clear();
+        this.semantic.clear();
         this.sync();
     }
 
     dispose(): void {
+        for (const timer of this.semanticTimers.values()) clearTimeout(timer);
+        this.semanticTimers.clear();
         for (const c of this.clients) c.kill();
         this.clients = [];
     }
@@ -176,11 +187,13 @@ export class LspManager {
                 doc = { path: file, uri: uriFromPath(file), client, version: 0, buffer: st.buffer, bufferVersion: st.buffer.version() };
                 this.docs.set(file, doc);
                 client.didOpen(doc.uri, languageId, doc.version, st.buffer.toFileText());
+                this.scheduleSemantic(doc);
             } else if (doc.buffer !== st.buffer || doc.bufferVersion !== st.buffer.version()) {
                 doc.buffer = st.buffer;
                 doc.bufferVersion = st.buffer.version();
                 doc.version += 1;
                 doc.client.didChange(doc.uri, doc.version, st.buffer.toFileText());
+                this.scheduleSemantic(doc);
             }
             if (this.saved.has(file)) {
                 this.saved.delete(file);
@@ -194,7 +207,53 @@ export class LspManager {
             if (open.has(file)) continue;
             doc.client.didClose(doc.uri);
             this.docs.delete(file);
+            this.semantic.delete(file);
+            const timer = this.semanticTimers.get(file);
+            if (timer) clearTimeout(timer);
+            this.semanticTimers.delete(file);
         }
+    }
+
+    // ----- Semantic tokens --------------------------------------------------------------
+
+    /** Ask for a file's semantic tokens once typing pauses. */
+    private scheduleSemantic(doc: Doc): void {
+        const old = this.semanticTimers.get(doc.path);
+        if (old) clearTimeout(old);
+        this.semanticTimers.set(
+            doc.path,
+            setTimeout(() => {
+                this.semanticTimers.delete(doc.path);
+                const client = doc.client;
+                if (this.docs.get(doc.path) !== doc) return;
+                // Still starting: try again when it is likely ready.
+                if (client.state === 'starting') {
+                    this.scheduleSemantic(doc);
+                    return;
+                }
+                const provider = client.capabilities.semanticTokensProvider;
+                if (client.state !== 'running' || !provider?.full) return;
+                // The tokens are for the text as it is now; keep a copy to
+                // read their columns against.
+                const lines = doc.buffer.snapshot().lines;
+                client
+                    .request<{ data: number[] } | null>('textDocument/semanticTokens/full', { textDocument: { uri: doc.uri } })
+                    .then((result) => {
+                        if (!result || this.docs.get(doc.path) !== doc) return;
+                        this.semantic.set(doc.path, decodeSemantic(result.data, provider.legend.tokenTypes, lines, client.encoding));
+                        this.host.refresh();
+                    })
+                    .catch(() => {});
+            }, SEMANTIC_DELAY),
+        );
+    }
+
+    /** Semantic token spans for a line of a file, if they are for this text
+     * (until fresh ones come, a changed line uses syntax highlighting only). */
+    semanticFor(file: string | undefined, line: number, chars: readonly string[]): Span[] | undefined {
+        const entry = file === undefined ? undefined : this.semantic.get(file)?.get(line);
+        if (!entry || entry.text !== chars.join('')) return undefined;
+        return entry.spans;
     }
 
     /** Format a file that was just written and write it again, if it hasn't
@@ -360,4 +419,57 @@ export class LspManager {
             }
         }
     }
+}
+
+/** How long after a change to ask for semantic tokens, in ms. */
+const SEMANTIC_DELAY = 150;
+
+/** The highlighting token for a semantic token type, as nord.nvim (and
+ * Neovim's defaults) color `@lsp.type.*`: types it leaves alone (variables,
+ * structs, constants, rust-analyzer's own kinds) keep their syntax color. */
+const SEMANTIC_TOKENS: Readonly<Record<string, Token>> = {
+    namespace: 'Module',
+    type: 'Type',
+    class: 'Type',
+    enum: 'Type',
+    interface: 'Type',
+    typeAlias: 'Type',
+    union: 'Type',
+    builtinType: 'BuiltinType',
+    typeParameter: 'Parameter',
+    parameter: 'Parameter',
+    function: 'Function',
+    method: 'Function',
+    member: 'Function',
+    macro: 'Macro',
+    property: 'Property',
+    enumMember: 'Constant',
+    keyword: 'Keyword',
+    comment: 'Comment',
+    string: 'String',
+    number: 'Number',
+    regexp: 'String',
+    operator: 'Operator',
+    decorator: 'Attribute',
+};
+
+/** Semantic tokens (in the protocol's relative form) as spans by line. */
+function decodeSemantic(data: readonly number[], types: readonly string[], lines: readonly (readonly string[])[], enc: Encoding): Map<number, { text: string; spans: Span[] }> {
+    const out = new Map<number, { text: string; spans: Span[] }>();
+    let line = 0;
+    let start = 0;
+    for (let i = 0; i + 4 < data.length; i += 5) {
+        line += data[i];
+        start = data[i] === 0 ? start + data[i + 1] : data[i + 1];
+        const token = SEMANTIC_TOKENS[types[data[i + 3]] ?? ''];
+        const chars = lines[line];
+        if (!token || !chars) continue;
+        let entry = out.get(line);
+        if (!entry) {
+            entry = { text: chars.join(''), spans: [] };
+            out.set(line, entry);
+        }
+        entry.spans.push([fromCharacter(chars, start, enc), fromCharacter(chars, start + data[i + 2], enc), token]);
+    }
+    return out;
 }

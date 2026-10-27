@@ -218,6 +218,10 @@ export interface ServerCapabilities {
     completionProvider?: { triggerCharacters?: string[]; resolveProvider?: boolean };
     hoverProvider?: unknown;
     signatureHelpProvider?: { triggerCharacters?: string[]; retriggerCharacters?: string[] };
+    semanticTokensProvider?: {
+        legend: { tokenTypes: string[]; tokenModifiers: string[] };
+        full?: boolean | { delta?: boolean };
+    };
     definitionProvider?: unknown;
     declarationProvider?: unknown;
     typeDefinitionProvider?: unknown;

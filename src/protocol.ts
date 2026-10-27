@@ -50,7 +50,7 @@ export type DrawCmd =
     | [op: 'stroke', x: number, y: number, w: number, h: number, color: string]
     /** Text on the character grid: each character takes one cell starting at
      * `x`, centered vertically in the row whose top is `y`. */
-    | [op: 'text', x: number, y: number, text: string, color: string]
+    | [op: 'text', x: number, y: number, text: string, color: string, italic?: boolean]
     | [op: 'poly', points: number[], color: string]
     /** An image from Wim's server (`src` is its path there), drawn to fill
      * the box, or with `fit` scaled down to fit it if needed (never up) and

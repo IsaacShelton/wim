@@ -91,7 +91,9 @@ function draw(): void {
                 break;
             }
             case 'text':
+                if (cmd[5]) ctx.font = `italic ${font()}`;
                 drawText(cmd[1], cmd[2], cmd[3], cmd[4]);
+                if (cmd[5]) ctx.font = font();
                 break;
             case 'image':
                 drawImage(cmd);

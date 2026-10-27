@@ -430,7 +430,7 @@ test('Rust tokens', () => {
     for (const expected of [
         ['fn', 'Keyword'],
         ['main', 'Function'],
-        ['u32', 'Type'],
+        ['u32', 'BuiltinType'],
         ['42', 'Number'],
         ['println!', 'Macro'],
         ['"hi"', 'String'],
@@ -440,9 +440,32 @@ test('Rust tokens', () => {
     }
 });
 
+test('Rust tokens as tree-sitter sorts them', () => {
+    const kinds = (line: string): string => tokens(RUST, line).map(([s, k]) => `${s}:${k}`).join(' ');
+    assert.equal(
+        kinds('use std::f32::consts::{PI, TAU};'),
+        'use:Keyword std:Module :::Delimiter f32:BuiltinType :::Delimiter consts:Module :::Delimiter {:Bracket ' +
+            'PI:Type ,:Delimiter TAU:Type }:Bracket ;:Delimiter',
+    );
+    assert.equal(
+        kinds('#[derive(Copy, Debug)]'),
+        '#:Operator [:Bracket derive:Attribute (:Bracket Copy:Type ,:Delimiter Debug:Type ):Bracket ]:Bracket',
+    );
+    assert.equal(kinds('#[inline]'), '#:Operator [:Bracket inline:BuiltinAttribute ]:Bracket');
+    assert.equal(
+        kinds('pub fn up() -> Self { Rotation::from_radians(TAU * 0.5) }'),
+        'pub:Keyword fn:Keyword up:Function (:Bracket ):Bracket ->:Delimiter Self:SelfType {:Bracket ' +
+            'Rotation:Type :::Delimiter from_radians:Function (:Bracket TAU:Constant *:Operator 0.5:Number ' +
+            '):Bracket }:Bracket',
+    );
+    assert.equal(kinds('fn lerp<T>(&self) -> bool { self.0 == None }').includes('lerp:Function'), true);
+    assert.match(kinds('fn lerp<T>(&self) -> bool { self.0 == None }'), /&:Operator self:Keyword .*0:Property .*None:BuiltinConstant/);
+    assert.match(kinds('let t = (other.0 - 1.5) % TAU;'), /0:Property -:Operator 1\.5:Number/);
+});
+
 test('Rust lifetimes and chars', () => {
     const t = tokens(RUST, "fn f<'a>(c: char) { 'x' }");
-    assert.ok(t.some(([s, k]) => s === "'a" && k === 'Macro'));
+    assert.ok(t.some(([s, k]) => s === "'a" && k === 'Lifetime'));
     assert.ok(t.some(([s, k]) => s === "'x'" && k === 'String'));
 });
 

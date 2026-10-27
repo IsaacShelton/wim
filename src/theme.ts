@@ -21,11 +21,26 @@ const ONE_DARK = {
 
     KEYWORD: '#c678dd',
     TYPE: '#e5c07b',
+    BUILTIN_TYPE: '#e5c07b',
+    SELF_TYPE: '#c678dd',
     CONSTANT: '#d19a66',
+    BUILTIN_CONSTANT: '#d19a66',
+    NUMBER: '#d19a66',
     STRING: '#98c379',
     COMMENT: '#7f848e',
+    ITALIC_COMMENTS: false,
     FUNCTION: '#61afef',
     MACRO: '#56b6c2',
+    LIFETIME: '#56b6c2',
+    // One Dark leaves these as plain text.
+    MODULE: '#abb2bf',
+    ATTRIBUTE: '#abb2bf',
+    BUILTIN_ATTRIBUTE: '#abb2bf',
+    OPERATOR: '#abb2bf',
+    DELIMITER: '#abb2bf',
+    BRACKET: '#abb2bf',
+    PARAMETER: '#abb2bf',
+    PROPERTY: '#abb2bf',
 
     MODE_NORMAL: '#61afef',
     MODE_INSERT: '#98c379',
@@ -64,13 +79,30 @@ const NORD: Theme = {
     ERROR: '#BF616A', // aurora red
     FLASH: [0xeb, 0xcb, 0x8b], // aurora yellow
 
+    // As nord.nvim colors tree-sitter's groups and rust-analyzer's semantic
+    // tokens.
     KEYWORD: '#81A1C1', // frost artic water
-    TYPE: '#81A1C1',
-    CONSTANT: '#B48EAD', // aurora purple
+    TYPE: '#8FBCBB', // frost polar water
+    BUILTIN_TYPE: '#81A1C1',
+    SELF_TYPE: '#8FBCBB',
+    CONSTANT: '#D8DEE9',
+    BUILTIN_CONSTANT: '#81A1C1',
+    NUMBER: '#B48EAD', // aurora purple
     STRING: '#A3BE8C', // aurora green
     COMMENT: '#616E88', // polar night light
-    FUNCTION: '#88C0D0',
+    // The Neovim config's nord.nvim `styles.comments`.
+    ITALIC_COMMENTS: true,
+    FUNCTION: '#88C0D0', // frost ice
     MACRO: '#81A1C1',
+    LIFETIME: '#8FBCBB',
+    MODULE: '#D8DEE9',
+    ATTRIBUTE: '#D8DEE9',
+    BUILTIN_ATTRIBUTE: '#81A1C1',
+    OPERATOR: '#81A1C1',
+    DELIMITER: '#ECEFF4', // snow storm brightest
+    BRACKET: '#88C0D0',
+    PARAMETER: '#88C0D0',
+    PROPERTY: '#D8DEE9',
 
     MODE_NORMAL: '#88C0D0',
     MODE_INSERT: '#ECEFF4', // snow storm brightest
@@ -114,23 +146,28 @@ export function setTheme(name: ThemeName): void {
 
 /** The color for a syntax highlighting token. */
 export function tokenColor(token: Token): string {
-    switch (token) {
-        case 'Normal':
-            return theme.FG;
-        case 'Keyword':
-            return theme.KEYWORD;
-        case 'Type':
-            return theme.TYPE;
-        case 'Constant':
-        case 'Number':
-            return theme.CONSTANT;
-        case 'String':
-            return theme.STRING;
-        case 'Comment':
-            return theme.COMMENT;
-        case 'Function':
-            return theme.FUNCTION;
-        case 'Macro':
-            return theme.MACRO;
-    }
+    const colors: Record<Token, string> = {
+        Normal: theme.FG,
+        Keyword: theme.KEYWORD,
+        Type: theme.TYPE,
+        BuiltinType: theme.BUILTIN_TYPE,
+        SelfType: theme.SELF_TYPE,
+        Constant: theme.CONSTANT,
+        BuiltinConstant: theme.BUILTIN_CONSTANT,
+        String: theme.STRING,
+        Comment: theme.COMMENT,
+        Number: theme.NUMBER,
+        Function: theme.FUNCTION,
+        Macro: theme.MACRO,
+        Lifetime: theme.LIFETIME,
+        Module: theme.MODULE,
+        Attribute: theme.ATTRIBUTE,
+        BuiltinAttribute: theme.BUILTIN_ATTRIBUTE,
+        Operator: theme.OPERATOR,
+        Delimiter: theme.DELIMITER,
+        Bracket: theme.BRACKET,
+        Parameter: theme.PARAMETER,
+        Property: theme.PROPERTY,
+    };
+    return colors[token];
 }
