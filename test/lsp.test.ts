@@ -56,6 +56,29 @@ test('text edits apply together and keep a position on its text', () => {
     assert.equal(buf.line(cursor.line).slice(cursor.col).join(''), 'x=1;');
 });
 
+test('a whole-file edit only changes what differs, keeping the cursor in place', () => {
+    const lines = ['x=1', ...Array.from({ length: 50 }, (_, i) => `y${i} = ${i}`), 'z  =  2'];
+    const buf = Buffer.fromText(lines.join('\n'));
+    const version = buf.version();
+    const formatted = ['x = 1', ...lines.slice(1, -1), 'z = 2'].join('\n');
+    const whole = { start: { line: 0, character: 0 }, end: { line: 52, character: 0 } };
+    const cursor = applyTextEdits(buf, [{ range: whole, newText: formatted }], 'utf-16', pos(30, 2));
+    assert.equal(buf.text(), formatted);
+    assert.deepEqual(cursor, pos(30, 2));
+    assert.notEqual(buf.version(), version);
+    // Edits reaching past the last line include the file's final newline.
+    const buf3 = Buffer.fromText('a\nb\n');
+    const eof = { line: 2, character: 0 };
+    applyTextEdits(buf3, [{ range: { start: { line: 0, character: 0 }, end: eof }, newText: 'A\nB\n' }], 'utf-16');
+    assert.equal(buf3.toFileText(), 'A\nB\n');
+    applyTextEdits(buf3, [{ range: { start: eof, end: eof }, newText: 'C\n' }], 'utf-16');
+    assert.equal(buf3.toFileText(), 'A\nB\nC\n');
+    // A cursor inside a changed stretch stays on its line.
+    const buf2 = Buffer.fromText('a\nb\nc\nd');
+    const range = { start: { line: 0, character: 0 }, end: { line: 3, character: 1 } };
+    assert.deepEqual(applyTextEdits(buf2, [{ range, newText: 'A\nB\nC\nD' }], 'utf-16', pos(2, 0)), pos(2, 0));
+});
+
 test('snippets become plain text with the cursor at the first tab stop', () => {
     assert.deepEqual(snippetText('foo(${1:a}, $2)$0'), { text: 'foo(a, )', cursor: 4 });
     assert.deepEqual(snippetText('bar()$0'), { text: 'bar()', cursor: 5 });
@@ -120,7 +143,8 @@ test('pylsp prefers the project\'s virtual environment', { skip: process.platfor
 /** A language server for `.rs` files: every `bad` is an error, the hover
  * shows the word under the cursor, definition finds the first `fn word`,
  * completion offers three items (the first adds an import once resolved),
- * rename replaces every occurrence and formatting removes trailing spaces. */
+ * signature help knows `helper(a, b)`, rename replaces every occurrence and
+ * formatting removes trailing spaces. */
 const FAKE_SERVER = String.raw`
 let input = Buffer.alloc(0);
 const docs = new Map();
@@ -159,6 +183,7 @@ function handle(msg) {
                 textDocumentSync: { openClose: true, change: 1, save: true },
                 completionProvider: { triggerCharacters: ['.'], resolveProvider: true },
                 hoverProvider: true, definitionProvider: true, renameProvider: true, documentFormattingProvider: true,
+                signatureHelpProvider: { triggerCharacters: ['(', ','], retriggerCharacters: [')'] },
             } };
         case 'textDocument/didOpen': docs.set(p.textDocument.uri, p.textDocument.text); publish(p.textDocument.uri); return;
         case 'textDocument/didChange': docs.set(p.textDocument.uri, p.contentChanges[0].text); publish(p.textDocument.uri); return;
@@ -176,6 +201,23 @@ function handle(msg) {
                 { label: 'fooqux', kind: 5, sortText: '3' },
                 { label: 'other', kind: 6, sortText: '1' },
             ] };
+        case 'textDocument/signatureHelp': {
+            // Inside an unclosed 'helper(', the parameter after as many commas.
+            const before = lines(p.textDocument.uri)[p.position.line].slice(0, p.position.character);
+            let depth = 0, commas = 0;
+            for (let i = before.length - 1; i >= 0; i--) {
+                const c = before[i];
+                if (c === ')') depth++;
+                else if (c === ',' && depth === 0) commas++;
+                else if (c === '(' && depth > 0) depth--;
+                else if (c === '(') {
+                    if (!before.slice(0, i).endsWith('helper')) return null;
+                    return { activeParameter: commas, signatures: [{ label: 'helper(a: i32, b: i32)',
+                        parameters: [{ label: [7, 13] }, { label: 'b: i32', documentation: 'the second' }] }] };
+                }
+            }
+            return null;
+        }
         case 'completionItem/resolve':
             return p.label === 'foobar' ? { ...p, additionalTextEdits: [{ range: { start: { line: 0, character: 0 }, end: { line: 0, character: 0 } }, newText: 'use foo;\n' }] } : p;
         case 'textDocument/rename': {
@@ -230,6 +272,8 @@ function lspHarness(content: string): LspHarness {
         root: (f) => path.dirname(f),
     };
     let frame: DrawCmd[] = [];
+    // Opening a file moves to its directory; `done` comes back.
+    const cwd = process.cwd();
     const app = new WimApp({
         path: file,
         icons: false,
@@ -262,6 +306,7 @@ function lspHarness(content: string): LspHarness {
         },
         done: () => {
             app.dispose();
+            process.chdir(cwd);
             fs.rmSync(dir, { recursive: true, force: true });
         },
     };
@@ -315,6 +360,29 @@ test('completion pops up while typing and confirms with resolved edits', async (
         assert.equal(h.app.editor.buffer.text(), 'use foo;\nfn main() {\n    foobar()\n}', 'with parens, as for a function');
         h.type('<Esc>u');
         assert.equal(h.app.editor.buffer.text(), 'fn main() {\n}', 'one undo step');
+    } finally {
+        h.done();
+    }
+});
+
+test('signature help follows the call being typed', async () => {
+    const h = lspHarness('fn main() {\n}\n');
+    try {
+        await h.until('the server', () => h.app.lsp.info().includes('running'));
+        // Autopairs closes the call; the first parameter is current.
+        h.type('ohelper(');
+        await h.until('the signature', () => h.text().includes('helper('));
+        assert.match(h.text(), /helper\(\na: i32\n, b: i32\)/, 'the current parameter drawn apart');
+        assert.doesNotMatch(h.text(), /the second/);
+        // After a comma, the second parameter, with its documentation.
+        h.type('1, 2');
+        await h.until('the second parameter', () => h.text().includes('the second'));
+        assert.match(h.text(), /helper\(a: i32, \nb: i32\n\)/);
+        // Leaving the call closes it.
+        h.type(')');
+        await h.until('it to close', () => !h.text().includes('helper(a'));
+        h.type('<Esc>');
+        assert.equal(h.app.editor.buffer.line(1).join(''), '    helper(1, 2)');
     } finally {
         h.done();
     }

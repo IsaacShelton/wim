@@ -17,6 +17,7 @@ import { parseKeys } from '../src/editor/keys';
 import { FileTree } from '../src/filetree';
 import { C, RUST, Token, highlightLine, NORMAL } from '../src/highlight';
 import * as icons from '../src/icons';
+import { imageSize } from '../src/image';
 import { Keymap } from '../src/keymap';
 import { ServerSpec } from '../src/lsp/servers';
 import { ClientMessage, DrawCmd } from '../src/protocol';
@@ -147,6 +148,28 @@ test('a directory argument becomes the working directory, with no file open', ()
         h.type('<C-n><CR>j<CR>');
         assert.equal(h.app.editor.filePath, path.join(dir, 'src', 'main.rs'));
         assert.equal(h.app.editor.buffer.text(), 'fn main() {}');
+    } finally {
+        process.chdir(cwd);
+        fs.rmSync(dir, { recursive: true });
+    }
+});
+
+test("a file argument makes the file's directory the working directory", () => {
+    const dir = tempDir('app-file');
+    fs.mkdirSync(path.join(dir, 'src'));
+    fs.writeFileSync(path.join(dir, 'src', 'main.rs'), 'fn main() {}\n');
+    fs.writeFileSync(path.join(dir, 'src', 'lib.rs'), '');
+    const cwd = process.cwd();
+    try {
+        process.chdir(dir);
+        const h = harness('src/main.rs');
+        assert.equal(process.cwd(), path.join(dir, 'src'));
+        assert.equal(h.app.editor.filePath, path.join(dir, 'src', 'main.rs'));
+        assert.equal(h.app.editor.buffer.text(), 'fn main() {}');
+        // The tree (and so the pickers) start there.
+        h.type('<C-n>');
+        assert.match(h.text(), /lib\.rs/);
+        assert.doesNotMatch(h.text(), /\bsrc\b/);
     } finally {
         process.chdir(cwd);
         fs.rmSync(dir, { recursive: true });
@@ -511,4 +534,164 @@ test('Alt+letter works like the Option mappings', () => {
     assert.equal(h.app.editor.buffer.lineString(1), 'z');
     h.type('i<M-x><Esc>');
     assert.equal(h.app.editor.buffer.lineString(1), 'z', 'Alt+letter types nothing');
+});
+
+// ----- Images ----------------------------------------------------------------------------
+
+/** The start of a PNG file of the given size: enough for its header. */
+function pngHeader(width: number, height: number): Buffer {
+    const b = Buffer.alloc(33);
+    b.writeUInt32BE(0x89504e47, 0);
+    b.writeUInt32BE(0x0d0a1a0a, 4);
+    b.writeUInt32BE(13, 8);
+    b.write('IHDR', 12, 'ascii');
+    b.writeUInt32BE(width, 16);
+    b.writeUInt32BE(height, 20);
+    return b;
+}
+
+test('image sizes come from their headers', () => {
+    assert.deepEqual(imageSize(pngHeader(640, 400)), [640, 400]);
+    // JPEG: an APP0 segment, then a baseline start-of-frame.
+    const jpeg = Buffer.from([0xff, 0xd8, 0xff, 0xe0, 0x00, 0x04, 0x00, 0x00, 0xff, 0xc0, 0x00, 0x11, 0x08, 0x01, 0x90, 0x02, 0x80, 0x03, 0, 0, 0, 0]);
+    assert.deepEqual(imageSize(jpeg), [640, 400]);
+    const riff = (chunk: string, body: number[]): Buffer => {
+        const b = Buffer.alloc(40);
+        b.write('RIFF', 0, 'ascii');
+        b.write('WEBP', 8, 'ascii');
+        b.write(chunk, 12, 'ascii');
+        Buffer.from(body).copy(b, 20);
+        return b;
+    };
+    // Lossy: a frame tag, the start code, then 14-bit width and height.
+    assert.deepEqual(imageSize(riff('VP8 ', [0, 0, 0, 0x9d, 0x01, 0x2a, 0x80, 0x02, 0x90, 0x01])), [640, 400]);
+    // Lossless: a signature byte, then width-1 and height-1 packed in 14 bits each.
+    const bits = 639 | (399 << 14);
+    assert.deepEqual(imageSize(riff('VP8L', [0x2f, bits & 0xff, (bits >> 8) & 0xff, (bits >> 16) & 0xff, bits >>> 24])), [640, 400]);
+    // Extended: flags, then 24-bit width-1 and height-1.
+    assert.deepEqual(imageSize(riff('VP8X', [0x10, 0, 0, 0, 0x7f, 0x02, 0x00, 0x8f, 0x01, 0x00])), [640, 400]);
+    assert.deepEqual(imageSize(Buffer.from('GIF89a\x80\x02\x90\x01', 'latin1')), [640, 400]);
+    assert.equal(imageSize(Buffer.from('not an image at all, just some text')), undefined);
+});
+
+test('an image opens read-only and is drawn instead of text', () => {
+    const dir = tempDir('image');
+    const file = path.join(dir, 'pic.png');
+    fs.writeFileSync(file, pngHeader(640, 400));
+    const cwd = process.cwd();
+    try {
+        const h = harness(file);
+        const ed = h.app.editor;
+        assert.equal(ed.image?.format, 'PNG');
+        assert.match(ed.message?.text ?? '', /PNG 640×400/);
+        const cmd = h.frames[h.frames.length - 1].find((c) => c[0] === 'image');
+        assert.ok(cmd && String(cmd[5]).includes(encodeURIComponent(file)));
+        assert.match(h.text(), /PNG 640×400/, 'in the status line');
+        for (const keys of ['i', 'A', 'o', 'R', 'x', 'dd', 'p', ':s/^/x/<CR>']) {
+            h.type(keys);
+            assert.equal(ed.buffer.text(), '', keys);
+            assert.match(ed.message?.text ?? '', /E21/, keys);
+            assert.equal(ed.mode, 'Normal', keys);
+        }
+        h.type(':w<CR>');
+        assert.match(ed.message?.text ?? '', /E21/);
+        assert.equal(fs.readFileSync(file).length, 33, 'the file is untouched');
+        assert.equal(ed.isModified(), false);
+        // Other buffers are text again.
+        h.type(`:e ${path.join(dir, 'notes.txt')}<CR>ihi<Esc>`);
+        assert.equal(ed.image, undefined);
+        assert.equal(ed.buffer.text(), 'hi');
+    } finally {
+        process.chdir(cwd);
+        fs.rmSync(dir, { recursive: true });
+    }
+});
+
+test('the server serves only image files, and only with the token', async () => {
+    const dir = tempDir('serve');
+    const png = path.join(dir, 'pic.png');
+    const txt = path.join(dir, 'secret.txt');
+    fs.writeFileSync(png, pngHeader(1, 1));
+    fs.writeFileSync(txt, 'secret');
+    const server = await startServer({ onConnection: () => {} });
+    const get = (url: string): Promise<[number, string]> =>
+        new Promise((resolve) =>
+            http.get(url, (res) => {
+                res.resume();
+                resolve([res.statusCode ?? 0, String(res.headers['content-type'])]);
+            }),
+        );
+    try {
+        const base = server.url.replace(/\/\?t=.*/, '');
+        const token = new URL(server.url).searchParams.get('t')!;
+        assert.deepEqual(await get(`${base}/image?p=${encodeURIComponent(png)}&t=${token}`), [200, 'image/png']);
+        assert.equal((await get(`${base}/image?p=${encodeURIComponent(png)}&t=wrong`))[0], 403);
+        assert.equal((await get(`${base}/image?p=${encodeURIComponent(txt)}&t=${token}`))[0], 403);
+    } finally {
+        server.close();
+        fs.rmSync(dir, { recursive: true });
+    }
+});
+
+test('images zoom and pan with keys, the wheel and dragging', () => {
+    const dir = tempDir('zoom');
+    const file = path.join(dir, 'pic.png');
+    fs.writeFileSync(file, pngHeader(640, 400));
+    const cwd = process.cwd();
+    try {
+        // An 800×600 window: the image area is 760×520 at (20, 20).
+        const h = harness(file);
+        const drawn = (): number[] => {
+            const cmd = h.frames[h.frames.length - 1].find((c) => c[0] === 'image')!;
+            return cmd.slice(1, 5).map((n) => Math.round(Number(n)));
+        };
+        // It fits, so it is drawn at its size, in the middle.
+        assert.deepEqual(drawn(), [80, 80, 640, 400]);
+        assert.match(h.text(), /PNG 640×400 {2}33 B {2}100%/);
+        // h/j/k/l and the arrows move it (by a tenth of the view, 76 pixels),
+        // as far as its edge reaching the middle of the view.
+        h.type('l');
+        assert.deepEqual(drawn(), [4, 80, 640, 400]);
+        h.type('<Left>kj<Down>');
+        assert.deepEqual(drawn(), [80, 4, 640, 400]);
+        h.type('llllllllll');
+        assert.deepEqual(drawn(), [-240, 4, 640, 400]);
+        // = (or 0) fits it again; + and - zoom around the middle.
+        h.type('=');
+        assert.deepEqual(drawn(), [80, 80, 640, 400]);
+        h.type('+');
+        assert.deepEqual(drawn(), [0, 30, 800, 500]);
+        assert.match(h.text(), /125%/);
+        h.type('0-');
+        assert.match(h.text(), /80%/);
+        h.type('=');
+        assert.match(h.text(), /100%/);
+        // Scrolling zooms, around the pointer: the point under it stays.
+        h.send({ t: 'wheel', x: 80, y: 80, delta: -100, dx: 0, mode: 0, zoom: false });
+        assert.deepEqual(drawn(), [80, 80, 800, 500]);
+        assert.match(h.text(), /125%/);
+        h.send({ t: 'wheel', x: 80, y: 80, delta: 100, dx: 0, mode: 0, zoom: true });
+        assert.match(h.text(), /100%/);
+        // The buttons in the bottom right: +, - and =.
+        assert.match(h.text(), /\+\n-\n=/);
+        h.send({ t: 'mouse', kind: 'down', x: 724, y: 540 });
+        h.send({ t: 'mouse', kind: 'up', x: 724, y: 540 });
+        assert.match(h.text(), /125%/);
+        h.send({ t: 'mouse', kind: 'down', x: 780, y: 540 });
+        h.send({ t: 'mouse', kind: 'up', x: 780, y: 540 });
+        assert.deepEqual(drawn(), [80, 80, 640, 400]);
+        h.type('+');
+        // Dragging moves it.
+        const before = drawn();
+        h.send({ t: 'mouse', kind: 'down', x: 400, y: 300 });
+        h.send({ t: 'mouse', kind: 'move', x: 390, y: 300 });
+        h.send({ t: 'mouse', kind: 'up', x: 390, y: 300 });
+        assert.equal(drawn()[0], before[0] - 10);
+        // `:` still works.
+        h.type(':enew<CR>');
+        assert.equal(h.app.editor.image, undefined);
+    } finally {
+        process.chdir(cwd);
+        fs.rmSync(dir, { recursive: true });
+    }
 });

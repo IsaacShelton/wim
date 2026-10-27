@@ -16,7 +16,7 @@ import {
     writeFile,
 } from './buffers';
 import type { Editor, Options } from './editor';
-import { EditorError, fail } from './errors';
+import { EditorError, IMAGE_READONLY, fail } from './errors';
 import { applyOperator, joinLines, shiftLines } from './ops';
 import { lineRange } from './range';
 import * as search from './search';
@@ -25,11 +25,20 @@ import { expandTilde } from '../paths';
 
 export function runEx(ed: Editor, input: string): void {
     if (ed.undoPending === undefined) ed.undoPending = ed.snapshot();
+    const buffer = ed.buffer;
+    const version = buffer.version();
     try {
         exCommand(ed, input);
     } catch (e) {
         if (!(e instanceof EditorError)) throw e;
         ed.setError(e.message);
+    }
+    // An image can't be changed: put back what a command like :s did.
+    if (ed.image && ed.buffer === buffer && buffer.version() !== version) {
+        const s = ed.undoPending;
+        buffer.restore(s.lines, s.version);
+        ed.cursor = s.cursor;
+        ed.setError(IMAGE_READONLY);
     }
     ed.commitUndo();
     ed.clampCursor();

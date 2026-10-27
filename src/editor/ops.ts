@@ -275,11 +275,12 @@ export function scroll(ed: Editor, kind: Scroll, count: number | undefined): voi
     switch (kind) {
         case 'HalfPageDown':
         case 'HalfPageUp': {
+            // Unlike Vim, only the cursor moves; the view follows it only when
+            // it would come within `scrolloff` of an edge or leave the view.
             const amount = count ?? Math.max(Math.floor(rows / 2), 1);
             const down = kind === 'HalfPageDown';
             if ((down && ed.cursor.line === last) || (!down && ed.cursor.line === 0)) return;
             const delta = down ? amount : -amount;
-            ed.scrollTop = Math.min(Math.max(ed.scrollTop + delta, 0), last);
             const line = Math.min(Math.max(ed.cursor.line + delta, 0), last);
             ed.cursor = pos(line, ed.colForWant(line));
             break;

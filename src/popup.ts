@@ -109,17 +109,21 @@ export class Overlay {
         }
     }
 
-    /** Place a `w` by `h` box next to the cell at (`x`, `y`): below it if it
-     * fits, otherwise wherever there is more room. */
-    private place(area: Box, x: number, y: number, w: number, h: number): Box {
+    /** Place a `w` by `h` box next to the cell at (`x`, `y`): below it (or
+     * above it, if `preferAbove`) if it fits, otherwise wherever there is
+     * more room. */
+    private place(area: Box, x: number, y: number, w: number, h: number, preferAbove = false): Box {
         const below = area.bottom - (y + this.lh);
         const above = y - area.top;
         const left = Math.max(Math.min(x, area.right - w), area.left);
-        if (h <= below || below >= above) return { left, top: y + this.lh, right: left + w, bottom: y + this.lh + Math.min(h, below) };
+        const goBelow = preferAbove ? h > above && below > above : h <= below || below >= above;
+        if (goBelow) return { left, top: y + this.lh, right: left + w, bottom: y + this.lh + Math.min(h, below) };
         return { left, top: y - Math.min(h, above), right: left + w, bottom: y };
     }
 
-    float(f: Float, area: Box, anchorX: number, anchorY: number): void {
+    /** A float next to the cell at (`anchorX`, `anchorY`). It goes on the
+     * other side of that row from `avoid` (the completion menu), if given. */
+    float(f: Float, area: Box, anchorX: number, anchorY: number, avoid?: Box): void {
         const maxCols = Math.max(Math.floor((area.right - area.left) / this.cw) - 4, 10);
         const lines = f.layout(Math.min(maxCols, 80));
         const cols = Math.max(...lines.map(runsWidth), 1);
@@ -128,7 +132,14 @@ export class Overlay {
         const rows = Math.min(lines.length, f.focused ? fullRows : Math.max(Math.floor(fullRows / 2), 3));
         f.visibleRows = rows;
         f.scroll = Math.max(Math.min(f.scroll, lines.length - rows), 0);
-        const b = this.place(area, anchorX, anchorY, (cols + 2) * this.cw, rows * this.lh + 2 * PAD);
+        const above = avoid ? avoid.top > anchorY : f.above;
+        const h = rows * this.lh + 2 * PAD;
+        let b = this.place(area, anchorX, anchorY, (cols + 2) * this.cw, h, above);
+        if (avoid && b.top < avoid.bottom && avoid.top < b.bottom && b.left < avoid.right && avoid.left < b.right) {
+            // No room on the other side: go past the menu instead.
+            const top = avoid.top > anchorY ? avoid.bottom : Math.max(avoid.top - h, area.top);
+            b = { left: b.left, top, right: b.right, bottom: Math.min(top + h, area.bottom) };
+        }
         this.frame(b);
         if (f.focused) this.cmds.push(['stroke', b.left, b.top, b.right - b.left, b.bottom - b.top, theme.CURSOR]);
         this.cmds.push(['clip', b.left, b.top, b.right - b.left, b.bottom - b.top]);
@@ -139,7 +150,9 @@ export class Overlay {
         this.cmds.push(['unclip']);
     }
 
-    completion(menu: CompletionMenu, area: Box, anchorX: number, anchorY: number, icons: boolean): void {
+    /** The completion menu, under the word being completed (or over it, if
+     * there's more room there). Returns where it went. */
+    completion(menu: CompletionMenu, area: Box, anchorX: number, anchorY: number, icons: boolean): Box {
         const items = menu.items;
         const rows = Math.min(items.length, MENU_ROWS);
         menu.scroll = Math.max(Math.min(menu.scroll, items.length - rows), 0);
@@ -160,12 +173,13 @@ export class Overlay {
             this.text(b.left + (4 + labelCols) * this.cw, y, `   (${e.kind})`, theme.COMMENT);
         });
         this.cmds.push(['unclip']);
+        return b;
     }
 
     /** A picker, Telescope's horizontal layout: the prompt and results, and
      * a preview of the selected item's file beside them when there is room.
      * `load` reads a file's lines for the preview (or says why it can't). */
-    picker<T>(p: Picker<T>, area: Box, load: (file: string) => string[] | string): void {
+    picker<T>(p: Picker<T>, area: Box, load: (file: string) => PreviewSource): void {
         const areaCols = Math.floor((area.right - area.left) / this.cw);
         const areaRows = Math.floor((area.bottom - area.top) / this.lh);
         const big = p.hasPreview;
@@ -229,7 +243,7 @@ export class Overlay {
     }
 
     /** The selected item's file, with its line marked and in view. */
-    private preview<T>(p: Picker<T>, b: Box, load: (file: string) => string[] | string): void {
+    private preview<T>(p: Picker<T>, b: Box, load: (file: string) => PreviewSource): void {
         const target = p.filtered[p.selected]?.preview;
         this.frame(b, target ? baseName(target.file) : 'Preview');
         if (!target) return;
@@ -240,6 +254,12 @@ export class Overlay {
         const rows = Math.floor((b.bottom - b.top - 2 * PAD) / this.lh);
         if (typeof text === 'string') {
             this.text(x, top, text, theme.COMMENT);
+            return;
+        }
+        if ('src' in text) {
+            this.text(x, top, text.caption, theme.COMMENT);
+            const y = top + 2 * this.lh;
+            this.cmds.push(['image', x, y, cols * this.cw, b.bottom - PAD - y, text.src, true]);
             return;
         }
         const line = target.line ?? 0;
@@ -261,6 +281,8 @@ export class Overlay {
  * it, unless it was focused (by asking for it again) to scroll it. */
 export class Float {
     focused = false;
+    /** Shown above its anchor when there is room, rather than below. */
+    above = false;
     scroll = 0;
     /** Rows shown in the last frame. */
     visibleRows = 1;
@@ -382,6 +404,16 @@ export interface PickerItem<T> {
     value: T;
 }
 
+/** An image to preview: its address on Wim's server and a description. */
+export interface PreviewImage {
+    src: string;
+    caption: string;
+}
+
+/** What a picker previews for a file: its lines, an image, or why it can't
+ * be shown. */
+export type PreviewSource = string[] | PreviewImage | string;
+
 /** A file's lines for previews, with highlighter states found so far. */
 interface PreviewText {
     lines: string[];
@@ -431,7 +463,7 @@ export class Picker<T> {
     /** Items are still coming in. */
     busy = false;
     private items: PickerItem<T>[];
-    private readonly previews = new Map<string, PreviewText | string>();
+    private readonly previews = new Map<string, PreviewText | PreviewImage | string>();
 
     constructor(
         readonly title: string,
@@ -471,11 +503,11 @@ export class Picker<T> {
     }
 
     /** A file's text for the preview, read once. */
-    previewText(file: string, load: (file: string) => string[] | string): PreviewText | string {
+    previewText(file: string, load: (file: string) => PreviewSource): PreviewText | PreviewImage | string {
         let text = this.previews.get(file);
         if (text === undefined) {
             const lines = load(file);
-            text = typeof lines === 'string' ? lines : { lines, lang: highlight.detect(file), states: [highlight.NORMAL] };
+            text = !Array.isArray(lines) ? lines : { lines, lang: highlight.detect(file), states: [highlight.NORMAL] };
             this.previews.set(file, text);
         }
         return text;

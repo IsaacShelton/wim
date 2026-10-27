@@ -181,6 +181,26 @@ export interface SymbolInformation {
     containerName?: string;
 }
 
+export interface ParameterInformation {
+    /** The parameter's text, or where it is in the signature's label (UTF-16
+     * offsets). */
+    label: string | [number, number];
+    documentation?: string | MarkupContent;
+}
+
+export interface SignatureInformation {
+    label: string;
+    documentation?: string | MarkupContent;
+    parameters?: ParameterInformation[];
+    activeParameter?: number;
+}
+
+export interface SignatureHelp {
+    signatures: SignatureInformation[];
+    activeSignature?: number;
+    activeParameter?: number;
+}
+
 export interface DocumentHighlight {
     range: Range;
 }
@@ -197,6 +217,7 @@ export interface ServerCapabilities {
     textDocumentSync?: number | { openClose?: boolean; change?: number; save?: boolean | { includeText?: boolean } };
     completionProvider?: { triggerCharacters?: string[]; resolveProvider?: boolean };
     hoverProvider?: unknown;
+    signatureHelpProvider?: { triggerCharacters?: string[]; retriggerCharacters?: string[] };
     definitionProvider?: unknown;
     declarationProvider?: unknown;
     typeDefinitionProvider?: unknown;

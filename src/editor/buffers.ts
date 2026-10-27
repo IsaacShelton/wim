@@ -7,6 +7,7 @@
 
 import * as fs from 'node:fs';
 
+import { ImageInfo, formatBytes, isImage, readImageInfo } from '../image';
 import { absolute, displayName } from '../paths';
 import { Buffer, Pos, pos } from './buffer';
 import type { Editor, LastVisual, Snapshot } from './editor';
@@ -25,6 +26,8 @@ export class BufferSlot {
     redoStack: Snapshot[] = [];
     marks = new Map<string, Pos>();
     lastVisual: LastVisual | undefined;
+    /** Set for an image file, which is shown rather than edited. */
+    image: ImageInfo | undefined;
 
     constructor(readonly id: number) {}
 
@@ -53,6 +56,7 @@ const SWAPPED = [
     'redoStack',
     'marks',
     'lastVisual',
+    'image',
 ] as const;
 
 /** A buffer's own state. The active buffer's lives in `Editor`, the others'
@@ -222,6 +226,21 @@ export function openFile(ed: Editor, p: string): void {
 /** (Re)load the active buffer from `p`. */
 export function loadFile(ed: Editor, p: string): void {
     const name = displayName(p);
+    if (isImage(p) && fs.existsSync(p)) {
+        let info: ImageInfo;
+        try {
+            info = readImageInfo(p);
+        } catch (e) {
+            ed.setError(`E484: Can't open file ${name}: ${(e as Error).message}`);
+            return;
+        }
+        loadText(ed, '');
+        ed.filePath = p;
+        ed.image = info;
+        const size = info.width > 0 ? ` ${info.width}×${info.height},` : '';
+        ed.setMessage(`"${name}" ${info.format}${size} ${formatBytes(info.bytes)}`);
+        return;
+    }
     let bytes: globalThis.Buffer;
     try {
         bytes = fs.readFileSync(p);
@@ -254,9 +273,14 @@ export function loadText(ed: Editor, text: string): void {
     ed.undoPending = undefined;
     ed.marks = new Map();
     ed.lastVisual = undefined;
+    ed.image = undefined;
 }
 
 export function writeFile(ed: Editor, p: string | undefined): boolean {
+    if (ed.image) {
+        ed.setError(`E21: Can't write an image buffer`);
+        return false;
+    }
     const target = p !== undefined ? absolute(p) : ed.filePath;
     if (target === undefined) {
         ed.setError('E32: No file name');

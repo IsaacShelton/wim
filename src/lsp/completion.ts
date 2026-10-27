@@ -69,6 +69,8 @@ export class Completion implements CompletionMenu {
     private timer: NodeJS.Timeout | undefined;
     /** Identifies the latest request; older answers are dropped. */
     private seq = 0;
+    /** Called after confirming an item added `()`, to show its signature. */
+    onParens: (() => void) | undefined;
 
     constructor(
         private readonly ed: Editor,
@@ -317,6 +319,7 @@ export class Completion implements CompletionMenu {
         ed.buffer.insertText(ed.cursor, '()');
         ed.cursor = pos(ed.cursor.line, ed.cursor.col + 1);
         ed.updateWantCol();
+        this.onParens?.();
     }
 
     private applyAdditional(s: Session, edits: TextEdit[] | undefined): void {

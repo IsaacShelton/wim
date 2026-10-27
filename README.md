@@ -5,7 +5,7 @@ app: Wim opens a native window, without any native code of its own.
 
 ```sh
 npm install            # installs the TypeScript compiler (development only)
-node wim.js path/to/file.rs
+node wim.js path/to/file.rs   # works in the file's directory
 node wim.js .          # a directory: works there, with no file open (Ctrl+n for the tree)
 ```
 
@@ -56,6 +56,7 @@ one the tree shows plain folder arrows.
 | `src/lsp/` | Language server client: `rpc.ts` (JSON-RPC framing), `client.ts` (one server process), `servers.ts` (which servers, where to find them, project roots), `manager.ts` (keeps servers in sync with buffers, diagnostics, edits), `features.ts` (go to, hover, rename, ...), `completion.ts` |
 | `src/popup.ts` | The completion menu, hover/diagnostic floats and the picker |
 | `src/finder.ts` | Finding files and searching text for the pickers, with ripgrep or without it |
+| `src/image.ts` | Which files are images, and their format and size |
 
 Run the tests with `npm test`.
 
@@ -90,7 +91,9 @@ macOS word editing: Option+Left/Right move by word, Option+Delete (⌫) deletes 
 the cursor, Option+fn+Delete (⌦) deletes the word after it. Option+Left/Right also move by
 word in Normal mode, and Option+Delete deletes a word on the command line.
 
-**Scrolling:** `<C-d> <C-u> <C-f> <C-b> <C-e> <C-y>`, `zz zt zb`, mouse wheel.
+**Scrolling:** `<C-d> <C-u> <C-f> <C-b> <C-e> <C-y>`, `zz zt zb`, mouse wheel. Unlike Vim,
+`<C-d>` and `<C-u>` move only the cursor (half a page); the view scrolls only as far as the
+cursor needs (`scrolloff`).
 
 **Search:** incremental, highlights matches, wraps around. Vim regex syntax: `\<word\>`,
 `\(group\)`, `\|`, `\+`, `\{n,m}`, `\v`, `\c`.
@@ -136,6 +139,9 @@ the same project share one server.
   `<C-l>` or `<C-Space>` confirm (the first item if none is selected), `<C-e>` closes.
   Confirming also applies the item's extra edits, such as an auto-import. `<C-Space>` with no
   menu asks for completions.
+- **Signature help** appears above the line while you type a call's arguments (after `(` or
+  `,`), with the current parameter picked out and its documentation; it follows along and
+  closes when the call does. It moves below the line when the completion menu is above.
 - **Hover** (`K`) shows documentation in a float; press `K` again to move into it and scroll
   (`j`/`k`, `<C-d>`/`<C-u>`, `g`/`G`), `q` or `<Esc>` to leave.
 - **Pickers** (references, symbols, code actions, diagnostics) work like Telescope: type to
@@ -149,6 +155,19 @@ the same project share one server.
 - Edits to files that aren't open (from a rename, say) go into background buffers, left
   unsaved; `:wa` saves them.
 - `:LspInfo` shows the running servers; `:LspRestart` restarts them.
+
+## Images
+
+PNG, JPEG, WebP, GIF and BMP files open as images: shown in the middle of the window,
+shrunk to fit if larger, with the format, size and file size in the status line. Images open
+from the command line, `:e`, the tree or a picker, and pickers preview them. An image buffer
+can't be changed or written (`E21`), so it is safe to `:w` or `:wa` with one open.
+
+To zoom: scroll (or pinch on a trackpad) to zoom around the pointer, or use the `+`, `-` and
+`=` buttons in the bottom right corner, or the same keys: `+` zooms in, `-` zooms out and `=`
+(or `0`) fits the window again. Drag, or press `h`/`j`/`k`/`l` or the arrow keys, to move it;
+the middle of the window always stays over the image. Enlarged two times or more, pixels are
+drawn sharp. The status line shows the zoom.
 
 ## Finding files and text
 

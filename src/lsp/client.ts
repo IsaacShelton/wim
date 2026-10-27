@@ -222,6 +222,14 @@ export class LanguageClient {
                             resolveSupport: { properties: ['additionalTextEdits', 'detail', 'documentation'] },
                         },
                     },
+                    signatureHelp: {
+                        contextSupport: true,
+                        signatureInformation: {
+                            documentationFormat: ['markdown', 'plaintext'],
+                            parameterInformation: { labelOffsetSupport: true },
+                            activeParameterSupport: true,
+                        },
+                    },
                     definition: linkSupport,
                     declaration: linkSupport,
                     typeDefinition: linkSupport,

@@ -10,8 +10,9 @@ export type ClientMessage =
     /** Cmd shortcuts (Ctrl+Shift on Windows and Linux). */
     | { t: 'command'; name: 'save' | 'copy' | 'cut' | 'paste' }
     | { t: 'mouse'; kind: 'down' | 'move' | 'up'; x: number; y: number }
-    /** A wheel event's vertical delta, with the DOM's `deltaMode`. */
-    | { t: 'wheel'; x: number; y: number; delta: number; mode: number }
+    /** A wheel event's deltas, with the DOM's `deltaMode`. `zoom` is set for
+     * Ctrl or Cmd with the wheel, and for pinching on a trackpad. */
+    | { t: 'wheel'; x: number; y: number; delta: number; dx: number; mode: number; zoom: boolean }
     /** The user asked to close the window. */
     | { t: 'close' };
 
@@ -29,5 +30,9 @@ export type DrawCmd =
      * `x`, centered vertically in the row whose top is `y`. */
     | [op: 'text', x: number, y: number, text: string, color: string]
     | [op: 'poly', points: number[], color: string]
+    /** An image from Wim's server (`src` is its path there), drawn to fill
+     * the box, or with `fit` scaled down to fit it if needed (never up) and
+     * centered in it. */
+    | [op: 'image', x: number, y: number, w: number, h: number, src: string, fit?: boolean]
     | [op: 'clip', x: number, y: number, w: number, h: number]
     | [op: 'unclip'];

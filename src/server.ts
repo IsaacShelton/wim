@@ -10,6 +10,8 @@ import * as http from 'node:http';
 import * as path from 'node:path';
 import type { Duplex } from 'node:stream';
 
+import { imageMime } from './image';
+
 const WS_GUID = '258EAFA5-E914-47DA-95CA-C5AB0DC85B11';
 /** Larger messages than this from the window are refused. */
 const MAX_MESSAGE = 1 << 20;
@@ -156,6 +158,15 @@ export function startServer(opts: ServerOptions): Promise<Server> {
             fs.readFile(clientScript, (err, data) =>
                 err ? send(500, 'text/plain', 'Wim is not built: run `npm run build`.') : send(200, 'text/javascript', data),
             );
+        } else if (url.pathname === '/image') {
+            // Image files the editor shows, for this session only.
+            const file = url.searchParams.get('p') ?? '';
+            const mime = imageMime(file);
+            if (url.searchParams.get('t') !== token || mime === undefined || !path.isAbsolute(file)) {
+                send(403, 'text/plain', 'Forbidden');
+                return;
+            }
+            fs.readFile(file, (err, data) => (err ? send(404, 'text/plain', '') : send(200, mime, data)));
         } else if (url.pathname === '/icons-font' && opts.fontPath) {
             const type = opts.fontPath.toLowerCase().endsWith('.otf') ? 'font/otf' : 'font/ttf';
             fs.readFile(opts.fontPath, (err, data) => (err ? send(404, 'text/plain', '') : send(200, type, data)));

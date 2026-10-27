@@ -77,7 +77,13 @@ function endOfInsert(start: Pos, text: string): Pos {
 export function applyTextEdits(buf: Buffer, edits: readonly TextEdit[], enc: Encoding, track: Pos = pos(0, 0)): Pos {
     const resolved = edits.map((e, i) => {
         const [start, end] = fromRange(buf, e.range, enc);
-        return { start, end, text: e.newText.replace(/\r\n?/g, '\n'), i };
+        let text = e.newText.replace(/\r\n?/g, '\n');
+        // A line past the last is after the file's final newline, which the
+        // buffer doesn't hold (it writes one): an edit running there brings
+        // its own, and one starting there goes on a new line.
+        if (e.range.end.line > buf.lastLine() && text.endsWith('\n')) text = text.slice(0, -1);
+        if (e.range.start.line > buf.lastLine()) text = '\n' + text;
+        return { ...trimEdit(buf, start, end, text), i };
     });
     // Last first, so earlier ranges stay valid; edits at the same place keep
     // their order.
@@ -90,10 +96,31 @@ export function applyTextEdits(buf: Buffer, edits: readonly TextEdit[], enc: Enc
             const newEnd = endOfInsert(e.start, e.text);
             p = p.line === e.end.line ? pos(newEnd.line, newEnd.col + p.col - e.end.col) : pos(p.line + newEnd.line - e.end.line, p.col);
         } else if (posCmp(e.start, p) < 0) {
-            p = e.start;
+            // Inside the replaced text: stay on the same line, as far as the
+            // new text goes.
+            p = pos(Math.min(p.line, endOfInsert(e.start, e.text).line), p.col);
         }
     }
     return p;
+}
+
+/** Narrow an edit to the text it really changes, leaving out what the old and
+ * new text share at either end. Some servers (pylsp's autopep8) format by
+ * replacing the whole file; this keeps the cursor out of what didn't change. */
+function trimEdit(buf: Buffer, start: Pos, end: Pos, text: string): { start: Pos; end: Pos; text: string } {
+    const oldChars = Array.from(buf.textRange(start, end));
+    const newChars = Array.from(text);
+    const most = Math.min(oldChars.length, newChars.length);
+    let prefix = 0;
+    while (prefix < most && oldChars[prefix] === newChars[prefix]) prefix++;
+    let suffix = 0;
+    while (suffix < most - prefix && oldChars[oldChars.length - 1 - suffix] === newChars[newChars.length - 1 - suffix]) suffix++;
+    if (prefix === 0 && suffix === 0) return { start, end, text };
+    return {
+        start: endOfInsert(start, oldChars.slice(0, prefix).join('')),
+        end: endOfInsert(start, oldChars.slice(0, oldChars.length - suffix).join('')),
+        text: newChars.slice(prefix, newChars.length - suffix).join(''),
+    };
 }
 
 /** A snippet as plain text, with the offset (in code points) where the

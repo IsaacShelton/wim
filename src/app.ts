@@ -16,6 +16,8 @@ import { Range } from './editor/range';
 import { lineMatches } from './editor/search';
 import { FileTree } from './filetree';
 import { GrepMatch, Search, findFiles, liveGrep } from './finder';
+import { ImageInfo, formatBytes, imageUrl, isImage, readImageInfo } from './image';
+import { ImageView, Placement, Size } from './imageview';
 import * as highlight from './highlight';
 import * as icons from './icons';
 import { Command, Keymap, LspAction, MapMode, Rhs, TIMEOUT } from './keymap';
@@ -23,8 +25,9 @@ import { Completion } from './lsp/completion';
 import { LspFeatures, severityColor } from './lsp/features';
 import { BufferDiagnostic, LspManager } from './lsp/manager';
 import { ServerSpec, defaultServers } from './lsp/servers';
+import { SignatureHelp } from './lsp/signature';
 import { baseName, currentDir } from './paths';
-import { Float, Overlay, Picker, PickerItem, readPreview } from './popup';
+import { Float, Overlay, Picker, PickerItem, PreviewSource, readPreview } from './popup';
 import { ClientMessage, DrawCmd } from './protocol';
 import { theme, tokenColor } from './theme';
 
@@ -55,6 +58,10 @@ function rect(left: number, top: number, right: number, bottom: number): Rect {
 
 function contains(r: Rect, x: number, y: number): boolean {
     return x >= r.left && x < r.right && y >= r.top && y < r.bottom;
+}
+
+function rectSize(r: Rect): Size {
+    return { width: r.right - r.left, height: r.bottom - r.top };
 }
 
 export interface Metrics {
@@ -137,11 +144,14 @@ export class WimApp {
     readonly lsp: LspManager;
     private readonly features: LspFeatures;
     private readonly completion: Completion;
+    private readonly signature: SignatureHelp;
     /** A picker (references, symbols, code actions...) has the keyboard. */
     private picker: Picker<never> | undefined;
     /** Hover documentation or diagnostics next to the cursor. */
     private float: Float | undefined;
     private refreshQueued = false;
+    /** How each image buffer is zoomed, by buffer id. */
+    private readonly imageViews = new Map<number, { image: ImageInfo; view: ImageView }>();
 
     constructor(private readonly opts: AppOptions) {
         this.icons = opts.icons;
@@ -157,16 +167,14 @@ export class WimApp {
             }
             file = undefined;
         }
-        // Launched from a file manager the working directory may be the root;
-        // use the file's directory instead so the tree and relative paths are
-        // useful.
-        const cwd = process.cwd();
-        if (path.dirname(cwd) === cwd && file !== undefined) {
-            const dir = path.dirname(path.resolve(file));
+        // `wim some/file`: work in the file's directory, so the tree, the
+        // pickers and relative paths start there.
+        if (file !== undefined) {
+            file = path.resolve(file);
             try {
-                process.chdir(dir);
+                process.chdir(path.dirname(file));
             } catch {
-                // Keep the working directory.
+                // A new file in a directory that doesn't exist yet: stay put.
             }
         }
         this.editor = new Editor(this.clipboard);
@@ -182,6 +190,8 @@ export class WimApp {
             refresh,
         });
         this.completion = new Completion(this.editor, this.lsp, refresh);
+        this.signature = new SignatureHelp(this.editor, this.lsp, refresh);
+        this.completion.onParens = () => this.signature.trigger('(');
         this.editor.userCommand = (name, args) => this.userCommand(name, args);
         if (file !== undefined) this.editor.openFile(file);
         if (dirError !== undefined) this.editor.setError(dirError);
@@ -247,7 +257,19 @@ export class WimApp {
         }
     }
 
-    private wheel(layout: Layout, msg: { x: number; y: number; delta: number; mode: number }): void {
+    private wheel(layout: Layout, msg: { x: number; y: number; delta: number; dx: number; mode: number; zoom: boolean }): void {
+        const view = this.imageView();
+        if (view && contains(layout.textArea, msg.x, msg.y)) {
+            const area = imageArea(layout);
+            // In pixels: a line is a line height, a page the view's height.
+            const unit = msg.mode === 1 ? layout.lineH : msg.mode === 2 ? area.bottom - area.top : 1;
+            // Scrolling (or pinching) zooms around the pointer: a mouse wheel
+            // notch (about 100 pixels) is one step, and a trackpad goes
+            // smoothly. Dragging pans.
+            view.zoom((-msg.delta * unit) / 100, rectSize(area), { x: msg.x - area.left, y: msg.y - area.top });
+            return;
+        }
+        if (msg.zoom) return;
         const lines = msg.mode === 1 ? msg.delta : msg.mode === 2 ? msg.delta * layout.rows : msg.delta / layout.lineH;
         this.scrollRemainder += lines;
         const whole = Math.trunc(this.scrollRemainder);
@@ -278,7 +300,10 @@ export class WimApp {
         if (this.focus === 'Editor' && this.completion.key(key)) return;
         const before = this.completion.snapshot();
         this.typeKey(key);
-        if (before.mode === 'Insert') this.completion.afterKey(key, before);
+        if (before.mode === 'Insert') {
+            this.completion.afterKey(key, before);
+            this.signature.afterKey(key, before);
+        }
     }
 
     private typeKey(key: KeyInput): void {
@@ -448,6 +473,7 @@ export class WimApp {
     /** Stop the language servers (Wim is exiting). */
     dispose(): void {
         this.completion.close();
+        this.signature.close();
         this.features.dispose();
         this.lsp.dispose();
     }
@@ -465,6 +491,7 @@ export class WimApp {
             return;
         }
         if (this.focus === 'Editor') {
+            if (this.imageKey(key)) return;
             this.editor.handleKey(key);
             return;
         }
@@ -494,6 +521,61 @@ export class WimApp {
                 });
                 break;
         }
+    }
+
+    /** The zoom and position of the active buffer's image, if it is an image
+     * whose size is known. */
+    private imageView(): ImageView | undefined {
+        const image = this.editor.image;
+        if (!image || image.width === 0 || image.height === 0) return undefined;
+        const id = this.editor.bufferId();
+        let entry = this.imageViews.get(id);
+        if (!entry || entry.image !== image) {
+            entry = { image, view: new ImageView(image) };
+            this.imageViews.set(id, entry);
+        }
+        return entry.view;
+    }
+
+    private imagePlacement(layout: Layout): PaintState['imageView'] {
+        const view = this.imageView();
+        if (!view) return undefined;
+        const size = rectSize(imageArea(layout));
+        return { placement: view.place(size), scale: view.currentScale(size) };
+    }
+
+    /** Zoom and pan keys for an image: `+` zooms in, `-` out, `=` (or `0`)
+     * fits the window, `h`/`j`/`k`/`l` and the arrows pan. Other keys go to
+     * the editor (`:` and buffer switching work as usual). */
+    private imageKey(key: KeyInput): boolean {
+        const view = this.imageView();
+        if (!view || this.editor.mode !== 'Normal' || this.editor.pending.length > 0 || key.ctrl) return false;
+        const size = rectSize(imageArea(this.layout()));
+        const step = Math.max(size.width, size.height) / 10;
+        const pans: Record<string, [number, number]> = {
+            h: [step, 0],
+            Left: [step, 0],
+            l: [-step, 0],
+            Right: [-step, 0],
+            k: [0, step],
+            Up: [0, step],
+            j: [0, -step],
+            Down: [0, -step],
+        };
+        if (key.key === '+') this.imageAction(view, 'In');
+        else if (key.key === '-') this.imageAction(view, 'Out');
+        else if (key.key === '=' || key.key === '0') this.imageAction(view, 'Fit');
+        else if (key.key in pans && !key.alt) view.pan(...pans[key.key], size);
+        else return false;
+        return true;
+    }
+
+    /** Zoom in, out, or back to fitting the window. */
+    private imageAction(view: ImageView, action: ImageAction, layout = this.layout()): void {
+        const size = rectSize(imageArea(layout));
+        if (action === 'In') view.zoom(1, size);
+        else if (action === 'Out') view.zoom(-1, size);
+        else view.reset();
     }
 
     /** `<C-w>h`/`l`/`w`: move focus between the tree and the editor. */
@@ -626,9 +708,18 @@ export class WimApp {
         ed.updateWantCol();
     }
 
-    /** A file's lines for a picker's preview: an open buffer's (with unsaved
-     * changes), or the file's. */
-    private previewLines(file: string): string[] | string {
+    /** What a picker previews for a file: an image, or its lines (an open
+     * buffer's, with unsaved changes, or the file's). */
+    private previewLines(file: string): PreviewSource {
+        if (isImage(file)) {
+            try {
+                const info = readImageInfo(file);
+                const size = info.width > 0 ? ` ${info.width}×${info.height}` : '';
+                return { src: imageUrl(file, info), caption: `${info.format}${size}, ${formatBytes(info.bytes)}` };
+            } catch (e) {
+                return `(${(e as Error).message})`;
+            }
+        }
         const id = findBuffer(this.editor, file);
         const st = id === undefined ? undefined : bufferState(this.editor, id);
         return st ? st.buffer.text().split('\n') : readPreview(file);
@@ -669,6 +760,7 @@ export class WimApp {
             this.picker = undefined;
             this.float = undefined;
             this.completion.close();
+            this.signature.close();
         }
         if (kind === 'up') {
             this.press = undefined;
@@ -679,6 +771,14 @@ export class WimApp {
             if (!p) return;
             if (!p.dragging && Math.hypot(x - p.x, y - p.y) < DRAG_THRESHOLD) return;
             p.dragging = true;
+            const view = this.imageView();
+            if (view) {
+                // Dragging an image moves it.
+                view.pan(x - p.x, y - p.y, rectSize(imageArea(layout)));
+                p.x = x;
+                p.y = y;
+                return;
+            }
             this.editor.dragTo(this.posAt(layout, x, y));
             return;
         }
@@ -705,7 +805,13 @@ export class WimApp {
         }
         if (contains(layout.textArea, x, y)) {
             this.focus = 'Editor';
-            this.editor.click(this.posAt(layout, x, y));
+            const view = this.imageView();
+            const button = view && imageButtons(layout).find(([r]) => contains(r, x, y));
+            if (view && button) {
+                this.imageAction(view, button[1], layout);
+                return;
+            }
+            if (!view) this.editor.click(this.posAt(layout, x, y));
             this.press = { x, y, dragging: false };
         }
     }
@@ -791,9 +897,11 @@ export class WimApp {
             diagnosticCounts: this.lsp.counts(this.editor.filePath),
             lspProgress: this.lsp.progressText(),
             completion: this.completion.visible && this.focus === 'Editor' ? this.completion : undefined,
+            signature: this.editor.mode === 'Insert' && this.focus === 'Editor' ? this.signature.float : undefined,
             float: this.float,
             picker: this.picker,
             previewLines: (file) => this.previewLines(file),
+            imageView: this.imagePlacement(layout),
             focus: this.focus,
             icons: this.icons,
             tree: this.tree,
@@ -836,6 +944,7 @@ export class WimApp {
     /** The sign column and line numbers. */
     private gutterCols(): number {
         const o = this.editor.options;
+        if (this.editor.image) return 0;
         if (!o.number && !o.relativenumber) return this.signCols();
         return this.signCols() + Math.max(String(this.editor.buffer.lineCount()).length, 3) + 1;
     }
@@ -847,6 +956,33 @@ function isDirectory(p: string): boolean {
     } catch {
         return false;
     }
+}
+
+/** Where an image is shown: the text area, less a margin. */
+function imageArea(layout: Layout): Rect {
+    const r = layout.textArea;
+    const pad = Math.min(layout.lineH, (r.right - r.left) / 4, (r.bottom - r.top) / 4);
+    return rect(r.left + pad, r.top + pad, r.right - pad, r.bottom - pad);
+}
+
+type ImageAction = 'In' | 'Out' | 'Fit';
+
+/** The zoom buttons in the bottom right corner of an image: where they are,
+ * what they do and their labels. */
+function imageButtons(layout: Layout): [Rect, ImageAction, string][] {
+    const r = layout.textArea;
+    const size = Math.round(layout.lineH * 1.2);
+    const gap = 4;
+    const bottom = r.bottom - 8;
+    const buttons: [ImageAction, string][] = [
+        ['In', '+'],
+        ['Out', '-'],
+        ['Fit', '='],
+    ];
+    return buttons.map(([action, label], i) => {
+        const right = r.right - 8 - (buttons.length - 1 - i) * (size + gap);
+        return [rect(right - size, bottom - size, right, bottom), action, label];
+    });
 }
 
 /** Translate a key from the window into the editor's representation. */
@@ -880,9 +1016,14 @@ interface PaintState {
     diagnosticCounts: number[];
     lspProgress: string | undefined;
     completion: Completion | undefined;
+    /** The signature of the call being typed. */
+    signature: Float | undefined;
     float: Float | undefined;
     picker: Picker<never> | undefined;
-    previewLines: (file: string) => string[] | string;
+    previewLines: (file: string) => PreviewSource;
+    /** Where the active buffer's image goes and its zoom, when it is an image
+     * of known size. */
+    imageView: { placement: Placement; scale: number } | undefined;
 }
 
 /** Paints one frame. */
@@ -918,8 +1059,49 @@ class Painter {
     }
 
     paint(): DrawCmd[] {
-        const { ed, layout } = this;
         this.rect(rect(0, 0, this.st.metrics.width, this.st.metrics.height), theme.BG);
+        const image = this.ed.image;
+        if (image && this.ed.filePath !== undefined) {
+            this.paintImage(this.ed.filePath, image);
+        } else {
+            this.paintText();
+            this.paintCursor();
+        }
+        this.paintTabline();
+        this.paintTree();
+        this.paintStatus();
+        this.paintCmdline();
+        this.paintPopups();
+        return this.cmds;
+    }
+
+    /** An image file, as zoomed and moved (at first shrunk to fit if it is
+     * larger than the window). */
+    private paintImage(file: string, image: ImageInfo): void {
+        const area = imageArea(this.layout);
+        const src = imageUrl(file, image);
+        const view = this.st.imageView;
+        if (!view) {
+            // Its size is unknown: the window fits it.
+            this.cmds.push(['image', area.left, area.top, area.right - area.left, area.bottom - area.top, src, true]);
+            return;
+        }
+        const p = view.placement;
+        this.clip(this.layout.textArea);
+        this.cmds.push(['image', area.left + p.x, area.top + p.y, p.width, p.height, src]);
+        this.cmds.push(['unclip']);
+        const { charW: cw, lineH: lh } = this.layout;
+        for (const [b, , label] of imageButtons(this.layout)) {
+            this.rect(b, theme.POPUP_BG, 3);
+            this.cmds.push(['stroke', b.left, b.top, b.right - b.left, b.bottom - b.top, theme.POPUP_BORDER]);
+            this.text(b.left + (b.right - b.left - cw) / 2, b.top + (b.bottom - b.top - lh) / 2, label, theme.FG);
+        }
+    }
+
+    /** The buffer's lines, with the gutter, selection, search matches and
+     * diagnostics. */
+    private paintText(): void {
+        const { ed, layout } = this;
         const buf = ed.buffer;
         const opts = ed.options;
         const cursor = ed.cursor;
@@ -1026,14 +1208,6 @@ class Painter {
             this.lineDiagnostics(line, y, diags);
         }
         this.cmds.push(['unclip']);
-
-        this.paintCursor();
-        this.paintTabline();
-        this.paintTree();
-        this.paintStatus();
-        this.paintCmdline();
-        this.paintPopups();
-        return this.cmds;
     }
 
     /** Underline a line's diagnostics and show the most severe message after
@@ -1069,9 +1243,11 @@ class Painter {
         ];
         const menu = this.st.completion;
         const anchor = menu?.anchor();
-        if (menu && anchor) overlay.completion(menu, area, ...screen(anchor), this.st.icons);
+        const menuBox = menu && anchor ? overlay.completion(menu, area, ...screen(anchor), this.st.icons) : undefined;
         const f = this.st.float;
         if (f) overlay.float(f, area, ...screen(f.anchor));
+        const sig = this.st.signature;
+        if (sig) overlay.float(sig, area, ...screen(sig.anchor), menuBox);
         const picker = this.st.picker;
         if (picker) overlay.picker(picker, rect(0, 0, this.st.metrics.width, layout.status.top), this.st.previewLines);
     }
@@ -1272,9 +1448,15 @@ class Painter {
         else if (ed.scrollTop === 0) position = 'Top';
         else if (ed.scrollTop + layout.rows >= lines) position = 'Bot';
         else position = `${Math.floor((ed.scrollTop * 100) / (lines - layout.rows))}%`;
-        const filetype = highlight.detect(ed.filePath)?.name ?? '';
+        const image = ed.image;
+        const zoom = this.st.imageView ? `  ${Math.round(this.st.imageView.scale * 100)}%` : '';
+        const filetype = image
+            ? `${image.format}${image.width > 0 ? ` ${image.width}×${image.height}` : ''}  ${formatBytes(image.bytes)}${zoom}`
+            : (highlight.detect(ed.filePath)?.name ?? '');
         const pending = this.st.mapPending.map(keyToString).join('') + ed.pendingKeys();
-        const right = `${pending}   ${filetype}   ${cursor.line + 1}:${ed.displayCol(cursor.line, cursor.col) + 1}   ${position} `;
+        // An image has no cursor or lines to place.
+        const where = image ? '' : `   ${cursor.line + 1}:${ed.displayCol(cursor.line, cursor.col) + 1}   ${position}`;
+        const right = `${pending}   ${filetype}${where} `;
         this.textRight(r.right - cw, r.top, right, theme.FG);
 
         // Language server progress, or diagnostic counts, to the left.

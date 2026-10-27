@@ -183,6 +183,24 @@ test('autopairs make triple quotes in Python', () => {
     assert.equal(state(js), '""|""');
 });
 
+test('half-page moves scroll only when the cursor nears an edge', () => {
+    const ed = editor('|' + Array.from({ length: 100 }, (_, i) => `line ${i}`).join('\n'));
+    ed.setViewport(40, 80);
+    ed.handleKeys(parseKeys('<C-d>'));
+    assert.equal(ed.cursor.line, 20);
+    assert.equal(ed.scrollTop, 0, 'the view stays');
+    ed.handleKeys(parseKeys('<C-d>'));
+    // Line 40 is past the view: it scrolls just enough (scrolloff 3).
+    assert.equal(ed.cursor.line, 40);
+    assert.equal(ed.scrollTop, 4);
+    ed.handleKeys(parseKeys('<C-u>'));
+    assert.equal(ed.cursor.line, 20);
+    assert.equal(ed.scrollTop, 4);
+    ed.handleKeys(parseKeys('<C-u><C-u>'));
+    assert.equal(ed.cursor.line, 0);
+    assert.equal(ed.scrollTop, 0);
+});
+
 test('undo and redo', () => {
     check('|abc', 'xu', '|abc');
     check('|abc', 'xu<C-r>', '|bc');

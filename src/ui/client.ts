@@ -10,6 +10,8 @@ const canvas = document.getElementById('wim') as HTMLCanvasElement;
 const ctx = canvas.getContext('2d')!;
 const hasIcons = canvas.dataset.icons === '1';
 const isMac = /Mac/.test(navigator.platform);
+/** This session's token, which the server wants for the WebSocket and images. */
+const token = new URLSearchParams(location.search).get('t') ?? '';
 
 let zoom = 1;
 let charW = 9;
@@ -91,6 +93,9 @@ function draw(): void {
             case 'text':
                 drawText(cmd[1], cmd[2], cmd[3], cmd[4]);
                 break;
+            case 'image':
+                drawImage(cmd);
+                break;
             case 'poly': {
                 const [, points, color] = cmd;
                 ctx.beginPath();
@@ -158,6 +163,40 @@ function drawText(x: number, y: number, text: string, color: string): void {
         col++;
     }
     if (run !== '') ctx.fillText(run, x + runCol * charW, mid);
+}
+
+/** Images by address, loaded once; drawing waits for them to arrive. */
+const images = new Map<string, HTMLImageElement>();
+
+function drawImage(cmd: Extract<DrawCmd, ['image', ...unknown[]]>): void {
+    const [, x, y, w, h, src, fit] = cmd;
+    let img = images.get(src);
+    if (!img) {
+        img = new Image();
+        img.addEventListener('load', queueDraw);
+        img.addEventListener('error', queueDraw);
+        img.src = `${src}&t=${encodeURIComponent(token)}`;
+        images.set(src, img);
+    }
+    if (!img.complete) return;
+    if (img.naturalWidth === 0) {
+        drawText(x + charW, y + charW, "Can't show this image", '#e06c75');
+        return;
+    }
+    if (fit) {
+        // Shrink to fit, keeping the aspect ratio; small images keep their size.
+        const scale = Math.min(1, w / img.naturalWidth, h / img.naturalHeight);
+        const dw = img.naturalWidth * scale;
+        const dh = img.naturalHeight * scale;
+        ctx.imageSmoothingEnabled = true;
+        ctx.imageSmoothingQuality = 'high';
+        ctx.drawImage(img, x + (w - dw) / 2, y + (h - dh) / 2, dw, dh);
+        return;
+    }
+    // Enlarged a lot, show the pixels rather than blur them.
+    ctx.imageSmoothingEnabled = w < img.naturalWidth * 2;
+    ctx.imageSmoothingQuality = 'high';
+    ctx.drawImage(img, x, y, w, h);
 }
 
 function drawDisconnected(): void {
@@ -285,8 +324,9 @@ canvas.addEventListener(
     'wheel',
     (e) => {
         e.preventDefault();
-        if (e.ctrlKey) return; // Pinch zoom.
-        send({ t: 'wheel', x: e.clientX, y: e.clientY, delta: e.deltaY, mode: e.deltaMode });
+        // A trackpad pinch arrives as Ctrl with the wheel.
+        const zoom = e.ctrlKey || e.metaKey;
+        send({ t: 'wheel', x: e.clientX, y: e.clientY, delta: e.deltaY, dx: e.deltaX, mode: e.deltaMode, zoom });
     },
     { passive: false },
 );
@@ -306,7 +346,6 @@ window.addEventListener('beforeunload', (e) => {
 // ----- Connection ------------------------------------------------------------------------------
 
 function connect(): void {
-    const token = new URLSearchParams(location.search).get('t') ?? '';
     const ws = new WebSocket(`ws://${location.host}/ws?t=${encodeURIComponent(token)}`);
     socket = ws;
     ws.addEventListener('open', () => resize());

@@ -6,12 +6,14 @@ import * as fs from 'node:fs';
 import * as path from 'node:path';
 
 import { Clipboard } from '../clipboard';
+import { ImageInfo } from '../image';
 import { displayName, expandTilde } from '../paths';
 import * as autopairs from './autopairs';
 import { Buffer, Line, Pos, isWhitespace, order, pos } from './buffer';
 import * as buffers from './buffers';
 import { BufferSlot } from './buffers';
 import { Action, Command, FindKind, parse } from './command';
+import { IMAGE_READONLY } from './errors';
 import { runEx } from './ex';
 import { KeyInput, ch, charOf, ctrl, isCharKey, keyEq, keyIs, keyToString, plain } from './keys';
 import * as motion from './motion';
@@ -158,6 +160,8 @@ export class Editor {
     alternate: number | undefined;
     /** The most recent yank, for the UI to flash. */
     yankFlash: Range | undefined;
+    /** Set when the active buffer is an image, which can't be changed. */
+    image: ImageInfo | undefined;
     /** Called after a buffer is written to `path`. */
     onWrite: ((path: string) => void) | undefined;
     /** Runs a user command (`:Name args`, a name starting with a capital).
@@ -445,6 +449,10 @@ export class Editor {
 
     private runCommand(cmd: Command, keys: KeyInput[]): void {
         const change = mayChange(cmd.action);
+        if (change && this.image) {
+            this.setError(IMAGE_READONLY);
+            return;
+        }
         const fromVisual = isVisual(this.mode);
         const version = this.buffer.version();
         if (change && this.undoPending === undefined) this.undoPending = this.snapshot();
