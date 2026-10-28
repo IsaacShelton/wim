@@ -86,6 +86,11 @@ const ONE_DARK = {
     GIT_MODIFIED: '#d19a66',
     GIT_CONFLICT: '#e06c75',
 
+    // Lines changed from git's copy, at the left of the gutter.
+    GIT_ADD: '#98c379',
+    GIT_CHANGE: '#61afef',
+    GIT_DELETE: '#e06c75',
+
     /** The terminal's 16 colors: black, red, green, yellow, blue, magenta,
      * cyan and white, then their bright forms. */
     ANSI: [
@@ -176,6 +181,10 @@ const NORD: Theme = {
     GIT_STAGED: '#D8DEE9',
     GIT_MODIFIED: '#EBCB8B', // NvimTreeGitDirty
     GIT_CONFLICT: '#D8DEE9',
+
+    GIT_ADD: '#A3BE8C', // GitSignsAdd
+    GIT_CHANGE: '#EBCB8B', // GitSignsChange
+    GIT_DELETE: '#BF616A', // GitSignsDelete
 
     // Nord's terminal colors.
     ANSI: [

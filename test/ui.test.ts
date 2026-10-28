@@ -13,8 +13,11 @@ import { test } from 'node:test';
 
 import { AppOptions, WimApp } from '../src/app';
 import { MemoryClipboard } from '../src/clipboard';
+import { defaultConfig } from '../src/config';
 import { parseKeys } from '../src/editor/keys';
 import { FileTree } from '../src/filetree';
+import { Glide } from '../src/glide';
+import { GitDiff, diffLines, lineChanges, readBase } from '../src/gitdiff';
 import { Buffer as TextBuffer } from '../src/editor/buffer';
 import { C, Cache, JS, MARKDOWN, RUST, State, Token, detect, highlightLine, NORMAL } from '../src/highlight';
 import * as icons from '../src/icons';
@@ -23,6 +26,7 @@ import { Keymap } from '../src/keymap';
 import { diagramId } from '../src/markdown';
 import { ServerSpec } from '../src/lsp/servers';
 import { AudioCommand, ClientMessage, DrawCmd } from '../src/protocol';
+import { theme } from '../src/theme';
 import { startServer } from '../src/server';
 
 function tempDir(name: string): string {
@@ -361,6 +365,88 @@ test('file tree colors names by git status', (t) => {
     tree.refreshGitStatus();
     assert.equal(status('src/a.rs'), 'Staged');
     fs.rmSync(root, { recursive: true });
+});
+
+test('lines are diffed into hunks', () => {
+    assert.deepEqual(diffLines(['a', 'b', 'c'], ['a', 'b', 'c']), []);
+    assert.deepEqual(diffLines(['a', 'b', 'c'], ['a', 'x', 'c']), [[1, 2, 1, 2]]);
+    assert.deepEqual(diffLines(['a', 'b', 'c', 'd'], ['x', 'a', 'c', 'd', 'y']), [[0, 0, 0, 1], [1, 2, 2, 2], [4, 4, 4, 5]]);
+    assert.deepEqual(diffLines([], ['a']), [[0, 0, 0, 1]]);
+});
+
+test('each line is marked as added, changed or next to removed lines', () => {
+    const changes = (base: string, current: string) => lineChanges(base.split(''), current.split(''));
+    assert.deepEqual(changes('abc', 'abxc'), [undefined, undefined, 'Added', undefined]);
+    assert.deepEqual(changes('abc', 'axc'), [undefined, 'Modified', undefined]);
+    assert.deepEqual(changes('abc', 'ac'), ['Deleted', undefined], 'on the line above');
+    assert.deepEqual(changes('abc', 'bc'), ['DeletedAbove', undefined], 'removed from the top');
+    // Two lines for one: one changed, one added.
+    assert.deepEqual(changes('abc', 'axyc'), [undefined, 'Modified', 'Added', undefined]);
+    assert.deepEqual(changes('', 'ab'), ['Added', 'Added'], 'a file git doesn\'t track yet');
+});
+
+test('git changes are against the index, and follow edits', (t) => {
+    const root = tempDir('gitdiff');
+    const git = (...args: string[]) => spawnSync('git', ['-C', root, '-c', 'user.name=t', '-c', 'user.email=t@t', ...args]);
+    if (git('init', '-q').status !== 0) {
+        t.skip('git is not available');
+        return;
+    }
+    const file = path.join(root, 'a.txt');
+    fs.writeFileSync(file, 'one\r\ntwo\r\nthree\r\n');
+    fs.writeFileSync(path.join(root, '.gitignore'), '*.log\n');
+    fs.writeFileSync(path.join(root, 'new.txt'), 'n\n');
+    fs.writeFileSync(path.join(root, 'x.log'), 'l\n');
+    git('add', 'a.txt', '.gitignore');
+    git('commit', '-q', '-m', 'first');
+    assert.deepEqual(readBase(file), ['one', 'two', 'three']);
+    assert.deepEqual(readBase(path.join(root, 'new.txt')), [], 'untracked: every line is new');
+    assert.equal(readBase(path.join(root, 'x.log')), undefined, 'ignored');
+    const outside = tempDir('gitdiff-outside');
+    assert.equal(readBase(path.join(outside, 'b.txt')), undefined, 'outside a repository');
+
+    let reads = 0;
+    const diff = new GitDiff((p) => (reads++, readBase(p)));
+    const buf = TextBuffer.fromText('one\ntwo\nthree\n');
+    assert.deepEqual(diff.lineChanges(file, buf), [undefined, undefined, undefined]);
+    buf.replaceLine(1, Array.from('TWO'));
+    assert.deepEqual(diff.lineChanges(file, buf), [undefined, 'Modified', undefined], 'as typed, before writing');
+    assert.equal(reads, 1, "git's copy is kept");
+    // Staged, the change is no longer marked.
+    fs.writeFileSync(file, buf.toFileText());
+    git('add', 'a.txt');
+    diff.invalidate();
+    assert.deepEqual(diff.lineChanges(file, buf), [undefined, undefined, undefined]);
+    assert.equal(diff.lineChanges(undefined, buf), undefined, 'no file');
+    fs.rmSync(root, { recursive: true });
+    fs.rmSync(outside, { recursive: true });
+});
+
+test('changed lines are marked at the left of the gutter', (t) => {
+    const root = tempDir('gitdiff-app');
+    const git = (...args: string[]) => spawnSync('git', ['-C', root, '-c', 'user.name=t', '-c', 'user.email=t@t', ...args]);
+    if (git('init', '-q').status !== 0) {
+        t.skip('git is not available');
+        return;
+    }
+    const file = path.join(root, 'a.txt');
+    fs.writeFileSync(file, 'one\ntwo\n');
+    git('add', 'a.txt');
+    git('commit', '-q', '-m', 'first');
+    const cwd = process.cwd();
+    try {
+        const h = harness(file);
+        const marks = () => h.frames[h.frames.length - 1].filter((c) => c[0] === 'rect' && c[3] === 2 && [theme.GIT_ADD, theme.GIT_CHANGE].includes(c[5] as string));
+        assert.equal(marks().length, 0);
+        h.type('onew<Esc>');
+        const [added] = marks();
+        assert.ok(added, 'a mark for the new line');
+        assert.equal(added[5], theme.GIT_ADD);
+        assert.equal(added[2], 20, 'beside the second line');
+    } finally {
+        process.chdir(cwd);
+        fs.rmSync(root, { recursive: true });
+    }
 });
 
 test('dd in the tree deletes after asking', () => {
@@ -1280,6 +1366,70 @@ test('rendered Markdown shows images and asks the window to draw diagrams', () =
         h.send({ t: 'mouse', kind: 'down', x: x + 5, y: y + 5 });
         h.send({ t: 'mouse', kind: 'up', x: x + 5, y: y + 5 });
         assert.equal(h.app.editor.filePath, path.join(dir, 'attachments', 'pic.png'));
+    } finally {
+        process.chdir(cwd);
+        fs.rmSync(dir, { recursive: true });
+    }
+});
+
+test('a glide closes on its target quickly, and starts at most a set gap away', () => {
+    const g = new Glide(20);
+    assert.equal(g.step(0, 0), 0, 'the first target is where it starts');
+    assert.equal(g.moving, false);
+    const first = g.step(10, 1000);
+    assert.ok(first > 0 && first < 10, `moved part way: ${first}`);
+    assert.ok(g.moving);
+    const later = g.step(10, 1040);
+    assert.ok(later > first && later < 10, `closer: ${later}`);
+    assert.equal(g.step(10, 2000), 10, 'arrives');
+    assert.equal(g.moving, false);
+    // A long jump glides only its last part.
+    assert.ok(g.step(1000, 3000, 5) >= 995);
+    g.reset();
+    assert.equal(g.step(-7, 4000), -7, 'a reset jumps');
+});
+
+test('with smooth scrolling and caret, the text and the caret glide to their place', async () => {
+    const dir = tempDir('smooth');
+    const file = path.join(dir, 'long.txt');
+    fs.writeFileSync(file, Array.from({ length: 200 }, (_, i) => `line ${i}`).join('\n'));
+    const cwd = process.cwd();
+    try {
+        const lineYs = (cmds: DrawCmd[]): number[] =>
+            cmds.filter((c): c is Extract<DrawCmd, ['text', ...unknown[]]> => c[0] === 'text' && /^line \d+$/.test(c[3])).map((c) => c[2]);
+        const caret = (cmds: DrawCmd[]): number[] => {
+            const r = cmds.find((c) => c[0] === 'rect' && c[5] === theme.CURSOR);
+            return r ? [r[1] as number, r[2] as number] : [];
+        };
+        const settle = (): Promise<void> => new Promise((resolve) => setTimeout(resolve, 400));
+
+        // Off (the default), a page down is drawn in place at once.
+        const plain = harness(file);
+        plain.type('<C-f>');
+        const count = plain.frames.length;
+        assert.ok(lineYs(plain.frames[count - 1]).every((y) => y % 20 === 0));
+        await settle();
+        assert.equal(plain.frames.length, count, 'no frames after');
+
+        const config = { ...defaultConfig(), editor: { smoothCaret: true, smoothScroll: true } };
+        const h = harness(file, [], { config });
+        const ed = h.app.editor;
+        h.type('<C-f>');
+        const last = (): DrawCmd[] => h.frames[h.frames.length - 1];
+        assert.ok(ed.scrollTop > 0);
+        assert.ok(lineYs(last()).some((y) => y % 20 !== 0), 'the text is on its way');
+        const [, caretY] = caret(last());
+        const target = (ed.cursor.line - ed.scrollTop) * 20;
+        assert.notEqual(caretY, target, 'so is the caret');
+        await settle();
+        assert.ok(lineYs(last()).every((y) => y % 20 === 0), 'the text has arrived');
+        assert.match(h.text(), new RegExp(`^line ${ed.scrollTop}$`, 'm'));
+        assert.equal(caret(last())[1], target, 'and the caret');
+        // Moving the caret glides it along the line too.
+        h.type('$');
+        const [x] = caret(last());
+        await settle();
+        assert.ok(caret(last())[0] > x, 'it went on to the end');
     } finally {
         process.chdir(cwd);
         fs.rmSync(dir, { recursive: true });

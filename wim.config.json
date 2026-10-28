@@ -10,5 +10,9 @@
         "defaultPreset": "high",
         "cacheMinutes": 60
     },
-    "terminal": {}
+    "terminal": {},
+    "editor": {
+        "smoothCaret": true,
+        "smoothScroll": true
+    }
 }

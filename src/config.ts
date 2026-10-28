@@ -37,6 +37,13 @@ export interface Config {
         /** The shell to run (by default zsh, or PowerShell on Windows). */
         shell?: string;
     };
+    editor: {
+        /** Whether the caret glides to where it moves instead of jumping. */
+        smoothCaret: boolean;
+        /** Whether the text glides when it scrolls (`<C-d>`, `<C-u>`, the
+         * mouse wheel, ...) instead of jumping. */
+        smoothScroll: boolean;
+    };
 }
 
 export const DEFAULT_CONFIG: Config = {
@@ -52,6 +59,10 @@ export const DEFAULT_CONFIG: Config = {
         cacheMinutes: 60,
     },
     terminal: {},
+    editor: {
+        smoothCaret: false,
+        smoothScroll: false,
+    },
 };
 
 /** A fresh copy of the defaults. */
@@ -137,6 +148,18 @@ export function parseConfig(text: string): { config: Config; warnings: string[] 
     } else if (terminal && terminal.shell !== undefined) {
         if (typeof terminal.shell === 'string' && terminal.shell !== '') config.terminal.shell = terminal.shell;
         else warn('terminal.shell', 'a shell program');
+    }
+
+    const editor = root.editor;
+    if (editor !== undefined && !isObject(editor)) {
+        warn('editor', 'an object');
+    } else if (editor) {
+        for (const key of ['smoothCaret', 'smoothScroll'] as const) {
+            const value = editor[key];
+            if (value === undefined) continue;
+            if (typeof value === 'boolean') config.editor[key] = value;
+            else warn(`editor.${key}`, 'true or false');
+        }
     }
     return { config, warnings };
 }

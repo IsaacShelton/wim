@@ -62,7 +62,8 @@ default, and a mistake in it is reported at startup and ignored.
         "defaultPreset": "high",
         "cacheMinutes": 60
     },
-    "terminal": { "shell": "zsh" }
+    "terminal": { "shell": "zsh" },
+    "editor": { "smoothCaret": false, "smoothScroll": false }
 }
 ```
 
@@ -74,6 +75,8 @@ default, and a mistake in it is reported at startup and ignored.
 | `claude.defaultPreset` | The preset new sessions start with (default `high`; `null` keeps Claude Code's own settings) |
 | `claude.cacheMinutes` | How long the prompt cache lasts after a request, for the cache indicator (default 60) |
 | `terminal.shell` | The shell the terminal runs (default `zsh`, or `powershell.exe` on Windows) |
+| `editor.smoothCaret` | Whether the caret glides quickly to where it moves instead of jumping (default `false`) |
+| `editor.smoothScroll` | Whether the text glides when it scrolls (`<C-d>`, `<C-u>`, `<C-f>`, `<C-b>`, `zz`, the mouse wheel, ...) instead of jumping (default `false`) |
 
 ## Layout
 
@@ -103,6 +106,7 @@ default, and a mistake in it is reported at startup and ignored.
 | `src/links.ts` | Links between Markdown files: what a link points at, and which file and line that is |
 | `src/audio.ts` | Which files are sounds, and the player's state |
 | `src/config.ts` | The settings file, `wim.config.json` |
+| `src/glide.ts` | Smooth motion for the caret and scrolling |
 | `src/terminal.ts` | The integrated terminal: a shell on a pseudo-terminal (made by `script`), its screen kept by @xterm/headless |
 | `src/lineterminal.ts` | The line-based terminal used where there is no `script` (Windows) |
 | `src/agent/` | The agents panel: `backend.ts` (Claude Code through the Claude Agent SDK), `session.ts` (one session: its conversation, prompts and settings), `transcript.ts` (the conversation laid out as rows), `input.ts` (the prompt), `panel.ts` (sessions, keys, mouse and painting) |

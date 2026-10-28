@@ -21,6 +21,8 @@ import { isCmdLine } from './editor/mode';
 import { Range } from './editor/range';
 import { lineMatches } from './editor/search';
 import { FileTree, GitStatus } from './filetree';
+import { Glide } from './glide';
+import { GitDiff, LineChange } from './gitdiff';
 import { GrepMatch, Search, findFiles, liveGrep } from './finder';
 import { ImageInfo, formatBytes, imageUrl, isImage, readImageInfo } from './image';
 import { ImageView, Placement, Size } from './imageview';
@@ -59,11 +61,18 @@ const FLASH_DURATION = 300;
 const DRAG_THRESHOLD = 4;
 /** Time between frames of an animation, in ms. */
 const FRAME = 16;
+/** How quickly the caret and the text glide (with `editor.smoothCaret` and
+ * `editor.smoothScroll`): each closes most of the way in about three times
+ * this, in ms. */
+const CARET_GLIDE = 20;
+const SCROLL_GLIDE = 40;
 /** How long a clicked button looks pressed, in ms. */
 const BUTTON_PRESS = 150;
 /** Width of the sign column for diagnostics, in characters (shown for files
  * a language server handles, like Neovim's `signcolumn=yes`). */
 const SIGN_COLS = 2;
+/** Width of the git change marks at the left of the gutter, in pixels. */
+const GIT_MARK_WIDTH = 2;
 /** Columns the status line keeps for the file name before giving it all
  * to language server progress. */
 const MIN_NAME = 20;
@@ -120,6 +129,14 @@ interface Layout {
 }
 
 type Focus = 'Editor' | 'Tree' | 'Agents' | 'Terminal';
+
+/** Where the active window's view and caret are shown: the top line, and
+ * the caret's line and display column. Fractional while they glide. */
+interface Shown {
+    top: number;
+    line: number;
+    col: number;
+}
 
 interface Flash {
     range: Range;
@@ -178,6 +195,8 @@ export class WimApp {
     /** Files may have changed since the tree last asked git for their
      * status: written, changed by an agent, or by commands in the terminal. */
     private gitStale = false;
+    /** Lines changed from git's copy of each file, for the gutter. */
+    private readonly gitDiff = new GitDiff();
     /** Where the keys went in the last frame. */
     private lastFocus: Focus = 'Editor';
     private flash: Flash | undefined;
@@ -209,6 +228,14 @@ export class WimApp {
     private refreshQueued = false;
     /** Draws the next frame while an image glides to a new zoom or place. */
     private imageTimer: NodeJS.Timeout | undefined;
+    /** The active window's view and caret on their way to where they are
+     * (with smooth scrolling or caret), for that window and buffer. */
+    private readonly topGlide = new Glide(SCROLL_GLIDE);
+    private readonly lineGlide = new Glide(CARET_GLIDE);
+    private readonly colGlide = new Glide(CARET_GLIDE);
+    private glidesFor: { win: Win; bufferId: number } | undefined;
+    /** Draws the next frame while the view or caret glides. */
+    private glideTimer: NodeJS.Timeout | undefined;
     /** An image zoom button just clicked, drawn pressed for a moment. */
     private pressedButton: ImageAction | undefined;
     private pressedTimer: NodeJS.Timeout | undefined;
@@ -287,7 +314,7 @@ export class WimApp {
         const lspWrite = this.editor.onWrite;
         this.editor.onWrite = (p) => {
             lspWrite?.(p);
-            this.gitStale = true;
+            this.gitChanged();
         };
         if (dirError !== undefined) this.editor.setError(dirError);
         const root = currentDir();
@@ -700,6 +727,7 @@ export class WimApp {
     /** Stop the language servers (Wim is exiting). */
     dispose(): void {
         if (this.imageTimer) clearTimeout(this.imageTimer);
+        if (this.glideTimer) clearTimeout(this.glideTimer);
         if (this.pressedTimer) clearTimeout(this.pressedTimer);
         this.completion.close();
         this.signature.close();
@@ -1431,7 +1459,7 @@ export class WimApp {
             }
         }
         if (reloaded.length > 0) this.editor.setMessage(`Reloaded ${reloaded.join(', ')}, changed by an agent`);
-        this.gitStale = true;
+        this.gitChanged();
         this.refresh();
     }
 
@@ -1578,11 +1606,18 @@ export class WimApp {
         if (this.editor.mode !== 'Normal' || this.editor.pending.length > 0) this.editor.handleKey(plain('Esc'));
     }
 
+    /** Files may have changed in git: written, changed by an agent, or by
+     * commands in the terminal. */
+    private gitChanged(): void {
+        this.gitStale = true;
+        this.gitDiff.invalidate();
+    }
+
     /** Keep the tree rooted at the working directory and showing the current
      * file. */
     private syncTree(layout: Layout): void {
         // Leaving the terminal or the agents panel, files may have changed.
-        if (this.focus !== this.lastFocus && (this.lastFocus === 'Terminal' || this.lastFocus === 'Agents')) this.gitStale = true;
+        if (this.focus !== this.lastFocus && (this.lastFocus === 'Terminal' || this.lastFocus === 'Agents')) this.gitChanged();
         this.lastFocus = this.focus;
         if (!this.treeVisible) return;
         const cwd = currentDir();
@@ -1762,6 +1797,7 @@ export class WimApp {
             this.clearMapTimer();
             if (this.flashTimer) clearTimeout(this.flashTimer);
             if (this.imageTimer) clearTimeout(this.imageTimer);
+            if (this.glideTimer) clearTimeout(this.glideTimer);
             if (this.pressedTimer) clearTimeout(this.pressedTimer);
             this.dispose();
             this.opts.onQuit();
@@ -1791,12 +1827,20 @@ export class WimApp {
                 this.render();
             }, 16);
         }
+        const shown = this.shown(layout);
+        if (this.gliding() && !this.glideTimer) {
+            this.glideTimer = setTimeout(() => {
+                this.glideTimer = undefined;
+                this.render();
+            }, FRAME);
+        }
         const modified = this.editor.isModified() ? ' [+]' : '';
         const title = `${this.editor.fileName()}${modified} - Wim`;
         const dirty = this.editor.firstModifiedBuffer() !== undefined;
         const painter = new Painter(this.editor, layout, {
             metrics: this.metrics,
-            panes: this.panes(layout),
+            panes: this.panes(layout, shown),
+            shown,
             diagnosticCounts: this.lsp.counts(this.editor.filePath),
             lspProgress: this.lsp.progressText(),
             completion: this.completion.visible && this.focus === 'Editor' ? this.completion : undefined,
@@ -1827,6 +1871,34 @@ export class WimApp {
         this.tabHits = painter.tabHits;
         this.badgeHit = painter.badgeHit;
         this.opts.onFrame(title, dirty, cmds);
+    }
+
+    /** Where the active window's view and caret are shown: gliding toward
+     * where they are when smooth scrolling or caret is on, and jumping there
+     * in another window or buffer. A long jump only glides its last screen. */
+    private shown(layout: Layout): Shown {
+        const ed = this.editor;
+        const line = ed.cursor.line;
+        const col = ed.displayCol(line, ed.cursor.col);
+        const win = this.windows.active;
+        const g = this.glidesFor;
+        if (!g || g.win !== win || g.bufferId !== ed.bufferId()) {
+            this.topGlide.reset();
+            this.lineGlide.reset();
+            this.colGlide.reset();
+            this.glidesFor = { win, bufferId: ed.bufferId() };
+        }
+        const now = Date.now();
+        const { smoothCaret, smoothScroll } = this.config.editor;
+        return {
+            top: smoothScroll ? this.topGlide.step(ed.scrollTop, now, layout.rows) : ed.scrollTop,
+            line: smoothCaret ? this.lineGlide.step(line, now, layout.rows) : line,
+            col: smoothCaret ? this.colGlide.step(col, now, layout.cols) : col,
+        };
+    }
+
+    private gliding(): boolean {
+        return this.topGlide.moving || this.lineGlide.moving || this.colGlide.moving;
     }
 
     private layout(): Layout {
@@ -1874,7 +1946,7 @@ export class WimApp {
     }
 
     /** What each window shows, for painting. */
-    private panes(layout: Layout): Pane[] {
+    private panes(layout: Layout, shown: Shown): Pane[] {
         const ed = this.editor;
         const { charW: cw, lineH: lh } = layout;
         return layout.windows.flatMap((rect): Pane[] => {
@@ -1910,7 +1982,7 @@ export class WimApp {
                 bufferId: win.bufferId,
                 filePath: file,
                 cursor,
-                scrollTop: active ? ed.scrollTop : Math.min(win.scrollTop, last),
+                scrollTop: active ? shown.top : Math.min(win.scrollTop, last),
                 scrollLeft: active ? ed.scrollLeft : win.scrollLeft,
                 selection: active ? ed.selection() : undefined,
                 area: rect.area,
@@ -1920,6 +1992,7 @@ export class WimApp {
                 gutterCols,
                 signCols: this.signCols(file),
                 diagnostics: this.lsp.diagnosticsFor(file, buffer),
+                gitChanges: this.gitDiff.lineChanges(file, buffer),
                 references: active ? this.features.highlights() : [],
                 flash: active ? this.flash : undefined,
                 semantic: (line, chars) => this.lsp.semanticFor(file, line, chars),
@@ -2063,6 +2136,7 @@ interface TextView {
     bufferId: number;
     filePath: string | undefined;
     cursor: Pos;
+    /** The top line; fractional while the text glides. */
     scrollTop: number;
     scrollLeft: number;
     /** Only the active window's. */
@@ -2075,6 +2149,9 @@ interface TextView {
     gutterCols: number;
     signCols: number;
     diagnostics: BufferDiagnostic[];
+    /** How each line differs from git's copy, when the file is in a
+     * repository. */
+    gitChanges: readonly (LineChange | undefined)[] | undefined;
     references: [Pos, Pos][];
     flash: Flash | undefined;
     /** A language server's semantic token spans for a line, if it has them. */
@@ -2124,6 +2201,8 @@ interface PaintState {
     highlightCache: (bufferId: number) => highlight.Cache;
     /** Every window, the active one among them. */
     panes: Pane[];
+    /** Where the active window's view and caret are shown. */
+    shown: Shown;
     /** Diagnostics by severity (1 to 4). */
     diagnosticCounts: number[];
     lspProgress: string | undefined;
@@ -2398,10 +2477,16 @@ class Painter {
             if (to > from) this.rect(rect(colX(from), y, colX(to), y + lh), color);
         };
 
+        // While the text glides, the top line is partly above the area, and
+        // one more line shows at the bottom.
+        const first = Math.floor(v.scrollTop);
+        const offset = (v.scrollTop - first) * lh;
+        const rows = offset > 0 ? v.rows + 1 : v.rows;
+
         // Diagnostics by line, most severe first.
         const lineDiagnostics = new Map<number, BufferDiagnostic[]>();
         for (const d of v.diagnostics) {
-            for (let l = Math.max(d.start.line, v.scrollTop); l <= Math.min(d.end.line, v.scrollTop + v.rows); l++) {
+            for (let l = Math.max(d.start.line, first); l <= Math.min(d.end.line, first + rows); l++) {
                 const list = lineDiagnostics.get(l) ?? [];
                 list.push(d);
                 lineDiagnostics.set(l, list);
@@ -2413,9 +2498,9 @@ class Painter {
         const numbersLeft = area.left + signCols * cw;
 
         this.clip(area);
-        for (let row = 0; row < v.rows; row++) {
-            const line = v.scrollTop + row;
-            const y = area.top + row * lh;
+        for (let row = 0; row < rows; row++) {
+            const line = first + row;
+            const y = area.top + row * lh - offset;
             if (line > buf.lastLine()) {
                 this.text(area.left + TEXT_PADDING, y, '~', theme.TILDE);
                 continue;
@@ -2423,6 +2508,8 @@ class Painter {
             if (line === cursor.line && !selection) {
                 this.rect(rect(area.left, y, area.right, y + lh), theme.CURSOR_LINE);
             }
+            const change = v.gitChanges?.[line];
+            if (change) this.gitMark(area.left, y, change);
 
             // Line number gutter: relative numbers, with the absolute number
             // on the cursor line (Vim's `number` + `relativenumber`).
@@ -2477,6 +2564,24 @@ class Painter {
         this.cmds.push(['unclip']);
     }
 
+    /** A line's git change at the left of the gutter: a thin bar beside a
+     * new or changed line, or a tick at the edge where lines were removed
+     * (gitsigns' `│` and `_`). */
+    private gitMark(x: number, y: number, change: LineChange): void {
+        const { charW: cw, lineH: lh } = this.layout;
+        const w = GIT_MARK_WIDTH;
+        switch (change) {
+            case 'Added':
+                return this.rect(rect(x, y, x + w, y + lh), theme.GIT_ADD);
+            case 'Modified':
+                return this.rect(rect(x, y, x + w, y + lh), theme.GIT_CHANGE);
+            case 'Deleted':
+                return this.rect(rect(x, y + lh - w, x + Math.round(cw / 2), y + lh), theme.GIT_DELETE);
+            case 'DeletedAbove':
+                return this.rect(rect(x, y, x + Math.round(cw / 2), y + w), theme.GIT_DELETE);
+        }
+    }
+
     /** Underline a line's diagnostics and show the most severe message after
      * its end (Neovim's `underline` and `virtual_text`). */
     private lineDiagnostics(v: TextView, line: number, y: number, diags: readonly BufferDiagnostic[]): void {
@@ -2507,7 +2612,7 @@ class Painter {
         const area = layout.textArea;
         const screen = (p: Pos): [number, number] => [
             layout.textLeft + (ed.displayCol(p.line, p.col) - ed.scrollLeft) * layout.charW,
-            area.top + (p.line - ed.scrollTop) * layout.lineH,
+            area.top + (p.line - this.st.shown.top) * layout.lineH,
         ];
         const menu = this.st.completion;
         const anchor = menu?.anchor();
@@ -2563,14 +2668,25 @@ class Painter {
         const { ed, layout } = this;
         const mode = ed.mode;
         const cursor = ed.cursor;
-        if (isCmdLine(mode) || cursor.line < ed.scrollTop || cursor.line >= ed.scrollTop + layout.rows) return;
+        const area = layout.textArea;
+        // Where the caret is shown, which glides behind the cursor with
+        // `editor.smoothCaret`.
+        const shown = this.st.shown;
+        const y = area.top + (shown.line - shown.top) * layout.lineH;
+        if (isCmdLine(mode) || y + layout.lineH <= area.top || y >= area.bottom) return;
         const dcol = ed.displayCol(cursor.line, cursor.col);
         if (dcol < ed.scrollLeft) return;
         const c = ed.buffer.charAt(cursor) ?? ' ';
         const width = c === '\t' ? ed.displayCol(cursor.line, cursor.col + 1) - dcol : 1;
-        const x = layout.textLeft + (dcol - ed.scrollLeft) * layout.charW;
-        const y = layout.textArea.top + (cursor.line - ed.scrollTop) * layout.lineH;
+        const x = layout.textLeft + (shown.col - ed.scrollLeft) * layout.charW;
         const cell = rect(x, y, x + layout.charW * width, y + layout.lineH);
+        this.clip(area);
+        this.paintCaret(cell, c);
+        this.cmds.push(['unclip']);
+    }
+
+    private paintCaret(cell: Rect, c: string): void {
+        const mode = this.ed.mode;
         if (this.st.focus !== 'Editor') {
             // Hollow cursor while the file tree or the Claude panel has focus.
             this.cmds.push(['stroke', cell.left, cell.top, cell.right - cell.left, cell.bottom - cell.top, theme.CURSOR]);
@@ -2578,11 +2694,11 @@ class Painter {
         }
         if (mode === 'Insert') {
             this.rect(rect(cell.left, cell.top, cell.left + 2, cell.bottom), theme.CURSOR);
-        } else if (mode === 'Replace' || ed.pending.length > 0) {
+        } else if (mode === 'Replace' || this.ed.pending.length > 0) {
             this.rect(rect(cell.left, cell.bottom - 3, cell.right, cell.bottom), theme.CURSOR);
         } else {
             this.rect(cell, theme.CURSOR);
-            if (!isWhitespace(c)) this.text(x, y, c, theme.BG);
+            if (!isWhitespace(c)) this.text(cell.left, cell.top, c, theme.BG);
         }
     }
 
