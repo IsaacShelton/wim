@@ -28,6 +28,12 @@ export type Command =
     | 'ToggleTheme'
     /** A Markdown file between editing it and reading it rendered. */
     | 'ToggleMarkdownView'
+    /** `gf`: follow the Markdown link under the cursor, or else open the
+     * file whose name is under it, as in Vim. */
+    | 'FollowLink'
+    /** Enter: follow the Markdown link under the cursor, or else move down
+     * as usual. */
+    | 'EnterOrFollowLink'
     /** Telescope's `find_files`. */
     | 'FindFiles'
     /** Telescope's `live_grep`. */
@@ -61,7 +67,9 @@ export type Rhs =
 /** Whether a mapping makes sense while the file tree has focus: window
  * commands, `:` commands and project-wide pickers do, editing keys don't. */
 export function worksInTree(rhs: Rhs): boolean {
-    if (rhs.t === 'Command') return rhs.command !== 'InsertCharBefore' && rhs.command !== 'InsertCharAfter';
+    if (rhs.t === 'Command') {
+        return !['InsertCharBefore', 'InsertCharAfter', 'FollowLink', 'EnterOrFollowLink'].includes(rhs.command);
+    }
     if (rhs.t === 'Lsp') return rhs.action.t === 'WorkspaceSymbols' || rhs.action.t === 'ListDiagnostics';
     return rhs.keys.length > 0 && keyIs(rhs.keys[0], ':');
 }
@@ -147,6 +155,9 @@ export class Keymap {
             [N, '<leader>tt', command('ToggleTerminal')],
             [N, '<leader>th', command('ToggleTheme')],
             [N, '<leader>m', command('ToggleMarkdownView')],
+            // Following links in Markdown, as obsidian.nvim maps them.
+            [N, 'gf', command('FollowLink')],
+            [N, '<CR>', command('EnterOrFollowLink')],
             // Subword motions (nvim-spider).
             [NVO, '<leader>w', plug('SubwordW')],
             [NVO, '<leader>e', plug('SubwordE')],

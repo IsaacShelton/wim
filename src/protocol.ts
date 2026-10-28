@@ -10,14 +10,19 @@ export type ClientMessage =
     /** Cmd shortcuts (Ctrl+Shift on Windows and Linux). `agents` (Cmd+L)
      * shows or hides the Claude Code panel, and `terminal` (Cmd+J) the shell. */
     | { t: 'command'; name: 'save' | 'copy' | 'cut' | 'paste' | 'agents' | 'terminal' }
-    | { t: 'mouse'; kind: 'down' | 'move' | 'up'; x: number; y: number }
+    /** `mod` is Cmd held (Ctrl on Windows and Linux), as for following a
+     * link. */
+    | { t: 'mouse'; kind: 'down' | 'move' | 'up'; x: number; y: number; mod?: boolean }
     /** A wheel event's deltas, with the DOM's `deltaMode`. `zoom` is set for
      * Ctrl or Cmd with the wheel, and for pinching on a trackpad. */
     | { t: 'wheel'; x: number; y: number; delta: number; dx: number; mode: number; zoom: boolean }
     /** The user asked to close the window. */
     | { t: 'close' }
     /** How the window's sound player is doing. */
-    | ({ t: 'audio' } & AudioReport);
+    | ({ t: 'audio' } & AudioReport)
+    /** How big the window drew a Mermaid diagram, in CSS pixels, or why it
+     * couldn't. */
+    | { t: 'diagram'; id: string; width: number; height: number; error?: string };
 
 /** Messages from Node to the window. */
 export type ServerMessage =
@@ -60,5 +65,9 @@ export type DrawCmd =
      * the box, or with `fit` scaled down to fit it if needed (never up) and
      * centered in it. */
     | [op: 'image', x: number, y: number, w: number, h: number, src: string, fit?: boolean]
+    /** A Mermaid diagram, drawn from its source with Mermaid's theme
+     * variables to fill the box. With no width the window only draws it to
+     * say how big it is. */
+    | [op: 'diagram', x: number, y: number, w: number, h: number, id: string, source: string, theme: Record<string, string>]
     | [op: 'clip', x: number, y: number, w: number, h: number]
     | [op: 'unclip'];

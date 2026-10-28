@@ -99,6 +99,8 @@ default, and a mistake in it is reported at startup and ignored.
 | `src/popup.ts` | The completion menu, hover/diagnostic floats and the picker |
 | `src/finder.ts` | Finding files and searching text for the pickers, with ripgrep or without it |
 | `src/image.ts`, `src/imageview.ts` | Which files are images, their format and size, and zooming them |
+| `src/markdown.ts` | Markdown's rendered view: blocks laid out as rows, with their links, images and diagrams |
+| `src/links.ts` | Links between Markdown files: what a link points at, and which file and line that is |
 | `src/audio.ts` | Which files are sounds, and the player's state |
 | `src/config.ts` | The settings file, `wim.config.json` |
 | `src/terminal.ts` | The integrated terminal: a shell process, its output and the prompt |
@@ -216,6 +218,32 @@ zooms in, `-` zooms out and `0` fits the window again. Drag, or press `h`/`j`/`k
 arrow keys, to move it; the middle of the window always stays over the image. Keys and buttons
 glide to the new zoom or place; holding a key keeps going. Enlarged two times or more, pixels
 are drawn sharp. The status line shows the zoom.
+
+## Markdown
+
+`,m` or `:MarkdownPreview` switches a Markdown file between editing it and reading it rendered:
+markup dropped, paragraphs wrapped, code highlighted and tables drawn. `j`/`k`, Ctrl+d/u/f/b,
+Space, `gg` and `G` scroll it; `,m` again goes back to the text at the same place.
+
+**Links** between notes work as in Obsidian, with the working directory as the vault:
+`[[Note]]`, `[[Note#Heading]]`, `[[Note#^block-id]]`, `[[Note|shown text]]`, `[[#Heading]]`
+in the same note, and Markdown links such as `[text](other%20note.md#heading)`. In the text,
+`gf` or Enter on a link follows it, as does Cmd+click (Ctrl+click on Windows and Linux); in the
+rendered view, click it. A note is looked for beside the current one, then from the vault's top,
+then by name anywhere in the vault (the nearest first), so `[[Note]]` finds `notes/Note.md`.
+A note that doesn't exist yet opens as a new buffer beside the current one, made when written
+(`:w`). Following a link from the rendered view opens the note rendered too, and `<C-o>`
+comes back (`<C-i>` goes forward again). Web links (`https:`, `mailto:`) open in the default
+browser. Elsewhere `gf` opens the file whose name is under the cursor, as in Vim.
+
+**Images** on a line of their own, `![alt](pic.png)` or `![[pic.png]]`, are shown in the
+rendered view, shrunk to fit; `![[pic.png|300]]` or `![alt|300](pic.png)` sets the width
+(`300x200` both). Clicking one opens it. Images within text, and those on the web, are shown as
+their names, and their links work.
+
+**Mermaid diagrams** (```` ```mermaid ```` blocks) are drawn in the rendered view in Wim's
+colors, by [Mermaid](https://mermaid.js.org/), which the window loads the first time it shows
+one. A diagram Mermaid can't read shows its error and its source.
 
 ## Split windows
 
@@ -360,6 +388,8 @@ Normal-mode mappings don't apply in the middle of a command, so `f,` still finds
 | `,x` / `,X` / `,K` | Normal | Close this buffer / all buffers / all other buffers |
 | `,p` / `,P` | Normal, Visual | Paste the last yank (`"0p` / `"0P`) |
 | `,d` | Normal, Visual | `dd` |
+| `,m` | Normal | Switch a Markdown file between editing it and reading it rendered (see [Markdown](#markdown)) |
+| `gf` / Enter | Normal | Follow the Markdown link under the cursor (`gf` elsewhere: open the file named under the cursor; Enter elsewhere: as usual) |
 | Option+j / Option+k (`∆` `˚`) | Normal, Visual | `}` / `{` |
 | `[f` / `]f` | Normal, Visual | Jump to the outermost enclosing `{` / `}` |
 | Option+Shift+j / k | Normal | Start Visual Line mode |

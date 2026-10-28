@@ -98,6 +98,9 @@ function draw(): void {
             case 'image':
                 drawImage(cmd);
                 break;
+            case 'diagram':
+                drawDiagram(cmd);
+                break;
             case 'poly': {
                 const [, points, color] = cmd;
                 ctx.beginPath();
@@ -199,6 +202,91 @@ function drawImage(cmd: Extract<DrawCmd, ['image', ...unknown[]]>): void {
     ctx.imageSmoothingEnabled = w < img.naturalWidth * 2;
     ctx.imageSmoothingQuality = 'high';
     ctx.drawImage(img, x, y, w, h);
+}
+
+// ----- Diagrams -----------------------------------------------------------------------
+
+interface Mermaid {
+    initialize(config: object): void;
+    render(id: string, source: string): Promise<{ svg: string }>;
+}
+
+/** Mermaid's script, loaded from Wim's server the first time a diagram is
+ * shown. */
+let mermaid: Promise<Mermaid> | undefined;
+
+function loadMermaid(): Promise<Mermaid> {
+    mermaid ??= new Promise((resolve, reject) => {
+        const script = document.createElement('script');
+        script.src = '/mermaid.js';
+        script.addEventListener('load', () => resolve((globalThis as unknown as { mermaid: Mermaid }).mermaid));
+        script.addEventListener('error', () => reject(new Error("Can't load Mermaid")));
+        document.head.appendChild(script);
+    });
+    return mermaid;
+}
+
+/** Diagrams drawn as images, by id and theme. */
+const diagrams = new Map<string, HTMLImageElement | 'pending' | 'failed'>();
+/** Mermaid draws one diagram at a time. */
+let diagramQueue: Promise<void> = Promise.resolve();
+let diagramCount = 0;
+
+function drawDiagram(cmd: Extract<DrawCmd, ['diagram', ...unknown[]]>): void {
+    const [, x, y, w, h, id, source, theme] = cmd;
+    const key = `${id}:${JSON.stringify(theme)}`;
+    const img = diagrams.get(key);
+    if (img === undefined) {
+        diagrams.set(key, 'pending');
+        diagramQueue = diagramQueue.then(() => renderDiagram(key, id, source, theme));
+        return;
+    }
+    if (typeof img === 'string' || !img.complete || w <= 0) return;
+    ctx.imageSmoothingEnabled = true;
+    ctx.imageSmoothingQuality = 'high';
+    ctx.drawImage(img, x, y, w, h);
+}
+
+async function renderDiagram(key: string, id: string, source: string, theme: Record<string, string>): Promise<void> {
+    try {
+        const m = await loadMermaid();
+        m.initialize({
+            startOnLoad: false,
+            securityLevel: 'strict',
+            suppressErrorRendering: true,
+            theme: 'base',
+            themeVariables: theme,
+            fontFamily: theme.fontFamily,
+            // Labels as SVG text: HTML in an SVG drawn as an image doesn't show
+            // everywhere.
+            htmlLabels: false,
+            flowchart: { htmlLabels: false },
+        });
+        const { svg } = await m.render(`wim-diagram-${diagramCount++}`, source);
+        const doc = new DOMParser().parseFromString(svg, 'image/svg+xml');
+        const root = doc.documentElement as unknown as SVGSVGElement;
+        const box = root.viewBox.baseVal;
+        const width = box && box.width > 0 ? box.width : Number.parseFloat(root.getAttribute('width') ?? '') || 400;
+        const height = box && box.height > 0 ? box.height : Number.parseFloat(root.getAttribute('height') ?? '') || 300;
+        // Drawn at twice the size (or the screen's), so it stays sharp.
+        const scale = Math.max(2, window.devicePixelRatio || 1);
+        root.setAttribute('width', String(width * scale));
+        root.setAttribute('height', String(height * scale));
+        root.removeAttribute('style');
+        const img = new Image();
+        img.src = `data:image/svg+xml;charset=utf-8,${encodeURIComponent(new XMLSerializer().serializeToString(root))}`;
+        await img.decode();
+        diagrams.set(key, img);
+        send({ t: 'diagram', id, width, height });
+    } catch (e) {
+        diagrams.set(key, 'failed');
+        const message = (e as Error)?.message ?? String(e);
+        // Mermaid's message has the line, and a caret under it, which can't
+        // line up here.
+        const lines = message.split('\n').filter((l) => l.trim() !== '' && !/^[-\s]*\^\s*$/.test(l));
+        send({ t: 'diagram', id, width: 0, height: 0, error: lines.join(' ').slice(0, 500) });
+    }
+    queueDraw();
 }
 
 function drawDisconnected(): void {
@@ -314,7 +402,7 @@ window.addEventListener('keydown', (e) => {
 canvas.addEventListener('mousedown', (e) => {
     if (e.button !== 0) return;
     pressed = true;
-    send({ t: 'mouse', kind: 'down', x: e.clientX, y: e.clientY });
+    send({ t: 'mouse', kind: 'down', x: e.clientX, y: e.clientY, mod: isMac ? e.metaKey : e.ctrlKey });
     e.preventDefault();
 });
 

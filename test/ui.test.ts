@@ -11,7 +11,7 @@ import * as path from 'node:path';
 import type { Duplex } from 'node:stream';
 import { test } from 'node:test';
 
-import { WimApp } from '../src/app';
+import { AppOptions, WimApp } from '../src/app';
 import { MemoryClipboard } from '../src/clipboard';
 import { parseKeys } from '../src/editor/keys';
 import { FileTree } from '../src/filetree';
@@ -19,6 +19,7 @@ import { C, MARKDOWN, RUST, State, Token, detect, highlightLine, NORMAL } from '
 import * as icons from '../src/icons';
 import { imageSize } from '../src/image';
 import { Keymap } from '../src/keymap';
+import { diagramId } from '../src/markdown';
 import { ServerSpec } from '../src/lsp/servers';
 import { AudioCommand, ClientMessage, DrawCmd } from '../src/protocol';
 import { startServer } from '../src/server';
@@ -39,7 +40,7 @@ interface Harness {
     text: () => string;
 }
 
-function harness(file?: string, servers: ServerSpec[] = []): Harness {
+function harness(file?: string, servers: ServerSpec[] = [], opts: Partial<AppOptions> = {}): Harness {
     const frames: DrawCmd[][] = [];
     let quit = false;
     const app = new WimApp({
@@ -51,6 +52,7 @@ function harness(file?: string, servers: ServerSpec[] = []): Harness {
         onQuit: () => {
             quit = true;
         },
+        ...opts,
     });
     const send = (msg: ClientMessage): void => app.handleMessage(msg);
     send({ t: 'resize', width: 800, height: 600, charW: 10, lineH: 20 });
@@ -1024,6 +1026,120 @@ test(',m switches a Markdown file between editing it and reading it rendered', (
         assert.match(h.text(), /^ item/m);
         h.type(':e other.txt<CR>,m');
         assert.match(ed.message?.text ?? '', /Not a Markdown file/);
+    } finally {
+        process.chdir(cwd);
+        fs.rmSync(dir, { recursive: true });
+    }
+});
+
+/** Where text was drawn in the last frame. */
+function textAt(h: Harness, text: string): { x: number; y: number } {
+    const cmd = h.frames[h.frames.length - 1].find((c) => c[0] === 'text' && c[3].includes(text));
+    assert.ok(cmd, `"${text}" is drawn`);
+    const [, x, y, s] = cmd as Extract<DrawCmd, ['text', ...unknown[]]>;
+    return { x: x + Array.from(s.slice(0, s.indexOf(text))).length * 10 + 5, y: y + 5 };
+}
+
+test('gf, Enter and Cmd+click follow links between Markdown files, and <C-o> comes back', () => {
+    const dir = tempDir('links');
+    fs.mkdirSync(path.join(dir, 'sub'));
+    fs.writeFileSync(path.join(dir, 'index.md'), 'See [[Other#Part two]] and [b](sub/b%20c.md).\n[[New]] https://x.io [[#Top]]\n# Top\n');
+    fs.writeFileSync(path.join(dir, 'sub', 'Other.md'), '# Other\n\n## Part one\n\n## Part two\ntext\n');
+    fs.writeFileSync(path.join(dir, 'sub', 'b c.md'), 'b\n');
+    const cwd = process.cwd();
+    const opened: string[] = [];
+    try {
+        const h = harness(path.join(dir, 'index.md'), [], { openUrl: (url) => opened.push(url) });
+        const ed = h.app.editor;
+        h.type('fOgf');
+        assert.equal(ed.filePath, path.join(dir, 'sub', 'Other.md'), 'found by name in the vault');
+        assert.equal(ed.cursor.line, 4, 'at the heading');
+        h.type('<C-o>');
+        assert.equal(ed.filePath, path.join(dir, 'index.md'));
+        h.type('0fb<CR>');
+        assert.equal(ed.filePath, path.join(dir, 'sub', 'b c.md'));
+        h.type('<C-o>j0');
+        h.type('<CR>');
+        assert.equal(ed.filePath, path.join(dir, 'New.md'), 'a new note beside this one');
+        assert.match(ed.message?.text ?? '', /\[New\]/);
+        assert.equal(fs.existsSync(path.join(dir, 'New.md')), false, 'made when written');
+        h.type('<C-o>');
+        assert.equal(ed.cursor.line, 1);
+        h.type('0fh');
+        h.type('gf');
+        assert.deepEqual(opened, ['https://x.io']);
+        h.type('$<CR>');
+        assert.equal(ed.cursor.line, 2, 'a heading in the same file');
+        // Enter off a link moves down as usual.
+        h.type('gg0<CR>');
+        assert.equal(ed.cursor.line, 1);
+        // Cmd+click.
+        h.type('gg');
+        const at = textAt(h, 'Other');
+        h.send({ t: 'mouse', kind: 'down', x: at.x, y: at.y });
+        h.send({ t: 'mouse', kind: 'up', x: at.x, y: at.y });
+        assert.equal(ed.filePath, path.join(dir, 'index.md'), 'a plain click only moves the cursor');
+        h.send({ t: 'mouse', kind: 'down', x: at.x, y: at.y, mod: true });
+        h.send({ t: 'mouse', kind: 'up', x: at.x, y: at.y });
+        assert.equal(ed.filePath, path.join(dir, 'sub', 'Other.md'));
+    } finally {
+        process.chdir(cwd);
+        fs.rmSync(dir, { recursive: true });
+    }
+});
+
+test('links in a rendered Markdown view are clicked, and open rendered', () => {
+    const dir = tempDir('md-click');
+    fs.writeFileSync(path.join(dir, 'index.md'), '# Index\n\nGo to [[Other|the other note]].\n');
+    fs.writeFileSync(path.join(dir, 'Other.md'), ['# Other', ...Array.from({ length: 50 }, (_, i) => `line ${i}`), '## End', 'last'].join('\n'));
+    const cwd = process.cwd();
+    try {
+        const h = harness(path.join(dir, 'index.md'));
+        const ed = h.app.editor;
+        h.type(',m');
+        assert.doesNotMatch(h.text(), /\[\[/);
+        const at = textAt(h, 'the other note');
+        h.send({ t: 'mouse', kind: 'down', x: at.x, y: at.y });
+        h.send({ t: 'mouse', kind: 'up', x: at.x, y: at.y });
+        assert.equal(ed.filePath, path.join(dir, 'Other.md'));
+        assert.match(h.text(), /VIEW/, 'rendered, as the note it came from');
+        assert.match(h.text(), /^Other$/m);
+        h.type('<C-o>');
+        assert.equal(ed.filePath, path.join(dir, 'index.md'));
+        assert.match(h.text(), /VIEW/);
+    } finally {
+        process.chdir(cwd);
+        fs.rmSync(dir, { recursive: true });
+    }
+});
+
+test('rendered Markdown shows images and asks the window to draw diagrams', () => {
+    const dir = tempDir('md-media');
+    fs.mkdirSync(path.join(dir, 'attachments'));
+    fs.writeFileSync(path.join(dir, 'attachments', 'pic.png'), pngHeader(200, 100));
+    fs.writeFileSync(path.join(dir, 'notes.md'), ['![[pic.png]]', '', '```mermaid', 'graph LR', '  A --> B', '```', 'after'].join('\n'));
+    const cwd = process.cwd();
+    try {
+        const h = harness(path.join(dir, 'notes.md'));
+        h.type(',m');
+        const cmds = (): DrawCmd[] => h.frames[h.frames.length - 1];
+        const image = cmds().find((c) => c[0] === 'image');
+        assert.ok(image, 'the image is drawn');
+        assert.deepEqual(image.slice(3, 5), [200, 100]);
+        assert.match(String(image[5]), /pic\.png/);
+        const id = diagramId('graph LR\n  A --> B');
+        const measure = cmds().find((c) => c[0] === 'diagram');
+        assert.deepEqual(measure?.slice(3, 7), [0, 0, id, 'graph LR\n  A --> B'], 'drawn first to be sized');
+        assert.match(h.text(), /Drawing the diagram/);
+        h.send({ t: 'diagram', id, width: 300, height: 120 });
+        const diagram = cmds().find((c) => c[0] === 'diagram');
+        assert.deepEqual(diagram?.slice(3, 5), [300, 120]);
+        assert.doesNotMatch(h.text(), /Drawing the diagram/);
+        // Clicking the image opens it.
+        const [, x, y] = image as Extract<DrawCmd, ['image', ...unknown[]]>;
+        h.send({ t: 'mouse', kind: 'down', x: x + 5, y: y + 5 });
+        h.send({ t: 'mouse', kind: 'up', x: x + 5, y: y + 5 });
+        assert.equal(h.app.editor.filePath, path.join(dir, 'attachments', 'pic.png'));
     } finally {
         process.chdir(cwd);
         fs.rmSync(dir, { recursive: true });

@@ -362,3 +362,48 @@ made where a request was open to interpretation.
 17.1 The Nerd Font in use is part of the repo, so it needn't be installed.
      Decided: FiraMono Nerd Font Mono Regular, in `fonts/` with its SIL OFL
      license; an installed Nerd Font is only used if `fonts/` has none.
+
+
+18. Markdown
+------------
+18.1 Links between Markdown files can be followed, as in Obsidian.
+     Decided: the working directory is the vault. Wikilinks (`[[note]]`,
+     `[[note#heading]]`, `[[note#^block]]`, `[[note|text]]`,
+     `[[#heading]]`) and Markdown links (`[text](note.md#heading)`, with
+     `%20` and the like decoded) are followed with `gf` or Enter on them
+     (as obsidian.nvim maps them) and with Cmd+click (Ctrl+click on Windows
+     and Linux), as Obsidian's editor does. Enter not on a link moves down
+     as usual; `gf` not on a link opens the file named under the cursor, as
+     in Vim.
+     Decided: a name is looked for beside the current note, then from the
+     vault's top, then anywhere in the vault by the end of its path, the
+     nearest to the current note first (hidden folders and `node_modules`
+     are left out). A name without an extension is a `.md` note. A note
+     that doesn't exist opens as a new buffer beside the current one, and
+     is made when written. A heading matches by its text (ignoring case
+     and markup) or by its GitHub-style slug; a block by the `^id` ending
+     its line.
+     Decided: following a link is a jump, so `<C-o>` comes back. Web links
+     (`http:`, `https:`, `mailto:`) open in the default browser; other
+     schemes aren't opened.
+18.2 Links are clickable in the rendered view (`,m`).
+     Decided: a click follows a link; a Markdown note opens rendered too.
+     `<C-o>` and `<C-i>` work in the rendered view, and come back to the
+     place being read. Wikilinks show their text, or `note > heading`.
+18.3 Images in Markdown files can be viewed.
+     Decided: in the rendered view, a line of only images (`![alt](src)`,
+     `![[file]]`) shows them, from Wim's server as image buffers are;
+     Obsidian's `|300` or `|300x200` sets the size. They are shrunk to fit
+     the width and the window's height, and a click opens the image. Images
+     inside text, missing ones and web images stay as their names (web
+     images aren't fetched).
+18.4 Mermaid diagrams are shown in the rendered view.
+     Decided: drawn in the window by Mermaid (the `mermaid` npm package, so
+     Wim stays without native code; its script is served by Wim's server
+     and loaded the first time a diagram is shown), with theme variables
+     from Wim's colors. The window says how big each diagram is, so Node
+     lays out rows for it; all diagrams in a file are drawn as soon as it
+     is shown rendered, so the view doesn't move when scrolling to one.
+     Labels are SVG text rather than HTML, as HTML inside an SVG drawn as
+     an image doesn't show in every engine. A diagram Mermaid can't read
+     shows its error and source.

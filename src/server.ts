@@ -155,6 +155,16 @@ export function startServer(opts: ServerOptions): Promise<Server> {
         };
         if (url.pathname === '/') {
             send(200, 'text/html; charset=utf-8', page(opts.fontPath !== undefined));
+        } else if (url.pathname === '/mermaid.js') {
+            // Mermaid, which draws diagrams in Markdown; loaded when one is shown.
+            let script: string;
+            try {
+                script = require.resolve('mermaid/dist/mermaid.min.js');
+            } catch {
+                send(404, 'text/plain', 'Mermaid is not installed: run `npm install`.');
+                return;
+            }
+            fs.readFile(script, (err, data) => (err ? send(500, 'text/plain', String(err)) : send(200, 'text/javascript', data)));
         } else if (url.pathname === '/client.js') {
             fs.readFile(clientScript, (err, data) =>
                 err ? send(500, 'text/plain', 'Wim is not built: run `npm run build`.') : send(200, 'text/javascript', data),

@@ -26,7 +26,8 @@ import { ImageView, Placement, Size } from './imageview';
 import * as highlight from './highlight';
 import * as icons from './icons';
 import { Command, Keymap, LspAction, MapMode, Rhs, TIMEOUT } from './keymap';
-import { MarkdownView, MdRow, isMarkdown } from './markdown';
+import { Link, anchorLine, linkAt, parseHref, resolveLink, vaultFiles } from './links';
+import { MarkdownView, MdRow, Media, MediaHost, diagramTheme, isMarkdown } from './markdown';
 import { Completion } from './lsp/completion';
 import { LspFeatures, severityColor } from './lsp/features';
 import { BufferDiagnostic, LspManager } from './lsp/manager';
@@ -37,6 +38,7 @@ import { Float, Overlay, Picker, PickerItem, PreviewSource, readPreview } from '
 import { AudioCommand, ClientMessage, DrawCmd, TextStyle } from './protocol';
 import { Terminal, TerminalAction } from './terminal';
 import { isThemeName, setTheme, theme, themeName, tokenColor, tokenStyle } from './theme';
+import { openDefaultBrowser } from './window';
 import { Direction, SplitDir, Win, WinRect, Windows } from './windows';
 
 const TEXT_PADDING = 6;
@@ -146,6 +148,9 @@ export interface AppOptions {
     onAudio?: (cmd: AudioCommand) => void;
     /** Called once when Wim should exit. */
     onQuit: () => void;
+    /** Opens a web link from a Markdown file (by default, in the default
+     * browser). */
+    openUrl?: (url: string) => void;
 }
 
 export class WimApp {
@@ -207,6 +212,15 @@ export class WimApp {
     private readonly markdownViews = new Map<number, MarkdownView>();
     /** A `g` typed in a rendered Markdown view, waiting for the second `g`. */
     private markdownG = false;
+    /** How big the window drew each Mermaid diagram, by id, or why it
+     * couldn't; `diagramVersion` counts the answers. */
+    private readonly diagramSizes = new Map<string, { width: number; height: number } | { error: string }>();
+    private diagramVersion = 0;
+    /** Images that Markdown files show, by path, read again when they change. */
+    private readonly imageInfos = new Map<string, ImageInfo | undefined>();
+    /** The working directory's files, for finding a wikilink's note, kept
+     * for a few seconds. */
+    private vault: { root: string; files: string[]; at: number } | undefined;
     /** Claude Code sessions, in the panel on the right. */
     readonly agents: AgentPanel;
     private agentsVisible = false;
@@ -305,7 +319,7 @@ export class WimApp {
                 this.command(msg.name);
                 break;
             case 'mouse':
-                this.mouse(layout, msg.kind, msg.x, msg.y);
+                this.mouse(layout, msg.kind, msg.x, msg.y, msg.mod ?? false);
                 break;
             case 'wheel':
                 this.wheel(layout, msg);
@@ -315,6 +329,10 @@ export class WimApp {
                 break;
             case 'audio':
                 this.player.update(msg);
+                break;
+            case 'diagram':
+                this.diagramSizes.set(msg.id, msg.error !== undefined ? { error: msg.error } : { width: msg.width, height: msg.height });
+                this.diagramVersion++;
                 break;
         }
         this.render();
@@ -556,6 +574,12 @@ export class WimApp {
             case 'ToggleMarkdownView':
                 this.toggleMarkdown();
                 break;
+            case 'FollowLink':
+                if (!this.followLinkAtCursor()) this.gotoFileAtCursor();
+                break;
+            case 'EnterOrFollowLink':
+                if (!this.followLinkAtCursor()) this.dispatch(plain('Enter'));
+                break;
             case 'FindFiles':
                 this.findFiles();
                 break;
@@ -706,9 +730,175 @@ export class WimApp {
     private markdownRows(view: MarkdownView, layout = this.layout()): { rows: MdRow[]; height: number } {
         const area = layout.textArea;
         return {
-            rows: view.rows(this.editor.buffer, markdownCols(area, layout.charW)),
+            rows: view.rows(this.editor.buffer, markdownCols(area, layout.charW), this.mediaHost(this.editor.filePath, area)),
             height: Math.max(Math.floor((area.bottom - area.top) / layout.lineH), 1),
         };
+    }
+
+    /** What a rendered view of `file` in a window's `area` needs for its
+     * images and diagrams. */
+    private mediaHost(file: string | undefined, area: Rect): MediaHost {
+        const { charW, lineH } = this.metrics;
+        const maxHeight = Math.max(area.bottom - area.top - 2 * lineH, lineH);
+        return {
+            key: `${charW}:${lineH}:${maxHeight}:${this.diagramVersion}`,
+            charW,
+            lineH,
+            maxHeight,
+            image: (href) => {
+                const link = parseHref(href);
+                if (link?.t !== 'File' || link.path === '') return undefined;
+                const target = resolveLink(link.path, file, currentDir(), () => this.vaultFiles());
+                if (!target.exists || !isImage(target.file)) return undefined;
+                const info = this.imageInfo(target.file);
+                return info ? { file: target.file, src: imageUrl(target.file, info), width: info.width, height: info.height } : undefined;
+            },
+            diagram: (id) => this.diagramSizes.get(id),
+        };
+    }
+
+    /** An image's format and size, if it can be shown; read again when the
+     * file changes. */
+    private imageInfo(file: string): ImageInfo | undefined {
+        let mtime: number;
+        try {
+            mtime = fs.statSync(file).mtimeMs;
+        } catch {
+            return undefined;
+        }
+        const known = this.imageInfos.get(file);
+        if (known && known.mtime === mtime) return known;
+        let info: ImageInfo | undefined;
+        try {
+            info = readImageInfo(file);
+        } catch {
+            info = undefined;
+        }
+        if (info && (info.width === 0 || info.height === 0)) info = undefined;
+        this.imageInfos.set(file, info);
+        return info;
+    }
+
+    private vaultFiles(): string[] {
+        const root = currentDir();
+        const now = Date.now();
+        if (!this.vault || this.vault.root !== root || now - this.vault.at > VAULT_TTL) {
+            this.vault = { root, files: vaultFiles(root), at: now };
+        }
+        return this.vault.files;
+    }
+
+    /** `gf` and Enter in a Markdown file: follow the link under the cursor.
+     * Returns whether there was one. */
+    private followLinkAtCursor(): boolean {
+        const ed = this.editor;
+        if (this.markdownView() || !isMarkdown(ed.filePath)) return false;
+        const link = linkAt(ed.buffer.line(ed.cursor.line), ed.cursor.col);
+        if (!link) return false;
+        this.followLink(link, false);
+        return true;
+    }
+
+    /** `gf` elsewhere, as in Vim: open the file whose name is under the
+     * cursor, beside this file or in the working directory. */
+    private gotoFileAtCursor(): void {
+        const ed = this.editor;
+        if (this.markdownView()) return;
+        const line = ed.buffer.line(ed.cursor.line);
+        const isName = (c: string | undefined): boolean => c !== undefined && /[^\s"'`<>()[\]{},;|*?]/.test(c);
+        let start = ed.cursor.col;
+        let end = ed.cursor.col;
+        while (start > 0 && isName(line[start - 1])) start--;
+        while (isName(line[end])) end++;
+        const name = expandTilde(line.slice(start, end).join('').replace(/:\d+(:\d+)?$/, ''));
+        if (name === '') {
+            ed.setError('E446: No file name under cursor');
+            return;
+        }
+        const dirs = ed.filePath === undefined ? [currentDir()] : [path.dirname(ed.filePath), currentDir()];
+        const file = dirs.map((d) => path.resolve(d, name)).find((f) => fs.existsSync(f) && !isDirectory(f));
+        if (file === undefined) {
+            ed.setError(`E447: Can't find file "${name}" in path`);
+            return;
+        }
+        this.openAt(file);
+    }
+
+    /** Go where a link from the active buffer leads, as Obsidian does: a URL
+     * opens in the browser, a note opens (made if it doesn't exist yet, when
+     * written), and a heading or block in it is shown. From a rendered view,
+     * a Markdown file opens rendered too. `<C-o>` comes back. */
+    private followLink(link: Link, rendered: boolean): void {
+        const ed = this.editor;
+        if (link.t === 'Url') {
+            if (!/^(https?|mailto):/i.test(link.url)) {
+                ed.setError(`Can't open ${link.url}`);
+                return;
+            }
+            (this.opts.openUrl ?? openDefaultBrowser)(link.url);
+            ed.setMessage(`Opening ${link.url}`);
+            return;
+        }
+        let file = ed.filePath;
+        let exists = true;
+        if (link.path !== '') ({ file, exists } = resolveLink(link.path, ed.filePath, currentDir(), () => this.vaultFiles()));
+        if (file === undefined) return;
+        const from = this.markdownView();
+        if (from) {
+            // Coming back (`<C-o>`) returns to what was being read.
+            const { rows } = this.markdownRows(from);
+            ed.cursor = pos(Math.min(from.sourceAtTop(rows), ed.buffer.lastLine()), 0);
+        }
+        this.openAt(file);
+        if (ed.filePath !== file) return;
+        if (!exists) ed.setMessage(`"${displayName(file)}" [New]: written with :w`);
+        const id = ed.bufferId();
+        let view = this.markdownViews.get(id);
+        if (!view && rendered && isMarkdown(file) && !ed.image && !ed.audio) {
+            view = new MarkdownView();
+            this.markdownViews.set(id, view);
+            this.markdownG = false;
+        }
+        let line: number | undefined;
+        if (link.anchor !== undefined) {
+            const lines = Array.from({ length: ed.buffer.lineCount() }, (_, i) => ed.buffer.lineString(i));
+            line = anchorLine(lines, link.anchor);
+            if (line === undefined) {
+                ed.setError(`No heading or block "${link.anchor}" in ${displayName(file)}`);
+            } else {
+                ed.cursor = pos(line, 0);
+                ed.clampCursor();
+                ed.updateWantCol();
+                ed.scrollTop = Math.max(line - ed.options.scrolloff, 0);
+            }
+        }
+        if (view && (line !== undefined || !exists || view === from)) {
+            const { rows, height } = this.markdownRows(view);
+            view.showSource(rows, height, line ?? 0);
+        }
+    }
+
+    /** A click in a rendered Markdown view: on a link, follow it; on an
+     * image, open it. */
+    private markdownClick(layout: Layout, view: MarkdownView, x: number, y: number): void {
+        const area = layout.textArea;
+        const { rows } = this.markdownRows(view, layout);
+        const cols = markdownCols(area, layout.charW);
+        const at = view.top + Math.floor((y - area.top) / layout.lineH);
+        const row = rows[at];
+        if (!row) return;
+        const x0 = markdownLeft(area, cols, layout.charW) + (row.quote * 2 + row.indent) * layout.charW;
+        if (row.kind === 'media') {
+            let start = at;
+            while (start > 0 && !rows[start].media) start--;
+            const media = rows[start].media;
+            if (media?.t === 'Image' && x >= x0 && x < x0 + media.width) this.openAt(media.file);
+            return;
+        }
+        const col = Math.floor((x - x0) / layout.charW);
+        const hit = row.links?.find((l) => l.from <= col && col < l.to);
+        const link = hit && parseHref(hit.href);
+        if (link) this.followLink(link, true);
     }
 
     /** `,m` and `:MarkdownPreview`: switch a Markdown buffer between editing
@@ -754,6 +944,14 @@ export class WimApp {
         const g = this.markdownG;
         this.markdownG = false;
         const k = key.key;
+        if (key.ctrl && (k === 'o' || k === 'i')) {
+            // The jump list, as after following a link; a jump within this
+            // file shows where it goes.
+            const id = this.editor.bufferId();
+            this.editor.handleKey(key);
+            if (this.editor.bufferId() === id) view.showSource(rows, height, this.editor.cursor.line);
+            return true;
+        }
         if (key.ctrl) {
             const by: Record<string, number> = { d: half, u: -half, f: height, b: -height, e: 1, y: -1 };
             if (k in by) view.scrollBy(rows, height, by[k]);
@@ -1012,7 +1210,7 @@ export class WimApp {
         const rows = Math.max(Math.floor((rect.area.bottom - rect.area.top) / this.metrics.lineH), 1);
         const md = this.markdownViews.get(win.bufferId);
         if (md) {
-            md.scrollBy(md.rows(st.buffer, markdownCols(rect.area, this.metrics.charW)), rows, lines);
+            md.scrollBy(md.rows(st.buffer, markdownCols(rect.area, this.metrics.charW), this.mediaHost(st.filePath, rect.area)), rows, lines);
             return;
         }
         const last = st.buffer.lastLine();
@@ -1351,7 +1549,7 @@ export class WimApp {
         }
     }
 
-    private mouse(layout: Layout, kind: 'down' | 'move' | 'up', x: number, y: number): void {
+    private mouse(layout: Layout, kind: 'down' | 'move' | 'up', x: number, y: number, mod = false): void {
         if (kind === 'down') {
             this.picker?.dispose();
             this.picker = undefined;
@@ -1450,7 +1648,14 @@ export class WimApp {
                 }, BUTTON_PRESS);
                 return;
             }
-            if (!view && !this.editor.audio && !this.markdownView()) this.editor.click(this.posAt(layout, x, y));
+            const md = this.markdownView();
+            if (md) {
+                this.markdownClick(layout, md, x, y);
+            } else if (!view && !this.editor.audio) {
+                this.editor.click(this.posAt(layout, x, y));
+                // Cmd+click (Ctrl+click) follows a link, as in Obsidian.
+                if (mod && this.followLinkAtCursor()) return;
+            }
             this.press = { x, y, dragging: false };
         }
     }
@@ -1637,7 +1842,7 @@ export class WimApp {
             const md = this.markdownViews.get(win.bufferId);
             if (md) {
                 const cols = markdownCols(rect.area, cw);
-                const rows = md.rows(st.buffer, cols);
+                const rows = md.rows(st.buffer, cols, this.mediaHost(file, rect.area));
                 const height = Math.max(Math.floor((rect.area.bottom - rect.area.top) / lh), 1);
                 md.scrollBy(rows, height, 0);
                 return [{ ...pane, content: { t: 'Markdown', rows, top: md.top, cols } }];
@@ -1684,9 +1889,19 @@ const MARKDOWN_MARGIN = 2;
 /** The widest a rendered Markdown view's text gets, in columns. */
 const MARKDOWN_WIDTH = 100;
 
+/** How long the list of files for finding wikilinks' notes is kept, in ms. */
+const VAULT_TTL = 5000;
+
 /** How wide a rendered Markdown view is in a window's area `r`. */
 function markdownCols(r: Rect, cw: number): number {
     return Math.max(Math.min(Math.floor((r.right - r.left) / cw) - 2 * MARKDOWN_MARGIN, MARKDOWN_WIDTH), 1);
+}
+
+/** Where a rendered Markdown view `cols` wide starts in a window's area `r`:
+ * centered in it. */
+function markdownLeft(r: Rect, cols: number, cw: number): number {
+    const areaCols = Math.floor((r.right - r.left) / cw);
+    return r.left + Math.max(Math.floor((areaCols - cols) / 2), MARKDOWN_MARGIN) * cw;
 }
 
 /** Where an image is shown in a window's area `r`: less a margin. */
@@ -1921,13 +2136,36 @@ class Painter {
     }
 
     /** A rendered Markdown view: its rows centered in the window, with bars
-     * for quotes, a background for code and lines for rules. */
+     * for quotes, a background for code, lines for rules, and pictures. */
     private paintMarkdown(area: Rect, rows: readonly MdRow[], top: number, cols: number): void {
         const { charW: cw, lineH: lh } = this.layout;
-        const areaCols = Math.floor((area.right - area.left) / cw);
-        const left = area.left + Math.max(Math.floor((areaCols - cols) / 2), MARKDOWN_MARGIN) * cw;
+        const left = markdownLeft(area, cols, cw);
         const right = left + cols * cw;
         const height = Math.max(Math.floor((area.bottom - area.top) / lh), 1);
+        const diagram = diagramTheme();
+        // The window draws diagrams to say how big they are, so ask for all
+        // of them, in view or not.
+        for (const row of rows) {
+            const m = row.media;
+            if (m?.t === 'Diagram' && m.width === 0) this.cmds.push(['diagram', 0, 0, 0, 0, m.id, m.source, diagram]);
+        }
+        // Pictures, from the first row of each in view (which may start above it).
+        let first = top;
+        while (first > 0 && rows[first]?.kind === 'media' && !rows[first].media) first--;
+        for (let r = first; r < top + height && r < rows.length; r++) {
+            const row = rows[r];
+            const m: Media | undefined = row.media;
+            if (!m || m.width === 0) continue;
+            const x0 = left + (row.quote * 2 + row.indent) * cw;
+            const y = area.top + (r - top) * lh;
+            if (m.t === 'Image') {
+                this.cmds.push(['image', x0, y, m.width, m.height, m.src]);
+            } else {
+                const room = right - x0;
+                const x = x0 + Math.max(Math.floor((room - m.width) / 2), 0);
+                this.cmds.push(['diagram', x, y, m.width, m.height, m.id, m.source, diagram]);
+            }
+        }
         for (let r = 0; r < height; r++) {
             const row = rows[top + r];
             const y = area.top + r * lh;

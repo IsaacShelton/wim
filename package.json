@@ -21,6 +21,7 @@
     "typescript": "~5.9.3"
   },
   "dependencies": {
-    "@anthropic-ai/claude-agent-sdk": "0.3.311"
+    "@anthropic-ai/claude-agent-sdk": "0.3.311",
+    "mermaid": "12.2.0"
   }
 }

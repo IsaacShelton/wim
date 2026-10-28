@@ -1,7 +1,9 @@
 // Markdown's rendered view: a file's blocks laid out as rows of styled text
 // to read rather than edit (markup dropped, paragraphs wrapped, code
-// highlighted, tables drawn), and where the view is scrolled to.
+// highlighted, tables drawn, images and Mermaid diagrams shown), with where
+// its links go, and where the view is scrolled to.
 
+import { createHash } from 'node:crypto';
 import * as path from 'node:path';
 
 import type { Buffer } from './editor/buffer';
@@ -10,6 +12,21 @@ import type { TextStyle } from './protocol';
 import { theme, themeName, tokenColor, tokenStyle } from './theme';
 
 export type StyledRun = [text: string, color: string, style?: TextStyle];
+
+/** A link in a row: its columns `[from, to)`, counted from where the row's
+ * text starts, and where it goes (an `href` as `links.parseHref` takes it). */
+export interface RowLink {
+    from: number;
+    to: number;
+    href: string;
+}
+
+/** A picture in the view, with the size it's shown at in pixels: an image
+ * file, or a Mermaid diagram, which the window draws (0 by 0 until it has
+ * said how big it is). */
+export type Media =
+    | { t: 'Image'; file: string; src: string; width: number; height: number }
+    | { t: 'Diagram'; id: string; source: string; width: number; height: number };
 
 /** One row of the rendered view. */
 export interface MdRow {
@@ -21,8 +38,29 @@ export interface MdRow {
     quote: number;
     /** Columns before the text, inside the quotes. */
     indent: number;
-    /** A code block's rows get a background; a rule is a line across. */
-    kind?: 'code' | 'rule';
+    /** A code block's rows get a background; a rule is a line across; a
+     * picture takes as many `media` rows as it is high, and is set on the
+     * first. */
+    kind?: 'code' | 'rule' | 'media';
+    links?: RowLink[];
+    media?: Media;
+}
+
+/** What the view needs to know to show pictures; without one, images are
+ * shown as their names and diagrams as code. */
+export interface MediaHost {
+    /** Changes whenever the answers below may have. */
+    key: string;
+    charW: number;
+    lineH: number;
+    /** The most a picture's height may be, in pixels. */
+    maxHeight: number;
+    /** The image file an embed's target names (an `href`), with its size in
+     * pixels, if it is one that can be shown. */
+    image(href: string): { file: string; src: string; width: number; height: number } | undefined;
+    /** How big the window drew a diagram, or why it couldn't; nothing until
+     * it has tried. */
+    diagram(id: string): { width: number; height: number } | { error: string } | undefined;
 }
 
 /** Whether a file is Markdown, which has a rendered view. */
@@ -30,9 +68,9 @@ export function isMarkdown(file: string | undefined): boolean {
     return file !== undefined && ['.md', '.markdown', '.mdx'].includes(path.extname(file).toLowerCase());
 }
 
-/** A character of a paragraph, with how it's drawn and the line it's from;
- * `\n` is a hard line break. */
-type Cell = [c: string, color: string, style: TextStyle | undefined, source: number];
+/** A character of a paragraph, with how it's drawn, the line it's from and
+ * the link it's in; `\n` is a hard line break. */
+type Cell = [c: string, color: string, style: TextStyle | undefined, source: number, href?: string];
 
 const charLen = (s: string): number => Array.from(s).length;
 
@@ -41,6 +79,8 @@ const LIST_ITEM = /^(\s*)([-*+]|\d{1,9}[.)])(\s+|$)/;
 const HEADING = /^ {0,3}(#{1,6})(?:\s+|$)(.*?)(?:\s+#+)?\s*$/;
 const RULE = /^ {0,3}([-*_])( *\1){2,} *$/;
 const FENCE = /^(\s*)(`{3,}|~{3,})\s*([^\s`{}]*)/;
+/** An embedded image: `![[file.png|300]]`, or `![alt|300](file.png "title")`. */
+const EMBED = /!\[\[([^\]|#]+)(?:#[^\]|]*)?(?:\\?\|([^\]]*))?\]\]|!\[([^\]]*)\]\(\s*(<[^>]*>|[^\s)]+)(?:\s+"[^"]*")?\s*\)/g;
 
 /** Cells for a line's inline Markdown in `chars[from..to)`, markup dropped. */
 function inlineCells(chars: readonly string[], from: number, to: number, source: number, base?: highlight.Token): Cell[] {
@@ -50,9 +90,72 @@ function inlineCells(chars: readonly string[], from: number, to: number, source:
         const color = s.token === undefined ? theme.FG : tokenColor(token === 'Markup' ? 'Link' : token);
         const style = s.token === undefined ? undefined : tokenStyle(token);
         const text = s.shown ?? chars.slice(s.start, s.end).join('');
-        for (const c of text) cells.push([c, color, style, source]);
+        for (const c of text) cells.push(s.href === undefined ? [c, color, style, source] : [c, color, style, source, s.href]);
     }
     return cells;
+}
+
+/** The runs and links of a row of cells, its links starting `at` columns in. */
+function styled(cells: readonly Cell[], at = 0): { runs: StyledRun[]; links?: RowLink[] } {
+    const links: RowLink[] = [];
+    cells.forEach(([, , , , href], i) => {
+        if (href === undefined) return;
+        const last = links[links.length - 1];
+        if (last && last.href === href && last.to === at + i) last.to++;
+        else links.push({ from: at + i, to: at + i + 1, href });
+    });
+    return links.length > 0 ? { runs: toRuns(cells), links } : { runs: toRuns(cells) };
+}
+
+/** The size to show a picture `width` by `height` at, in pixels: shrunk to
+ * fit `cols` columns and the host's height. */
+function fitMedia(host: MediaHost, width: number, height: number, cols: number): [number, number] {
+    const scale = Math.min(1, (cols * host.charW) / width, host.maxHeight / height);
+    return [Math.max(Math.round(width * scale), 1), Math.max(Math.round(height * scale), 1)];
+}
+
+/** A Mermaid diagram's id, for the window to say how big it drew it. */
+export function diagramId(source: string): string {
+    return createHash('sha1').update(source).digest('hex').slice(0, 16);
+}
+
+/** The Mermaid theme that matches Wim's colors. */
+export function diagramTheme(): Record<string, string> {
+    return {
+        darkMode: 'true',
+        background: theme.BG,
+        fontFamily: 'Menlo, Consolas, "DejaVu Sans Mono", monospace',
+        fontSize: '14px',
+        primaryColor: theme.SELECTION,
+        primaryTextColor: theme.FG,
+        primaryBorderColor: theme.LINK,
+        secondaryColor: theme.CURSOR_LINE,
+        secondaryTextColor: theme.FG,
+        secondaryBorderColor: theme.GUTTER,
+        tertiaryColor: theme.POPUP_BG,
+        tertiaryTextColor: theme.FG,
+        tertiaryBorderColor: theme.GUTTER,
+        lineColor: theme.COMMENT,
+        textColor: theme.FG,
+        mainBkg: theme.SELECTION,
+        nodeBorder: theme.LINK,
+        clusterBkg: theme.CURSOR_LINE,
+        clusterBorder: theme.GUTTER,
+        titleColor: theme.FG,
+        edgeLabelBackground: theme.BG,
+        noteBkgColor: theme.POPUP_BG,
+        noteTextColor: theme.FG,
+        noteBorderColor: theme.GUTTER,
+        actorBkg: theme.SELECTION,
+        actorBorder: theme.LINK,
+        actorTextColor: theme.FG,
+        signalColor: theme.FG,
+        signalTextColor: theme.FG,
+        labelBoxBkgColor: theme.SELECTION,
+        labelTextColor: theme.FG,
+        errorBkgColor: theme.ERROR,
+        errorTextColor: theme.BG,
+    };
 }
 
 function toRuns(cells: readonly Cell[]): StyledRun[] {
@@ -123,8 +226,9 @@ function trimRange(chars: readonly string[], [from, to]: [number, number]): [num
     return [from, to];
 }
 
-/** Lay out Markdown source `lines` as rows `cols` wide. */
-export function renderMarkdown(lines: readonly string[], cols: number): MdRow[] {
+/** Lay out Markdown source `lines` as rows `cols` wide, with pictures if
+ * there is a `host` to size them. */
+export function renderMarkdown(lines: readonly string[], cols: number, host?: MediaHost): MdRow[] {
     const rows: MdRow[] = [];
     cols = Math.max(cols, 10);
     /** Open list items: where their marker and text start in the source,
@@ -146,7 +250,7 @@ export function renderMarkdown(lines: readonly string[], cols: number): MdRow[] 
         wrapped.forEach((cells, i) => {
             const prefix = i === 0 ? p.first : [];
             const source = cells[0]?.[3] ?? p.source;
-            rows.push({ runs: toRuns([...prefix, ...cells]), source, quote: p.quote, indent: p.indent - (i === 0 ? firstWidth : 0) });
+            rows.push({ ...styled([...prefix, ...cells]), source, quote: p.quote, indent: p.indent - (i === 0 ? firstWidth : 0) });
         });
     };
     /** The indent on screen for a block whose source starts at column
@@ -190,14 +294,38 @@ export function renderMarkdown(lines: readonly string[], cols: number): MdRow[] 
             flush();
             const indent = indentFor(lead);
             const lang = highlight.fenceLanguage(fence[3]);
-            let state = highlight.NORMAL;
             const close = new RegExp(`^\\s*${fence[2][0]}{${fence[2].length},}\\s*$`);
+            const body: [code: string, source: number][] = [];
             for (i++; i < lines.length; i++) {
                 let code = lines[i];
                 for (let q = 0; q < quote; q++) code = code.replace(/^ {0,3}> ?/, '');
                 if (close.test(code)) break;
                 // Take off the fence's own indent.
-                code = code.replace(new RegExp(`^ {0,${charLen(fence[1])}}`), '').replace(/\t/g, '    ');
+                body.push([code.replace(new RegExp(`^ {0,${charLen(fence[1])}}`), '').replace(/\t/g, '    '), i]);
+            }
+            if (host && fence[3].toLowerCase() === 'mermaid') {
+                const source = body.map(([code]) => code).join('\n');
+                const id = diagramId(source);
+                const size = host.diagram(id);
+                const start = body[0]?.[1] ?? i;
+                if (size === undefined) {
+                    // Until the window has drawn it, and said how big it is.
+                    const media: Media = { t: 'Diagram', id, source, width: 0, height: 0 };
+                    rows.push({ runs: [['Drawing the diagram…', theme.COMMENT]], source: start, quote, indent, kind: 'media', media });
+                    continue;
+                }
+                if (!('error' in size)) {
+                    const [width, height] = fitMedia(host, size.width, size.height, cols - indent - 2 * quote);
+                    pushMedia({ t: 'Diagram', id, source, width, height }, start, indent);
+                    continue;
+                }
+                const message = Array.from(`Mermaid: ${size.error}`).map((c): Cell => [c, theme.ERROR, undefined, start]);
+                for (const row of wrapCells(message, Math.max(cols - indent - 2 * quote, 1))) {
+                    rows.push({ runs: toRuns(row), source: start, quote, indent });
+                }
+            }
+            let state = highlight.NORMAL;
+            for (const [code, source] of body) {
                 const cs = Array.from(code);
                 let runs: StyledRun[] = [[code, lang ? theme.FG : tokenColor('Raw')]];
                 if (lang) {
@@ -213,7 +341,7 @@ export function renderMarkdown(lines: readonly string[], cols: number): MdRow[] 
                     }
                     if (at < cs.length) runs.push([cs.slice(at).join(''), theme.FG]);
                 }
-                rows.push({ runs: runs.filter(([s]) => s !== ''), source: i, quote, indent, kind: 'code' });
+                rows.push({ runs: runs.filter(([s]) => s !== ''), source, quote, indent, kind: 'code' });
             }
             continue;
         }
@@ -223,7 +351,7 @@ export function renderMarkdown(lines: readonly string[], cols: number): MdRow[] 
             const p = para;
             para = undefined;
             const level = setext[1][0] === '=' ? 1 : 2;
-            heading(p.cells.map((c): Cell => [c[0] === '\n' ? ' ' : c[0], tokenColor('Heading'), 'bold', c[3]]), level, p.source, p.indent);
+            heading(p.cells.map((c): Cell => [c[0] === '\n' ? ' ' : c[0], tokenColor('Heading'), 'bold', c[3], c[4]]), level, p.source, p.indent);
             continue;
         }
         if (RULE.test(line)) {
@@ -267,6 +395,20 @@ export function renderMarkdown(lines: readonly string[], cols: number): MdRow[] 
             para = { cells: inlineCells(chars, at, chars.length, i), first, indent: contentIndent, quote, source: i };
             continue;
         }
+        // A line of only images shows them.
+        const embeds = host && line.includes('![') ? embedsIn(line.slice(lead)) : undefined;
+        if (embeds) {
+            flush();
+            const indent = indentFor(lead);
+            for (const { href, width, height } of embeds) {
+                const image = host!.image(href)!;
+                const w = width ?? (height !== undefined ? (image.width * height) / image.height : image.width);
+                const h = height ?? (image.height * w) / image.width;
+                const [fw, fh] = fitMedia(host!, w, h, cols - indent - 2 * quote);
+                pushMedia({ t: 'Image', file: image.file, src: image.src, width: fw, height: fh }, i, indent);
+            }
+            continue;
+        }
         // Indented code, outside lists and paragraphs.
         if (lead >= 4 && !para && lists.length === 0) {
             rows.push({ runs: [[line.slice(4), tokenColor('Raw')]], source: i, quote, indent: 0, kind: 'code' });
@@ -290,10 +432,32 @@ export function renderMarkdown(lines: readonly string[], cols: number): MdRow[] 
     while (rows.length > 0 && rows[rows.length - 1].runs.length === 0 && !rows[rows.length - 1].kind) rows.pop();
     return rows;
 
+    /** The images a line embeds, if it has nothing else and they can all be
+     * shown. */
+    function embedsIn(text: string): { href: string; width?: number; height?: number }[] | undefined {
+        if (text.replace(EMBED, '').trim() !== '') return undefined;
+        const out: { href: string; width?: number; height?: number }[] = [];
+        for (const m of text.matchAll(EMBED)) {
+            const href = m[1] !== undefined ? `[[${m[1].trim()}]]` : m[4].replace(/^<(.*)>$/, '$1');
+            if (!host!.image(href)) return undefined;
+            // A size after a bar: `300` wide, or `300x200`.
+            const size = /^\s*(\d+)(?:x(\d+))?\s*$/.exec(m[2] ?? m[3]?.split('|').slice(1).join('|') ?? '');
+            out.push(size ? { href, width: Number(size[1]), height: size[2] === undefined ? undefined : Number(size[2]) } : { href });
+        }
+        return out;
+    }
+
+    /** A picture's rows: as many as it is high. */
+    function pushMedia(media: Media, source: number, indent: number): void {
+        const n = Math.max(Math.ceil(media.height / host!.lineH), 1);
+        rows.push({ runs: [], source, quote, indent, kind: 'media', media });
+        for (let k = 1; k < n; k++) rows.push({ runs: [], source, quote, indent, kind: 'media' });
+    }
+
     function heading(cells: Cell[], level: number, source: number, indent: number): void {
         if (rows.length > 0) blank(source);
         const width = Math.max(cols - indent - 2 * quote, 1);
-        for (const row of wrapCells(cells, width)) rows.push({ runs: toRuns(row), source, quote, indent });
+        for (const row of wrapCells(cells, width)) rows.push({ ...styled(row), source, quote, indent });
         if (level <= 2) rows.push({ runs: [], source, quote, indent, kind: 'rule' });
     }
 
@@ -338,14 +502,20 @@ export function renderMarkdown(lines: readonly string[], cols: number): MdRow[] 
             const height = Math.max(1, ...wrapped.map((w) => w.length));
             for (let y = 0; y < height; y++) {
                 const runs: StyledRun[] = [['│', border]];
+                const links: RowLink[] = [];
+                let at = 1;
                 widths.forEach((w, c) => {
                     const cells = wrapped[c][y] ?? [];
                     const space = w - cells.length;
                     const align = aligns[c] ?? 'left';
                     const before = align === 'right' ? space : align === 'center' ? Math.floor(space / 2) : 0;
-                    runs.push([' '.repeat(before + 1), theme.FG], ...toRuns(cells), [' '.repeat(space - before + 1), theme.FG], ['│', border]);
+                    const cell = styled(cells, at + before + 1);
+                    links.push(...(cell.links ?? []));
+                    runs.push([' '.repeat(before + 1), theme.FG], ...cell.runs, [' '.repeat(space - before + 1), theme.FG], ['│', border]);
+                    at += w + 3;
                 });
-                rows.push({ runs: runs.filter(([s]) => s !== ''), source: r.source, quote, indent });
+                const row: MdRow = { runs: runs.filter(([s]) => s !== ''), source: r.source, quote, indent };
+                rows.push(links.length > 0 ? { ...row, links } : row);
             }
             if (k === 0) line('├', '┼', '┤', start + 1);
         });
@@ -361,11 +531,11 @@ export class MarkdownView {
     top = 0;
     private cache: { key: string; rows: MdRow[] } | undefined;
 
-    rows(buffer: Buffer, cols: number): MdRow[] {
-        const key = `${buffer.version()}:${cols}:${themeName()}`;
+    rows(buffer: Buffer, cols: number, host?: MediaHost): MdRow[] {
+        const key = `${buffer.version()}:${cols}:${themeName()}:${host?.key}`;
         if (this.cache?.key !== key) {
             const lines = Array.from({ length: buffer.lineCount() }, (_, i) => buffer.lineString(i));
-            this.cache = { key, rows: renderMarkdown(lines, cols) };
+            this.cache = { key, rows: renderMarkdown(lines, cols, host) };
         }
         return this.cache.rows;
     }

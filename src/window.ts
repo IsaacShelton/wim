@@ -214,7 +214,8 @@ function openChromium(browser: string, url: string): WindowHandle {
     return childHandle('chromium', child, cleanup);
 }
 
-function openDefaultBrowser(url: string): void {
+/** Open `url` in the default browser. */
+export function openDefaultBrowser(url: string): void {
     const [cmd, args] =
         process.platform === 'darwin'
             ? ['open', [url]]

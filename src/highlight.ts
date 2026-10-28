@@ -468,20 +468,24 @@ export function highlightLine(lang: Language, line: readonly string[], state: St
 /** A line's length in characters. */
 const charLen = (s: string): number => Array.from(s).length;
 
-/** Per character of a line: its token, and for markup what Markdown's
- * rendered view shows instead (`''` drops it); unset, the character itself. */
+/** Per character of a line: its token, for markup what Markdown's rendered
+ * view shows instead (`''` drops it; unset, the character itself), and the
+ * link it is part of. */
 interface Inline {
     tokens: (Token | undefined)[];
     shown: (string | undefined)[];
+    href: (string | undefined)[];
 }
 
 /** A stretch of a Markdown line with the same token and handling: shown as
- * is, or (`shown` set) replaced by `shown` in the rendered view. */
+ * is, or (`shown` set) replaced by `shown` in the rendered view. `href` is
+ * where the link it's in goes: a URL or path, or `[[target]]` for a wikilink. */
 export interface InlineSpan {
     start: number;
     end: number;
     token: Token | undefined;
     shown?: string;
+    href?: string;
 }
 
 function isSpace(c: string | undefined): boolean {
@@ -548,6 +552,9 @@ function inlineInto(line: readonly string[], from: number, to: number, base: Tok
         }
     };
     const hide = (s: number, e: number, token: Token = 'Markup'): void => set(s, e, token, '');
+    const link = (s: number, e: number, href: string): void => {
+        for (let k = s; k < e; k++) out.href[k] = href;
+    };
     set(from, to, base);
     let i = from;
     while (i < to) {
@@ -587,6 +594,7 @@ function inlineInto(line: readonly string[], from: number, to: number, base: Tok
                 hide(i, i + 1);
                 set(i + 1, i + n - 1, 'Url');
                 hide(i + n - 1, i + n);
+                link(i, i + n, auto[1].includes(':') ? auto[1] : `mailto:${auto[1]}`);
                 i += n;
                 continue;
             }
@@ -602,7 +610,36 @@ function inlineInto(line: readonly string[], from: number, to: number, base: Tok
             if (url) {
                 const n = charLen(url[0]);
                 set(i, i + n, 'Url');
+                link(i, i + n, url[0]);
                 i += n;
+                continue;
+            }
+        }
+        const wiki = c === '!' ? i + 1 : i;
+        if (line[wiki] === '[' && line[wiki + 1] === '[') {
+            // Obsidian's `[[note]]`, `[[note#heading|shown]]` and `![[embed]]`.
+            const s = wiki + 2;
+            const e = find(line, s, ']]');
+            const inner = e === undefined ? '' : line.slice(s, e).join('');
+            if (e !== undefined && e <= to - 2 && inner.trim() !== '' && !inner.includes('[')) {
+                const bar = line.indexOf('|', s);
+                // In a table the bar is escaped (`[[note\|shown]]`).
+                const targetEnd = bar === -1 || bar > e ? e : line[bar - 1] === '\\' ? bar - 1 : bar;
+                const target = line.slice(s, targetEnd).join('');
+                set(i, s, 'Markup', c === '!' ? '▣ ' : '');
+                // An embed's `|300` or `|300x200` is its size, not its text.
+                const size = c === '!' && /^\s*\d+(x\d+)?\s*$/.test(line.slice(bar + 1, e).join(''));
+                if (targetEnd === e || size) {
+                    set(s, targetEnd, 'Link', wikiShown(target));
+                    hide(targetEnd, e);
+                } else {
+                    hide(s, targetEnd, 'Url');
+                    hide(targetEnd, bar + 1);
+                    set(bar + 1, e, 'Link');
+                }
+                hide(e, e + 2);
+                link(i, e + 2, `[[${target}]]`);
+                i = e + 2;
                 continue;
             }
         }
@@ -625,6 +662,7 @@ function inlineInto(line: readonly string[], from: number, to: number, base: Tok
                 hide(close, close + 2);
                 set(close + 2, end, after === '(' ? 'Url' : 'Markup', '');
                 hide(end, end + 1);
+                if (after === '(') link(i, end + 1, linkDestination(line.slice(close + 2, end).join('')));
                 i = end + 1;
                 continue;
             }
@@ -654,18 +692,51 @@ function inlineInto(line: readonly string[], from: number, to: number, base: Tok
 /** The inline markup of `line[from..to)`, over `base`, as spans covering
  * it all. */
 export function markdownInline(line: readonly string[], from = 0, to = line.length, base?: Token): InlineSpan[] {
-    const out: Inline = { tokens: [], shown: [] };
+    const out: Inline = { tokens: [], shown: [], href: [] };
     inlineInto(line, from, to, base, out);
     const spans: InlineSpan[] = [];
     for (let i = from; i < to; i++) {
         const token = out.tokens[i];
         const shown = out.shown[i];
+        const href = out.href[i];
         const last = spans[spans.length - 1];
         const joins = shown === '' ? last?.shown !== undefined : shown === undefined && last?.shown === undefined;
-        if (last && last.token === token && joins) last.end = i + 1;
-        else spans.push(shown === undefined ? { start: i, end: i + 1, token } : { start: i, end: i + 1, token, shown });
+        if (last && last.token === token && last.href === href && joins) {
+            last.end = i + 1;
+        } else {
+            const span: InlineSpan = { start: i, end: i + 1, token };
+            if (shown !== undefined) span.shown = shown;
+            if (href !== undefined) span.href = href;
+            spans.push(span);
+        }
     }
     return spans;
+}
+
+/** What a wikilink with no alias shows: `note > heading` for a heading in
+ * another note, `heading` for one in this note. */
+function wikiShown(target: string): string | undefined {
+    const at = target.indexOf('#');
+    if (at === -1) return undefined;
+    const note = target.slice(0, at).trim();
+    const heading = target
+        .slice(at + 1)
+        .split('#')
+        .map((h) => h.trim())
+        .filter((h) => h !== '')
+        .join(' > ');
+    return note === '' ? heading : `${note} > ${heading}`;
+}
+
+/** A link's destination from what's between its parentheses: `url`,
+ * `url "title"` or `<url with spaces>`. */
+function linkDestination(inside: string): string {
+    const s = inside.trim();
+    if (s.startsWith('<')) {
+        const end = s.indexOf('>');
+        return end === -1 ? s.slice(1) : s.slice(1, end);
+    }
+    return /^\S*/.exec(s)![0];
 }
 
 /** A Markdown table's line between its header and body (`| --- | :-: |`). */
@@ -688,7 +759,7 @@ function markdownBlock(line: readonly string[], from: number, to: number, base: 
         set(0, to - from, 'Markup');
         return;
     }
-    const out: Inline = { tokens, shown: [] };
+    const out: Inline = { tokens, shown: [], href: [] };
     if ((m = /^ {0,3}(#{1,6})(?=\s|$)/.exec(text))) {
         const at = charLen(m[0]);
         const closing = /\s#+\s*$/.exec(text.slice(m[0].length));
