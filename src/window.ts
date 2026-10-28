@@ -91,18 +91,13 @@ function run(argv) {
     win.minSize = $.NSMakeSize(320, 200);
     win.releasedWhenClosed = false;
 
-    const config = $.WKWebViewConfiguration.alloc.init;
-    // Sound starts from Node's message after a key press, not in the key's
-    // own event (WKAudiovisualMediaTypeNone).
-    config.mediaTypesRequiringUserActionForPlayback = 0;
-    const view = $.WKWebView.alloc.initWithFrameConfiguration(frame, config);
-    view.setValueForKey(false, 'drawsBackground');
-
     const requestClose = () => {
         view.evaluateJavaScriptCompletionHandler($('window.wimRequestClose && window.wimRequestClose()'), null);
     };
     ObjC.registerSubclass({
         name: 'WimWindowDelegate',
+        // WKScriptMessageHandler isn't in the runtime for JXA to look up
+        // ("protocol does not exist"); WebKit only needs the method below.
         protocols: ['NSWindowDelegate', 'NSApplicationDelegate'],
         methods: {
             'windowShouldClose:': {
@@ -119,9 +114,26 @@ function run(argv) {
                     return 0;
                 },
             },
+            // A file dropped from another app leaves that app in front.
+            'userContentController:didReceiveScriptMessage:': {
+                types: ['void', ['id', 'id']],
+                implementation: () => {
+                    app.activateIgnoringOtherApps(true);
+                    win.makeKeyAndOrderFront(null);
+                    win.makeFirstResponder(view);
+                },
+            },
         },
     });
     const delegate = $.WimWindowDelegate.alloc.init;
+    const config = $.WKWebViewConfiguration.alloc.init;
+    // Sound starts from Node's message after a key press, not in the key's
+    // own event (WKAudiovisualMediaTypeNone).
+    config.mediaTypesRequiringUserActionForPlayback = 0;
+    config.userContentController.addScriptMessageHandlerName(delegate, 'wimActivate');
+    const view = $.WKWebView.alloc.initWithFrameConfiguration(frame, config);
+    view.setValueForKey(false, 'drawsBackground');
+
     win.delegate = delegate;
     app.delegate = delegate;
 

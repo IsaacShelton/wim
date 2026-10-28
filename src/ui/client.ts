@@ -577,6 +577,10 @@ window.addEventListener('dragover', (e) => {
 
 window.addEventListener('drop', (e) => {
     e.preventDefault();
+    // In the macOS window, take focus from the app the file came from.
+    (window as unknown as { webkit?: { messageHandlers?: { wimActivate?: { postMessage(m: unknown): void } } } }).webkit
+        ?.messageHandlers?.wimActivate?.postMessage(1);
+    window.focus();
     const x = e.clientX;
     const y = e.clientY;
     for (const file of Array.from(e.dataTransfer?.files ?? [])) {

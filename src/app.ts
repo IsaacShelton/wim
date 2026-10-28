@@ -1245,6 +1245,7 @@ export class WimApp {
             if (!open.has(w.bufferId) && w !== this.windows.active) this.windows.close(w);
         }
         for (const id of this.markdownViews.keys()) if (!open.has(id)) this.markdownViews.delete(id);
+        for (const id of this.highlightCaches.keys()) if (!open.has(id)) this.highlightCaches.delete(id);
     }
 
     /** Scroll an inactive window, keeping its cursor in view as Vim does. */
@@ -2465,7 +2466,7 @@ class Painter {
 
             let spans: highlight.Span[] = [];
             if (lang) {
-                const state = this.st.highlightCache(v.bufferId).stateAt(lang, v.bufferId, buf.version(), line, (i) => buf.line(i));
+                const state = this.st.highlightCache(v.bufferId).stateAt(lang, buf, line);
                 spans = highlight.highlightLine(lang, chars, state)[0];
             }
             const semantic = v.semantic(line, chars);

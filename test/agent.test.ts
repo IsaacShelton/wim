@@ -696,6 +696,15 @@ test('the prompt edits like a text field, with earlier messages on Up', () => {
     assert.equal(input.text, 'draft');
 });
 
+test('/ in Normal mode starts the prompt with a slash typed', () => {
+    const h = harness();
+    h.send({ t: 'command', name: 'agents' });
+    h.type('/');
+    assert.match(h.text(), / AGENT /);
+    assert.equal(h.app.agents.focus, 'Input');
+    assert.match(h.text(), /\/$/m, 'the slash is in the prompt');
+});
+
 test('Ctrl+h and Ctrl+l move between the panel and the editor, from the prompt too', () => {
     const h = harness();
     h.send({ t: 'command', name: 'agents' });

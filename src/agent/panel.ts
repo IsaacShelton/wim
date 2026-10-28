@@ -624,6 +624,13 @@ export class AgentPanel {
             case 'o':
                 if (!s.prompt) this.focus = 'Input';
                 break;
+            case '/':
+                // Starts a slash command, as in the prompt's own typing.
+                if (!s.prompt) {
+                    this.focus = 'Input';
+                    this.input.insert('/');
+                }
+                break;
             case 'S':
                 // As in Vim: start the prompt afresh.
                 if (!s.prompt) {

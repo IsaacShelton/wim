@@ -64,7 +64,13 @@ export interface Language {
     lineComments: readonly string[];
     blockComment?: [string, string];
     quotes: readonly string[];
+    /** The quotes whose strings may go on past the end of a line (Rust's
+     * `"`, JavaScript's `` ` ``). Others close there unless the line ends in
+     * a backslash, so a stray quote can't color the rest of the file. */
+    multilineQuotes: readonly string[];
     tripleQuotes: boolean;
+    /** JavaScript: `/.../flags` where a value can start is a regex. */
+    regexLiterals: boolean;
     /** Rust: `'a` is a lifetime unless it closes like a char literal. */
     lifetimes: boolean;
     /** Rust: `name!` is a macro invocation. */
@@ -86,7 +92,17 @@ export const NORMAL: State = { t: 'Normal' };
 
 export type Span = [start: number, end: number, token: Token];
 
-const BASE = { types: [], constants: [], lineComments: [], tripleQuotes: false, lifetimes: false, bangMacros: false, attributes: [] };
+const BASE = {
+    types: [],
+    constants: [],
+    lineComments: [],
+    multilineQuotes: [],
+    tripleQuotes: false,
+    regexLiterals: false,
+    lifetimes: false,
+    bangMacros: false,
+    attributes: [],
+};
 
 const words = (s: string): string[] => s.split(/\s+/).filter((w) => w !== '');
 
@@ -100,6 +116,7 @@ export const RUST: Language = {
     lineComments: ['//'],
     blockComment: ['/*', '*/'],
     quotes: ['"', "'"],
+    multilineQuotes: ['"'],
     lifetimes: true,
     bangMacros: true,
     attributes: words(`allow warn deny forbid expect cfg cfg_attr test inline cold must_use deprecated doc path
@@ -135,6 +152,8 @@ export const JS: Language = {
     lineComments: ['//'],
     blockComment: ['/*', '*/'],
     quotes: ['"', "'", '`'],
+    multilineQuotes: ['`'],
+    regexLiterals: true,
 };
 
 export const PYTHON: Language = {
@@ -160,6 +179,7 @@ export const GO: Language = {
     lineComments: ['//'],
     blockComment: ['/*', '*/'],
     quotes: ['"', "'", '`'],
+    multilineQuotes: ['`'],
 };
 
 export const JAVA: Language = {
@@ -183,6 +203,7 @@ export const SHELL: Language = {
     constants: words('true false'),
     lineComments: ['#'],
     quotes: ['"', "'"],
+    multilineQuotes: ['"'],
 };
 
 export const CONFIG: Language = {
@@ -288,6 +309,24 @@ function find(line: readonly string[], from: number, pat: string): number | unde
     return undefined;
 }
 
+/** The end of the regex literal whose `/` is at `at`, after its flags, if
+ * it closes on the line. A `/` in a class (`[/]`) doesn't close it. */
+function regexEnd(line: readonly string[], at: number): number | undefined {
+    let inClass = false;
+    for (let j = at + 1; j < line.length; j++) {
+        const c = line[j];
+        if (c === '\\') j++;
+        else if (c === '[') inClass = true;
+        else if (c === ']') inClass = false;
+        else if (c === '/' && !inClass) {
+            let e = j + 1;
+            while (e < line.length && /^[a-z]$/.test(line[e])) e++;
+            return e;
+        }
+    }
+    return undefined;
+}
+
 function isIdent(c: string): boolean {
     return /^[\p{L}\p{N}_]$/u.test(c);
 }
@@ -315,6 +354,9 @@ export function highlightLine(lang: Language, line: readonly string[], state: St
     let prevWord = '';
     /** Just after `#[` (Rust): the attribute's name comes next. */
     let attributeNext = false;
+    /** Just after a value (a name, number, string, `)` or `]`), where `/`
+     * divides rather than starting a regex. */
+    let afterValue = false;
     // In a Rust `use`, capitalized names are types, even all in capitals.
     const inUse = lang.name === 'rust' && /^\s*(pub(\([^)]*\))?\s+)?use\s/.test(line.join(''));
     while (i < n) {
@@ -334,8 +376,10 @@ export function highlightLine(lang: Language, line: readonly string[], state: St
             const q = state.q;
             let j = i;
             let closed: number | undefined;
+            let continued = false;
             while (j < n) {
                 if (line[j] === '\\') {
+                    continued = j === n - 1;
                     j += 2;
                     continue;
                 }
@@ -348,12 +392,14 @@ export function highlightLine(lang: Language, line: readonly string[], state: St
             const end = closed ?? n;
             spans.push([seg, end, 'String']);
             i = end;
-            if (closed !== undefined || q === "'") state = NORMAL;
+            afterValue = true;
+            if (closed !== undefined || !(continued || lang.multilineQuotes.includes(q))) state = NORMAL;
         } else if (state.t === 'TripleStr') {
             const j = find(line, i, state.q.repeat(3));
             if (j !== undefined) {
                 spans.push([seg, j + 3, 'String']);
                 i = j + 3;
+                afterValue = true;
                 state = NORMAL;
             } else {
                 spans.push([seg, n, 'String']);
@@ -377,6 +423,16 @@ export function highlightLine(lang: Language, line: readonly string[], state: St
                 i += Array.from(block[0]).length;
                 state = { t: 'BlockComment' };
                 continue;
+            }
+            // Not after `<`: that's a closing JSX tag (`</div>`).
+            if (c === '/' && lang.regexLiterals && !afterValue && line[i - 1] !== '<') {
+                const end = regexEnd(line, i);
+                if (end !== undefined) {
+                    spans.push([i, end, 'String']);
+                    i = end;
+                    afterValue = true;
+                    continue;
+                }
             }
             if (lang.quotes.includes(c)) {
                 if (lang.tripleQuotes && startsWith(line, i, c.repeat(3))) {
@@ -406,6 +462,7 @@ export function highlightLine(lang: Language, line: readonly string[], state: St
                 while (j < n && (isIdent(line[j]) || (!field && line[j] === '.' && isAsciiDigit(line[j + 1])))) j++;
                 spans.push([i, j, field ? 'Property' : 'Number']);
                 i = j;
+                afterValue = true;
                 continue;
             }
             // A Rust attribute: `#[...]` or `#![...]`.
@@ -445,6 +502,8 @@ export function highlightLine(lang: Language, line: readonly string[], state: St
                 }
                 attributeNext = false;
                 prevWord = word;
+                // `return /re/`, but `this / 2`.
+                afterValue = token !== 'Keyword' || word === 'this' || word === 'super';
                 const end = token === 'Macro' && line[j] === '!' ? j + 1 : j;
                 spans.push([i, end, token]);
                 i = end;
@@ -454,11 +513,13 @@ export function highlightLine(lang: Language, line: readonly string[], state: St
             if (two === '->' || two === '::') {
                 spans.push([i, i + 2, 'Delimiter']);
                 i += 2;
+                afterValue = false;
                 continue;
             }
             if ('()[]{}'.includes(c)) spans.push([i, i + 1, 'Bracket']);
             else if (';,.:'.includes(c)) spans.push([i, i + 1, 'Delimiter']);
             else if ('=+-*/%<>!&|^~?'.includes(c)) spans.push([i, i + 1, 'Operator']);
+            if (!/^\s$/u.test(c)) afterValue = c === ')' || c === ']';
             i++;
         }
     }
@@ -857,23 +918,34 @@ function tokenSpans(tokens: readonly (Token | undefined)[]): Span[] {
     return out;
 }
 
+/** Text to highlight: a buffer, whose version changes with its content. */
+export interface Source {
+    version(): number;
+    line(i: number): readonly string[];
+}
+
 /** Caches the highlighter state at the start of each line, recomputed when
- * the buffer content changes. */
+ * the text changes. */
 export class Cache {
-    /** The buffer id and content version the states were computed for. */
-    private key: string | undefined;
+    /** What the states were computed for. The source itself, not an id: a
+     * buffer reloaded from its file is a new one whose versions start over,
+     * so an id and version can name different text. */
+    private source: Source | undefined;
+    private version = 0;
+    private lang: Language | undefined;
     private states: State[] = [];
 
     /** The state at the start of `line`, computing states as far as needed. */
-    stateAt(lang: Language, bufferId: number, version: number, line: number, lines: (i: number) => readonly string[]): State {
-        const key = `${bufferId}:${version}:${lang.name}`;
-        if (this.key !== key) {
-            this.key = key;
+    stateAt(lang: Language, source: Source, line: number): State {
+        if (this.source !== source || this.version !== source.version() || this.lang !== lang) {
+            this.source = source;
+            this.version = source.version();
+            this.lang = lang;
             this.states = [NORMAL];
         }
         while (this.states.length <= line) {
             const i = this.states.length - 1;
-            this.states.push(highlightLine(lang, lines(i), this.states[i])[1]);
+            this.states.push(highlightLine(lang, source.line(i), this.states[i])[1]);
         }
         return this.states[line];
     }

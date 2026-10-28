@@ -15,7 +15,8 @@ import { AppOptions, WimApp } from '../src/app';
 import { MemoryClipboard } from '../src/clipboard';
 import { parseKeys } from '../src/editor/keys';
 import { FileTree } from '../src/filetree';
-import { C, MARKDOWN, RUST, State, Token, detect, highlightLine, NORMAL } from '../src/highlight';
+import { Buffer as TextBuffer } from '../src/editor/buffer';
+import { C, Cache, JS, MARKDOWN, RUST, State, Token, detect, highlightLine, NORMAL } from '../src/highlight';
 import * as icons from '../src/icons';
 import { imageSize } from '../src/image';
 import { Keymap } from '../src/keymap';
@@ -583,6 +584,39 @@ test('block comments span lines', () => {
     const [spans, end] = highlightLine(C, Array.from('end */ y'), state);
     assert.deepEqual(spans[0], [0, 6, 'Comment']);
     assert.deepEqual(end, NORMAL);
+});
+
+test('JavaScript regexes are told from division', () => {
+    const kinds = (line: string): string => tokens(JS, line).map(([s, k]) => `${s}:${k}`).join(' ');
+    assert.equal(
+        kinds('const R = /"[^"]*"|[/]/g; // done'),
+        'const:Keyword R:Type =:Operator /"[^"]*"|[/]/g:String ;:Delimiter // done:Comment',
+    );
+    assert.match(kinds('return /x/.test(s);'), /^return:Keyword \/x\/:String/);
+    assert.match(kinds('const half = (a + b) / 2 / c;'), /\):Bracket \/:Operator 2:Number \/:Operator c:Normal/);
+    assert.match(kinds('<div>a</div>'), /\/:Operator div:Normal/, 'a closing tag');
+    // The `"` in the regex doesn't start a string that goes on.
+    const [, state] = highlightLine(JS, Array.from('const R = /(?:\\s+"[^"]*")?\\s*\\)/g;'), NORMAL);
+    assert.deepEqual(state, NORMAL);
+});
+
+test('only some strings go on past the end of a line', () => {
+    const end = (lang: typeof RUST, line: string): State => highlightLine(lang, Array.from(line), NORMAL)[1];
+    assert.deepEqual(end(JS, 'const s = "unclosed'), NORMAL);
+    assert.deepEqual(end(JS, 'const s = "continued\\'), { t: 'Str', q: '"' });
+    assert.deepEqual(end(JS, 'const s = `template'), { t: 'Str', q: '`' });
+    assert.deepEqual(end(RUST, 'let s = "multi'), { t: 'Str', q: '"' });
+    assert.deepEqual(end(C, "char c = 'x"), NORMAL);
+});
+
+test('the highlight cache starts over for a reloaded buffer', () => {
+    const cache = new Cache();
+    const before = TextBuffer.fromText('/* open\nstill a comment');
+    assert.deepEqual(cache.stateAt(JS, before, 1), { t: 'BlockComment' });
+    // A buffer read again from its file: a new one, at the same version.
+    const after = TextBuffer.fromText('// closed\ncode');
+    assert.equal(after.version(), before.version());
+    assert.deepEqual(cache.stateAt(JS, after, 1), NORMAL);
 });
 
 test('Markdown tokens', () => {
