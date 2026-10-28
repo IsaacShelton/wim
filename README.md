@@ -59,7 +59,7 @@ default, and a mistake in it is reported at startup and ignored.
             "medium": { "model": "claude-sonnet-5-5", "effort": "medium" },
             "high": { "model": "claude-opus-5-5", "effort": "high" }
         },
-        "defaultPreset": "medium",
+        "defaultPreset": "high",
         "cacheMinutes": 60
     },
     "terminal": { "shell": "zsh" }
@@ -71,7 +71,7 @@ default, and a mistake in it is reported at startup and ignored.
 | `theme` | `onedark` (default) or `nord`; `,th` still switches while running |
 | `claude.enabled` | Whether Wim connects to Claude Code at all (default `false`: the agents panel and its badge are off) |
 | `claude.presets` | The model (an alias such as `haiku`, or an id) and effort (`low`, `medium`, `high`, `xhigh`, `max`) for low, medium and high complexity tasks |
-| `claude.defaultPreset` | The preset new sessions start with (default: Claude Code's own settings) |
+| `claude.defaultPreset` | The preset new sessions start with (default `high`; `null` keeps Claude Code's own settings) |
 | `claude.cacheMinutes` | How long the prompt cache lasts after a request, for the cache indicator (default 60) |
 | `terminal.shell` | The shell the terminal runs (default `zsh`, or `powershell.exe` on Windows) |
 
@@ -103,7 +103,8 @@ default, and a mistake in it is reported at startup and ignored.
 | `src/links.ts` | Links between Markdown files: what a link points at, and which file and line that is |
 | `src/audio.ts` | Which files are sounds, and the player's state |
 | `src/config.ts` | The settings file, `wim.config.json` |
-| `src/terminal.ts` | The integrated terminal: a shell process, its output and the prompt |
+| `src/terminal.ts` | The integrated terminal: a shell on a pseudo-terminal (made by `script`), its screen kept by @xterm/headless |
+| `src/lineterminal.ts` | The line-based terminal used where there is no `script` (Windows) |
 | `src/agent/` | The agents panel: `backend.ts` (Claude Code through the Claude Agent SDK), `session.ts` (one session: its conversation, prompts and settings), `transcript.ts` (the conversation laid out as rows), `input.ts` (the prompt), `panel.ts` (sessions, keys, mouse and painting) |
 
 Run the tests with `npm test`.
@@ -152,6 +153,9 @@ each buffer keeps its own cursor, undo history and marks. `:ls`, `:b N`, `:b nam
 `:wqa`/`:xa`. A tab line across the top shows the open buffers when there is more than one;
 click a tab to switch. `:q`, `:wq`, `:x`, `ZZ` and `ZQ` close the current buffer, and quit only
 when it is the last one; `:qa` quits everything and refuses while any buffer has unsaved changes.
+`:q` and `:bd` (`,x`) on a buffer with unsaved changes ask `Discard changes to "name"? (y/n)`:
+`y` closes it, `n` or Esc keeps it, and any other key keeps it and does what it does (so `:q!`
+still works).
 
 **File tree:** Ctrl+n shows or hides a sidebar tree of the working directory and focuses it,
 set up like the nvim-tree config: 30 columns wide, Nerd Font folder and file icons (from an
@@ -159,8 +163,14 @@ installed Nerd Font such as FiraMono Nerd Font), git-ignored files hidden, no ro
 follows the current file. In the tree: `j`/`k` move, `gg`/`G` jump, `<CR>`/`o` opens a file or
 toggles a folder, `l` expands, `h` collapses or goes to the parent, `a` creates a file in the
 selected folder (or the selected file's folder; a trailing `/` makes a folder, and missing
-folders are made too), `R` re-reads the disk, `q` hides it, `<Esc>` returns to the editor. Ctrl+h / Ctrl+l (or `<C-w>h`, `<C-w>l`, `<C-w>w`)
+folders are made too), `dd` deletes the selected file or folder (with everything in it) after
+asking `(y/n)`, `R` re-reads the disk, `q` hides it, `<Esc>` returns to the editor. Ctrl+h / Ctrl+l (or `<C-w>h`, `<C-w>l`, `<C-w>w`)
 move focus between the tree and the editor. Clicking works too.
+
+Names in the tree are colored by their git status: untracked green, staged cyan (teal in Nord),
+modified orange and conflicted red; a folder takes the color of what changed inside it. The open
+file's name is bold. Status is read again when the tree is shown, after a write, after an agent
+changes files, and on leaving the terminal or the agents panel; `R` reads it too.
 
 ## Language servers
 
@@ -330,11 +340,10 @@ Ctrl+a/e/w/u). Ctrl+c is Esc there too, and Ctrl+h goes to the editor, as in Nor
 | `i` `a` Enter | Type in the prompt |
 | `S` | Clear the prompt and type in it |
 | `j` `k`, Ctrl+d/u/e/y/f/b, `gg` `G`, the wheel | Scroll the conversation (it follows new replies unless scrolled up) |
-| Tab `]` `[` `gt` `gT` `1`–`9` | Next, previous or Nth session |
+| Tab Shift+Tab `]` `[` `gt` `gT` `1`–`9` | Next, previous or Nth session |
 | `n` / `s` / `x` | New session / pick a session, open or saved, to switch to or resume / close a session (stopping its process; twice if Claude is working) |
 | `m` / `p` / `e` | Pick the model / permission mode / effort |
 | `L` `M` `H` / `P` | Use the low / medium / high preset / pick a preset |
-| Shift+Tab | Cycle the permission mode: default, accept edits, plan, auto (in the prompt too) |
 | `c` | Context use by kind, as `/context` shows it |
 | `u` | Plan usage limits (5-hour, weekly) |
 | `y` | Copy the last reply |
@@ -348,7 +357,9 @@ and don't ask again (with Claude Code's suggested rule), No, or No and say what 
 Esc denies. A prompt Claude Code marks as risky starts on No and can't be approved with a
 single key. Questions from Claude (AskUserQuestion) are answered the same way, ticking several
 with Space where it asks for more than one, or typing another answer. Slash commands
-(`/compact`, `/clear`, ...) are sent to Claude Code.
+(`/compact`, `/context`, ...) are sent to Claude Code, except `/clear`, which closes the
+session (it can still be resumed) and opens a new one in its place with the same model,
+permission mode and effort.
 
 When Claude edits a file that is open in a buffer, the buffer is reloaded (as one undoable
 change), and after a command buffers whose files changed are reloaded too. A buffer with
@@ -378,7 +389,7 @@ Normal-mode mappings don't apply in the middle of a command, so `f,` still finds
 | Tab / Shift+Tab | Normal | Next / previous buffer |
 | Ctrl+n | Normal | Toggle the file tree |
 | `,cc` (or Cmd+L) | Normal | Show the agents panel (see [Agents](#agents)) |
-| `,tt` (or Cmd+J) | Normal | Show the terminal (see [Terminal](#terminal)) |
+| `` Ctrl+` `` (or `,tt`, or Cmd+J) | Any | Show or hide the terminal (see [Terminal](#terminal)) |
 | `,th` | Normal | Switch between Wim's colors (One Dark) and Nord |
 | Ctrl+y | Normal | Forward in the jump list (`<C-i>`, which is Tab in a terminal) |
 | `,w` `,b` `,e` `,ge` | Normal, Visual, after an operator | Like `w`, `b`, `e`, `ge` for subwords (nvim-spider): camelCase humps, snake_case parts and digit runs; single punctuation is skipped |
@@ -447,20 +458,23 @@ an Edge or Chrome window, the browser asks before closing with unsaved changes i
 
 ## Terminal
 
-Cmd+J (Ctrl+Shift+J on Windows and Linux), `,tt` or `:Terminal` shows a terminal under the
-editor and moves to it; the same again hides it. It runs zsh (PowerShell on Windows; set
-`terminal.shell` to change it) as a login shell in Wim's working directory, and the shell is kept
-between commands, so `cd` and variables stay. Type a command and press Enter; Up/Down go through
-earlier commands and the usual text field keys work. The wheel and PageUp/PageDown scroll the
-output, `clear` empties it, Cmd+V pastes (as one line), Esc (Ctrl+c) stops a running command, or
-else clears what is typed, or else goes back to the editor. Ctrl+k goes up to the editor, Ctrl+h to
-the tree and Ctrl+l to the agents panel, as with windows.
+Ctrl+\` , Cmd+J (Ctrl+Shift+J on Windows and Linux), `,tt` or `:Terminal` shows a terminal under the
+editor and moves to it; the same again hides it. It runs zsh (set `terminal.shell` to change it)
+as an interactive login shell in Wim's working directory, on a real pseudo-terminal: `~/.zshrc`,
+your prompt, line editing, tab completion, colors and full-screen programs (vim, less, top, htop)
+all work, and the shell is told when the panel changes size. Keys go to the program as in any
+terminal (Esc is Esc, Ctrl+c interrupts, Option+Left/Right/Backspace work by word), except Ctrl+h,
+Ctrl+j, Ctrl+k and Ctrl+l, which move between windows as everywhere else (Ctrl+k goes up to the
+editor, Ctrl+h to the tree, Ctrl+l to the agents panel). Cmd+V pastes (bracketed, when the program
+asks for it). The wheel and PageUp/PageDown scroll back through the output; in a full-screen
+program they go to the program instead. When the shell exits, Enter starts a new one.
 
-Wim has no native code, so this is not a full terminal: output is shown as plain text (colors and
-cursor movement are dropped), and programs that take over the screen (vim, less, top) or ask for
-input while they run don't work. Stopping a command restarts the shell in the same directory, so
-variables set before are lost. The shell is a login shell but not an interactive one, so what is
-in `~/.zshrc` (aliases, prompt) does not apply. The Windows PowerShell setup is untested.
+Wim has no native code, so it doesn't make the pseudo-terminal itself: the system's `script`
+command does, and [@xterm/headless](https://www.npmjs.com/package/@xterm/headless) (plain
+JavaScript) keeps the screen that Wim draws. Where there is no `script` (Windows), the terminal
+is line based instead: commands are typed in Wim's own prompt, output is plain text, and programs
+that take over the screen or read input don't work there. The Linux and Windows setups are
+untested.
 
 ## Not supported yet
 

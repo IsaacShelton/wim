@@ -475,10 +475,14 @@ test('multiple buffers', () => {
     assert.equal(ed.bufferList().length, 1);
     assert.equal(ed.buffer.text(), '');
     assert.ok(ed.isModified());
-    // The last buffer still guards its changes before quitting.
+    // The last buffer asks before its changes are lost.
     ed.handleKeys(parseKeys(':q<CR>'));
     assert.ok(!ed.quitRequested);
-    assert.ok(ed.message!.text.includes('E37'));
+    assert.ok(ed.message!.text.includes('(y/n)'));
+    ed.handleKeys(parseKeys('n'));
+    assert.ok(!ed.quitRequested);
+    ed.handleKeys(parseKeys(':q<CR>y'));
+    assert.ok(ed.quitRequested);
     fs.rmSync(dir, { recursive: true });
 });
 

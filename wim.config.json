@@ -1,5 +1,5 @@
 {
-    "theme": "onedark",
+    "theme": "nord",
     "claude": {
         "enabled": true,
         "presets": {
@@ -7,6 +7,7 @@
             "medium": { "model": "claude-sonnet-5-5", "effort": "medium" },
             "high": { "model": "claude-opus-5-5", "effort": "high" }
         },
+        "defaultPreset": "high",
         "cacheMinutes": 60
     },
     "terminal": {}

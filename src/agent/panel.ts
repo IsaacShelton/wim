@@ -165,14 +165,15 @@ const HELP: [string, string][] = [
     ['Enter', 'Send (\\ or ⌥ before it: a new line)'],
     ['↑ ↓', 'Earlier messages, in the prompt'],
     ['Ctrl+x', 'Interrupt the agent'],
+    ['/clear', 'A new session in place of this one, with its settings'],
     ['j k  Ctrl+d Ctrl+u', 'Scroll the conversation'],
     ['gg  G', 'Go to the top / the end'],
-    ['Tab  ]  [  1-9', 'Next / previous / Nth session'],
+    ['Tab Shift+Tab  ]  [  1-9', 'Next / previous / Nth session'],
     ['n', 'New session'],
     ['s', 'Sessions: switch, or resume a saved one'],
     ['x', 'Close the session (it can be resumed)'],
     ['m', 'Model'],
-    ['p  Shift+Tab', 'Permission mode: pick / cycle'],
+    ['p', 'Permission mode'],
     ['e', 'Effort'],
     ['L  M  H', 'Preset for a low / medium / high complexity task'],
     ['P', 'Presets: pick one'],
@@ -276,17 +277,37 @@ export class AgentPanel {
     }
 
     newSession(resume?: { id: string; title: string }): AgentSession {
-        const s = new AgentSession({
+        const s = this.createSession(resume);
+        this.sessions.push(s);
+        this.current = this.sessions.length - 1;
+        if (!resume && this.opts.defaultPreset) this.usePreset(s, this.opts.defaultPreset);
+        return s;
+    }
+
+    private createSession(resume?: { id: string; title: string }): AgentSession {
+        return new AgentSession({
             backend: this.opts.backend,
             cwd: this.opts.cwd(),
             resume,
             onChange: () => this.changed(),
             onFiles: this.opts.onFiles,
         });
-        this.sessions.push(s);
-        this.current = this.sessions.length - 1;
-        if (!resume && this.opts.defaultPreset) this.usePreset(s, this.opts.defaultPreset);
-        return s;
+    }
+
+    /** `/clear`: close the session and start a new one in its tab, with the
+     * same model, permission mode and effort. */
+    private clearSession(s: AgentSession): void {
+        const fresh = this.createSession();
+        fresh.model = s.model;
+        fresh.activeModel = s.activeModel;
+        fresh.mode = s.mode;
+        fresh.effort = s.effort;
+        fresh.preset = s.preset;
+        // The plan's limits are the same for every session.
+        fresh.usage = s.usage;
+        s.close();
+        this.sessions[this.sessions.indexOf(s)] = fresh;
+        this.message = s.id === undefined ? 'Cleared' : `Cleared "${cut(s.title, 30)}" (s to resume it)`;
     }
 
     /** Switch a session to a preset's model and effort. */
@@ -393,12 +414,11 @@ export class AgentPanel {
     private inputKey(s: AgentSession, key: KeyInput): PanelAction {
         if (key.key === 'Esc') {
             this.focus = 'Transcript';
-        } else if (key.key === 'BackTab') {
-            s.setMode(s.nextMode());
         } else if (this.input.key(key) === 'Send') {
             const text = this.input.text;
             if (text.trim() === '') return NONE;
-            s.send(text);
+            if (/^\/clear\s*$/.test(text.trim())) this.clearSession(s);
+            else s.send(text);
             this.input.remember(text);
             this.input.clear();
             this.view(s).follow = true;
@@ -546,7 +566,7 @@ export class AgentPanel {
                 this.cycle(1);
                 return NONE;
             case 'BackTab':
-                s.setMode(s.nextMode());
+                this.cycle(-1);
                 return NONE;
         }
         if (c !== undefined && /^[1-9]$/.test(c)) {
@@ -1137,7 +1157,7 @@ export class AgentPanel {
         // or the keys.
         let hint: Run;
         if (this.message) hint = [this.message, theme.FG];
-        else if (s.mode && s.mode !== 'default') hint = [`⏵⏵ ${modeLabel(s.mode).toLowerCase()} on (shift+tab to cycle)`, modeColor(s.mode)];
+        else if (s.mode && s.mode !== 'default') hint = [`⏵⏵ ${modeLabel(s.mode).toLowerCase()} on (p to change)`, modeColor(s.mode)];
         else hint = [this.focus === 'Input' && !p ? 'Esc for Normal mode · ? for keys' : 'i to type · ? for keys', theme.COMMENT];
         cv.text(x, hintY, cut(hint[0], cols), hint[1]);
         return top;

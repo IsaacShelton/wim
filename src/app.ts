@@ -19,7 +19,7 @@ import { KeyInput, ch, charOf, ctrl, isNamedKey, keyEq, keyIs, keyNew, keyToStri
 import { isCmdLine } from './editor/mode';
 import { Range } from './editor/range';
 import { lineMatches } from './editor/search';
-import { FileTree } from './filetree';
+import { FileTree, GitStatus } from './filetree';
 import { GrepMatch, Search, findFiles, liveGrep } from './finder';
 import { ImageInfo, formatBytes, imageUrl, isImage, readImageInfo } from './image';
 import { ImageView, Placement, Size } from './imageview';
@@ -36,7 +36,7 @@ import { SignatureHelp } from './lsp/signature';
 import { absolute, baseName, currentDir, displayName, expandTilde } from './paths';
 import { Float, Overlay, Picker, PickerItem, PreviewSource, readPreview } from './popup';
 import { AudioCommand, ClientMessage, DrawCmd, TextStyle } from './protocol';
-import { Terminal, TerminalAction } from './terminal';
+import { TerminalAction, TerminalPane, createTerminal } from './terminal';
 import { isThemeName, setTheme, theme, themeName, tokenColor, tokenStyle } from './theme';
 import { openDefaultBrowser } from './window';
 import { Direction, SplitDir, Win, WinRect, Windows } from './windows';
@@ -174,6 +174,11 @@ export class WimApp {
     /** The file last revealed in the tree, to follow buffer switches. */
     private revealed: string | undefined;
     private treeCwd: string | undefined;
+    /** Files may have changed since the tree last asked git for their
+     * status: written, changed by an agent, or by commands in the terminal. */
+    private gitStale = false;
+    /** Where the keys went in the last frame. */
+    private lastFocus: Focus = 'Editor';
     private flash: Flash | undefined;
     private flashTimer: NodeJS.Timeout | undefined;
     /** Buffer tabs from the last frame, for mouse clicks. */
@@ -226,7 +231,7 @@ export class WimApp {
     private agentsVisible = false;
     readonly config: Config;
     /** The shell under the editor. */
-    readonly terminal: Terminal;
+    readonly terminal: TerminalPane;
     private terminalVisible = false;
     /** The status line's Claude badge in the last frame, for clicks. */
     private badgeHit: Rect | undefined;
@@ -278,6 +283,11 @@ export class WimApp {
         this.windows = new Windows(this.editor.bufferId());
         // `:q` closes a window while there are others.
         this.editor.closeWindow = () => this.closeWindow();
+        const lspWrite = this.editor.onWrite;
+        this.editor.onWrite = (p) => {
+            lspWrite?.(p);
+            this.gitStale = true;
+        };
         if (dirError !== undefined) this.editor.setError(dirError);
         const root = currentDir();
         this.tree = new FileTree(root);
@@ -292,7 +302,7 @@ export class WimApp {
             defaultPreset: this.config.claude.defaultPreset,
             cacheMinutes: this.config.claude.cacheMinutes,
         });
-        this.terminal = new Terminal({ shell: this.config.terminal.shell, cwd: currentDir, refresh });
+        this.terminal = createTerminal({ shell: this.config.terminal.shell, cwd: currentDir, refresh });
         if (opts.configWarnings?.length) this.editor.setError(opts.configWarnings.join('; '));
     }
 
@@ -312,7 +322,8 @@ export class WimApp {
                 break;
             case 'key': {
                 const key = toKeyInput(msg);
-                if (key) this.key(key);
+                // The terminal gets keys as typed (Ctrl+c isn't Esc there).
+                if (key) this.key(key, msg.ctrl ? { key: msg.key, ctrl: true, alt: false } : key);
                 break;
             }
             case 'command':
@@ -412,8 +423,19 @@ export class WimApp {
         }
     }
 
-    private key(key: KeyInput): void {
+    private key(key: KeyInput, raw = key): void {
         this.closeWarned = false;
+        // Ctrl+` toggles the terminal from anywhere, even where other keys go elsewhere.
+        if (keyEq(key, ctrl('`'))) {
+            this.toggleTerminal();
+            return;
+        }
+        // A question on the command line (from the editor or the tree) is
+        // answered by the next key.
+        if (this.editor.question && this.editor.answer(key)) {
+            this.mapPending = [];
+            return;
+        }
         if (this.picker) {
             const picker = this.picker;
             const before = [this.editor.bufferId(), this.editor.cursor];
@@ -438,7 +460,7 @@ export class WimApp {
         }
         if (this.focus === 'Terminal') {
             this.mapPending = [];
-            this.terminalAction(this.terminal.key(key));
+            this.terminalAction(this.terminal.key(raw));
             return;
         }
         if (this.focus === 'Editor' && this.completion.key(key)) return;
@@ -705,6 +727,18 @@ export class WimApp {
             case 'FocusEditor':
                 this.focus = 'Editor';
                 break;
+            case 'Delete': {
+                const name = this.tree.relative(action.path);
+                this.editor.ask(`Delete ${action.isDir ? `"${name}" and everything in it` : `"${name}"`}?`, () => {
+                    try {
+                        this.tree.remove(action.path);
+                        this.editor.setMessage(`Deleted "${name}"`);
+                    } catch (e) {
+                        this.editor.setError(`Can't delete ${name}: ${(e as Error).message}`);
+                    }
+                });
+                break;
+            }
             case 'Create':
                 this.picker = new Picker<never>('Create File', () => {}, {
                     initialQuery: this.tree.promptPath(action.dir),
@@ -1385,6 +1419,7 @@ export class WimApp {
             }
         }
         if (reloaded.length > 0) this.editor.setMessage(`Reloaded ${reloaded.join(', ')}, changed by an agent`);
+        this.gitStale = true;
         this.refresh();
     }
 
@@ -1534,13 +1569,19 @@ export class WimApp {
     /** Keep the tree rooted at the working directory and showing the current
      * file. */
     private syncTree(layout: Layout): void {
+        // Leaving the terminal or the agents panel, files may have changed.
+        if (this.focus !== this.lastFocus && (this.lastFocus === 'Terminal' || this.lastFocus === 'Agents')) this.gitStale = true;
+        this.lastFocus = this.focus;
         if (!this.treeVisible) return;
         const cwd = currentDir();
         if (cwd !== this.treeCwd) {
             this.tree.setRoot(cwd);
             this.treeCwd = cwd;
             this.revealed = undefined;
+        } else if (this.gitStale) {
+            this.tree.refreshGitStatus();
         }
+        this.gitStale = false;
         this.tree.setViewRows(layout.treeRows);
         const file = this.editor.filePath;
         if (file !== undefined && file !== this.revealed) {
@@ -1967,6 +2008,20 @@ function toKeyInput(msg: { key: string; ctrl: boolean; alt: boolean }): KeyInput
     return { key: msg.key, ctrl: false, alt: Boolean(msg.alt) };
 }
 
+/** The color of a name in the tree with a git status. */
+function gitColor(status: GitStatus): string {
+    switch (status) {
+        case 'Untracked':
+            return theme.GIT_UNTRACKED;
+        case 'Staged':
+            return theme.GIT_STAGED;
+        case 'Modified':
+            return theme.GIT_MODIFIED;
+        case 'Conflict':
+            return theme.GIT_CONFLICT;
+    }
+}
+
 function rgb(color: number): string {
     return '#' + color.toString(16).padStart(6, '0');
 }
@@ -2030,7 +2085,7 @@ interface PaintState {
     /** The Claude panel, when it is shown. */
     agents: AgentPanel | undefined;
     /** The terminal, when it is shown. */
-    terminal: Terminal | undefined;
+    terminal: TerminalPane | undefined;
     /** The Claude badge at the end of the status line (not with Claude Code
      * turned off). */
     badge: { text: string; color: string; bg: string } | undefined;
@@ -2572,9 +2627,11 @@ class Painter {
                 this.disclosureTriangle(x + cw * 0.5, y + lh * 0.5, cw, row.expanded);
             }
             let color: string = theme.FG;
-            if (row.isDir) color = theme.FUNCTION;
+            if (row.git) color = gitColor(row.git);
+            else if (row.isDir) color = theme.FUNCTION;
             else if (currentFile === row.path) color = theme.GUTTER_CURRENT;
-            this.text(x + cw * 2, y, row.name, color);
+            // The open file is bold, as its color may be its git status.
+            this.text(x + cw * 2, y, row.name, color, currentFile === row.path ? 'bold' : undefined);
         }
         this.cmds.push(['unclip']);
     }

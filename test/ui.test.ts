@@ -110,6 +110,23 @@ test('insert-char mappings read one more key', () => {
     assert.equal(h.app.editor.buffer.text(), 'zqxy');
 });
 
+test('Ctrl+` toggles the terminal from any window', () => {
+    const h = harness();
+    const state = h.app as unknown as { terminalVisible: boolean; focus: string };
+    try {
+        h.type('<C-`>');
+        assert.equal(state.terminalVisible, true);
+        assert.equal(state.focus, 'Terminal');
+        h.type('<C-`>');
+        assert.equal(state.terminalVisible, false);
+        assert.equal(state.focus, 'Editor');
+        assert.equal(h.app.editor.buffer.text(), '', 'the key is not typed into the buffer');
+    } finally {
+        // Showing the terminal starts a shell, which would keep the test alive.
+        h.app.dispose();
+    }
+});
+
 test('Ctrl+n toggles the file tree and Ctrl+h/l move focus', () => {
     const dir = tempDir('app-tree');
     fs.writeFileSync(path.join(dir, 'a.txt'), 'alpha\n');
@@ -307,6 +324,93 @@ test('file tree hides git-ignored files', (t) => {
     assert.deepEqual(names(tree), ['empty', '.gitignore', 'main.rs']);
     assert.ok(tree.rows[0].empty);
     fs.rmSync(root, { recursive: true });
+});
+
+test('file tree colors names by git status', (t) => {
+    const root = tempDir('tree-status');
+    const git = (...args: string[]) => spawnSync('git', ['-C', root, '-c', 'user.name=t', '-c', 'user.email=t@t', ...args]);
+    if (git('init', '-q').status !== 0) {
+        t.skip('git is not available');
+        return;
+    }
+    fs.mkdirSync(path.join(root, 'src'));
+    fs.mkdirSync(path.join(root, 'new'));
+    fs.writeFileSync(path.join(root, 'src', 'a.rs'), 'a');
+    fs.writeFileSync(path.join(root, 'clean.rs'), 'c');
+    git('add', '.');
+    git('commit', '-q', '-m', 'first');
+    fs.writeFileSync(path.join(root, 'src', 'a.rs'), 'changed');
+    fs.writeFileSync(path.join(root, 'new', 'b.rs'), 'b');
+    fs.writeFileSync(path.join(root, 'staged.rs'), 's');
+    git('add', 'staged.rs');
+    const tree = new FileTree(root);
+    tree.reveal(path.join(root, 'src', 'a.rs'));
+    tree.reveal(path.join(root, 'new', 'b.rs'));
+    const status = (rel: string) => tree.rows.find((r) => r.path === path.join(root, rel))?.git;
+    assert.equal(status('src/a.rs'), 'Modified');
+    assert.equal(status('src'), 'Modified', 'a directory shows what changed inside it');
+    assert.equal(status('new'), 'Untracked');
+    assert.equal(status('new/b.rs'), 'Untracked', 'inside an untracked directory');
+    assert.equal(status('staged.rs'), 'Staged');
+    assert.equal(status('clean.rs'), undefined);
+    // Status is read again after files change.
+    git('add', 'src/a.rs');
+    tree.refreshGitStatus();
+    assert.equal(status('src/a.rs'), 'Staged');
+    fs.rmSync(root, { recursive: true });
+});
+
+test('dd in the tree deletes after asking', () => {
+    const dir = tempDir('app-delete');
+    fs.mkdirSync(path.join(dir, 'dir'));
+    fs.writeFileSync(path.join(dir, 'dir', 'inner.txt'), '');
+    fs.writeFileSync(path.join(dir, 'keep.txt'), '');
+    fs.writeFileSync(path.join(dir, 'gone.txt'), '');
+    const cwd = process.cwd();
+    process.chdir(dir);
+    try {
+        const h = harness();
+        // The tree: dir, gone.txt, keep.txt.
+        h.type('<C-n>jdd');
+        assert.match(h.text(), /Delete "gone\.txt"\? \(y\/n\)/);
+        h.type('n');
+        assert.ok(fs.existsSync(path.join(dir, 'gone.txt')), 'n keeps it');
+        assert.match(h.text(), /TREE/);
+        h.type('ddy');
+        assert.ok(!fs.existsSync(path.join(dir, 'gone.txt')));
+        assert.doesNotMatch(h.text(), /gone\.txt"\?/);
+        // A directory goes with everything in it.
+        h.type('ggdd');
+        assert.match(h.text(), /Delete "dir" and everything in it\?/);
+        h.type('y');
+        assert.ok(!fs.existsSync(path.join(dir, 'dir')));
+        assert.ok(fs.existsSync(path.join(dir, 'keep.txt')));
+        assert.match(h.text(), /keep\.txt/);
+    } finally {
+        process.chdir(cwd);
+        fs.rmSync(dir, { recursive: true });
+    }
+});
+
+test(',x and :q ask before discarding unsaved changes', () => {
+    const h = harness();
+    h.type(':e one<CR>:e two<CR>ichanged<Esc>');
+    assert.equal(h.app.editor.bufferList().length, 2);
+    h.type(',x');
+    assert.match(h.text(), /Discard changes to "two"\? \(y\/n\)/);
+    h.type('n');
+    assert.equal(h.app.editor.bufferList().length, 2, 'n keeps the buffer');
+    assert.equal(h.app.editor.buffer.text(), 'changed');
+    h.type(',xy');
+    assert.equal(h.app.editor.bufferList().length, 1, 'y closes it');
+    // The last buffer: `:q` asks before quitting.
+    h.type('ichanged<Esc>:q<CR>');
+    assert.match(h.text(), /Discard changes/);
+    h.type('<Esc>');
+    assert.ok(!h.quit());
+    // Another key says no, and does what it does.
+    h.type(':q<CR>:q!<CR>');
+    assert.ok(h.quit());
 });
 
 // ----- Key map ---------------------------------------------------------------------

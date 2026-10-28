@@ -1,30 +1,34 @@
-// The integrated terminal, under the editor: a shell (zsh, or PowerShell on
-// Windows) that keeps its directory and variables between commands. It is
-// line based: a command is typed in Wim's own prompt and its output is shown
-// as text, so programs that draw on the whole screen (vim, less, top) and
-// programs that ask for input don't work in it, and there is no tab
-// completion. There is no native code in Wim, so no pseudo-terminal either.
+// The integrated terminal, under the editor: a shell (zsh by default) on a
+// real pseudo-terminal, so it is interactive, with its prompt, line editing,
+// tab completion, colors and full-screen programs (vim, less, top).
+//
+// Wim has no native code, so it can't make a pseudo-terminal itself: the
+// system's `script` command makes one and runs the shell in it, and
+// @xterm/headless (plain JavaScript) keeps the screen the shell draws, which
+// Wim then paints. `script` needs its input to be a pipe or a terminal, and
+// Node's pipes are sockets on macOS, so `cat` stands between them. The
+// shell's first output is the pseudo-terminal's name, to resize it with
+// `stty` from outside as the panel changes size.
+//
+// Windows has no `script` (and its ConPTY needs native code); there, and
+// wherever `script` is missing, the line-based terminal in lineterminal.ts is
+// used instead.
 
 import { ChildProcess, SpawnOptions, spawn as nodeSpawn } from 'node:child_process';
-import { randomBytes } from 'node:crypto';
+import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
-import { StringDecoder } from 'node:string_decoder';
 
-import { TextInput } from './agent/input';
+import { Terminal as XTerm } from '@xterm/headless';
+
 import { KeyInput } from './editor/keys';
+import { LineTerminal } from './lineterminal';
 import { Box } from './popup';
-import { DrawCmd } from './protocol';
+import { DrawCmd, TextStyle } from './protocol';
 import { theme } from './theme';
 
 /** What the window should do after a key in the terminal. */
 export type TerminalAction = { t: 'None' } | { t: 'Move'; dir: 'Left' | 'Right' | 'Up' | 'Down' } | { t: 'Hide' };
-
-const NONE: TerminalAction = { t: 'None' };
-/** Lines of output kept. */
-const SCROLLBACK = 5000;
-/** Spaces a tab in output is shown as. */
-const TAB = 4;
 
 type Spawn = (command: string, args: readonly string[], options: SpawnOptions) => ChildProcess;
 
@@ -39,197 +43,209 @@ export interface TerminalOptions {
     spawn?: Spawn;
 }
 
-interface Line {
-    text: string;
-    kind: 'Output' | 'Command' | 'Note';
+/** The terminal as the window uses it. Keys come as typed: Ctrl+c is
+ * Ctrl+c, not Esc. */
+export interface TerminalPane {
+    key(key: KeyInput): TerminalAction;
+    paste(text: string): void;
+    /** Scroll back (positive) or forward through the output. */
+    scrollBy(rows: number): void;
+    /** Draw the terminal in `r`: a title row and the screen. */
+    paint(cmds: DrawCmd[], r: Box, cw: number, lh: number, focused: boolean): void;
+    dispose(): void;
 }
 
-// Control sequences that colors, titles and cursor movement come in: output
-// is shown as plain text.
-const ESCAPES = /\x1b\[[0-?]*[ -/]*[@-~]|\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)|\x1b[@-Z\\-_]/g;
-
-/** One line of output as text: without escapes, and with what a carriage
- * return overwrote dropped (as in progress bars). */
-function clean(line: string): string {
-    const text = line.replace(ESCAPES, '');
-    const cr = text.lastIndexOf('\r');
-    return (cr >= 0 && cr < text.length - 1 ? text.slice(cr + 1) : text.replace(/\r/g, '')).replace(/\t/g, ' '.repeat(TAB));
+/** The terminal for this system: on a pseudo-terminal where `script` can make
+ * one, else line based. */
+export function createTerminal(opts: TerminalOptions): TerminalPane {
+    return process.platform !== 'win32' && onPath('script') ? new Terminal(opts) : new LineTerminal(opts);
 }
 
-function isPowerShell(shell: string): boolean {
-    return /^(pwsh|powershell)(\.exe)?$/i.test(path.basename(shell));
-}
+const NONE: TerminalAction = { t: 'None' };
+/** Lines of output kept. */
+const SCROLLBACK = 5000;
+/** The control sequence (OSC) number the wrapper reports on. */
+const REPORT = 7777;
 
-export class Terminal {
-    private lines: Line[] = [];
-    /** Output of the running command that hasn't ended its line. */
-    private partial = '';
-    /** Output not yet split into lines. */
-    private pending = '';
-    readonly input = new TextInput();
+/** Runs in the pseudo-terminal: says which one it is (once it has its
+ * size), runs the shell, and says when the shell is gone. */
+const WRAPPER = [
+    'stty rows "$WIM_ROWS" cols "$WIM_COLS"',
+    `printf '\\033]${REPORT};tty=%s\\007' "$(tty)"`,
+    // `script` on Linux runs the command with $SHELL, so that was sh.
+    'if [ -n "$WIM_USER_SHELL" ]; then SHELL=$WIM_USER_SHELL; export SHELL; fi',
+    'wim_shell=$WIM_SHELL',
+    'unset WIM_ROWS WIM_COLS WIM_SHELL WIM_USER_SHELL',
+    '"$wim_shell" -l',
+    `printf '\\033]${REPORT};exit\\007'`,
+].join('\n');
+
+/** A terminal on a pseudo-terminal. */
+export class Terminal implements TerminalPane {
+    private readonly term: XTerm;
     private proc: ChildProcess | undefined;
-    private readonly marker = `__WIM_DONE_${randomBytes(6).toString('hex')}__`;
-    /** A command is running. */
-    running = false;
-    /** The shell's directory after the last command. */
-    cwd: string | undefined;
-    /** Rows scrolled up from the end (0 follows the output). */
+    /** The pseudo-terminal's device, once the shell has said. */
+    private tty: string | undefined;
+    /** Its size as last set, `rows x cols`, and whether `stty` is setting
+     * it now. */
+    private ttySize = '';
+    private sizing = false;
+    /** The shell exited; Enter starts another. */
+    private exited = false;
+    private cursorVisible = true;
+    /** What the shell or a program last set as the title. */
+    private title = '';
+    /** The shell's directory, when it reports it (OSC 7). */
+    private dir: string | undefined;
+    /** Rows scrolled back from the end (0 follows the output). */
     scroll = 0;
-    private rows = 10;
 
-    constructor(private readonly opts: TerminalOptions) {}
+    constructor(private readonly opts: TerminalOptions) {
+        this.term = new XTerm({ cols: 80, rows: 24, scrollback: SCROLLBACK, allowProposedApi: true });
+        // Replies to the shell's questions (where is the cursor?) go back to it.
+        this.term.onData((data) => this.send(data));
+        this.term.onTitleChange((title) => {
+            this.title = title;
+        });
+        this.term.onWriteParsed(() => this.opts.refresh());
+        this.term.parser.registerOscHandler(REPORT, (data) => {
+            if (data.startsWith('tty=')) {
+                this.tty = data.slice(4);
+                this.syncSize();
+            } else if (data === 'exit') {
+                // `cat` ends with its input, and the rest follows.
+                this.proc?.stdin?.end();
+            }
+            return true;
+        });
+        this.term.parser.registerOscHandler(7, (data) => {
+            const m = /^file:\/\/[^/]*(\/.*)$/.exec(data);
+            if (m) {
+                try {
+                    this.dir = decodeURIComponent(m[1]);
+                } catch {
+                    this.dir = m[1];
+                }
+            }
+            return true;
+        });
+        // Showing and hiding the cursor (DECTCEM), which the API doesn't
+        // tell; the terminal goes on to handle the rest.
+        const cursorMode = (visible: boolean) => (params: (number | number[])[]) => {
+            if (params.includes(25)) this.cursorVisible = visible;
+            return false;
+        };
+        this.term.parser.registerCsiHandler({ prefix: '?', final: 'h' }, cursorMode(true));
+        this.term.parser.registerCsiHandler({ prefix: '?', final: 'l' }, cursorMode(false));
+    }
 
     get shell(): string {
-        return this.opts.shell ?? (process.platform === 'win32' ? 'powershell.exe' : 'zsh');
+        return this.opts.shell ?? 'zsh';
     }
 
-    private note(text: string): void {
-        this.lines.push({ text, kind: 'Note' });
-    }
-
-    /** Where the shell runs: where the last command left it. */
-    private dir(): string {
-        return this.cwd ?? this.opts.cwd();
-    }
-
-    private start(): ChildProcess | undefined {
-        if (this.proc) return this.proc;
-        const shell = this.shell;
-        const args = isPowerShell(shell) ? ['-NoLogo', '-NoProfile', '-NonInteractive', '-Command', '-'] : ['-l'];
+    private start(): void {
+        if (this.proc) return;
+        this.exited = false;
+        this.tty = undefined;
+        this.cursorVisible = true;
+        const env: NodeJS.ProcessEnv = {
+            ...process.env,
+            TERM: 'xterm-256color',
+            COLORTERM: 'truecolor',
+            WIM_SHELL: this.shell,
+            WIM_ROWS: String(this.term.rows),
+            WIM_COLS: String(this.term.cols),
+        };
+        let command: string;
+        if (process.platform === 'linux') {
+            // util-linux's `script -c` runs the command with $SHELL.
+            env.WIM_USER_SHELL = process.env.SHELL ?? '';
+            env.SHELL = '/bin/sh';
+            command = 'cat | script -qfc "$0" /dev/null';
+        } else {
+            command = 'cat | script -q /dev/null /bin/sh -c "$0"';
+        }
+        this.ttySize = `${this.term.rows}x${this.term.cols}`;
         const spawn = this.opts.spawn ?? nodeSpawn;
         let proc: ChildProcess;
         try {
-            proc = spawn(shell, args, {
-                cwd: this.dir(),
-                env: { ...process.env, TERM: 'dumb', NO_COLOR: '1', PAGER: 'cat', GIT_PAGER: 'cat' },
+            proc = spawn('/bin/sh', ['-c', command, WRAPPER], {
+                cwd: this.opts.cwd(),
+                env,
                 stdio: ['pipe', 'pipe', 'pipe'],
-                // Its own process group, so Ctrl+c can stop all of it.
-                detached: process.platform !== 'win32',
-                windowsHide: true,
+                // Its own process group, to stop all of it when Wim exits.
+                detached: true,
             });
         } catch (e) {
-            this.note(`Can't start ${shell}: ${(e as Error).message}`);
-            return undefined;
+            this.note(`Can't start ${this.shell}: ${(e as Error).message}`);
+            this.exited = true;
+            return;
         }
         this.proc = proc;
-        const decoders = [new StringDecoder('utf8'), new StringDecoder('utf8')];
-        proc.stdout?.on('data', (d: Buffer) => this.proc === proc && this.output(decoders[0].write(d)));
-        proc.stderr?.on('data', (d: Buffer) => this.proc === proc && this.output(decoders[1].write(d)));
+        proc.stdout?.on('data', (d: Buffer) => this.proc === proc && this.term.write(d));
+        proc.stderr?.on('data', (d: Buffer) => this.proc === proc && this.term.write(d));
         // Errors on the pipe (the shell exiting) are noticed by `exit`.
         proc.stdin?.on('error', () => {});
-        proc.on('error', (e) => {
+        const ended = (why: string): void => {
             if (this.proc !== proc) return;
             this.proc = undefined;
-            this.running = false;
-            this.note(`Can't start ${shell}: ${e.message}`);
+            this.tty = undefined;
+            this.exited = true;
+            this.scroll = 0;
+            this.note(why);
             this.opts.refresh();
-        });
-        proc.on('exit', () => {
-            if (this.proc !== proc) return;
-            this.proc = undefined;
-            this.flush();
-            this.running = false;
-            this.note('[the shell exited; the next command starts a new one]');
-            this.opts.refresh();
-        });
-        if (isPowerShell(shell)) proc.stdin?.write('[Console]::OutputEncoding = [System.Text.Encoding]::UTF8\n');
-        return proc;
+        };
+        proc.on('error', (e) => ended(`Can't start ${this.shell}: ${e.message}`));
+        proc.on('exit', () => ended('[the shell exited; Enter starts a new one]'));
     }
 
-    /** Run a command line. */
-    run(line: string): void {
-        if (this.running) {
-            this.note('A command is running (Ctrl+c stops it)');
+    /** A line from Wim in the terminal, dimmed, after resetting what the
+     * program left set. */
+    private note(text: string): void {
+        this.term.write(`\x1b[!p\x1b[?1049l\r\n\x1b[2m${text}\x1b[0m\r\n`);
+    }
+
+    private send(data: string): void {
+        if (!this.proc) return;
+        this.proc.stdin?.write(data);
+    }
+
+    /** Match the terminal to `cols` by `rows` cells, starting the shell the
+     * first time. */
+    private fit(cols: number, rows: number): void {
+        if (cols !== this.term.cols || rows !== this.term.rows) {
+            this.term.resize(cols, rows);
+            this.syncSize();
+        }
+        if (!this.proc && !this.exited) this.start();
+    }
+
+    /** Give the pseudo-terminal the terminal's size, which also tells the
+     * program in it (SIGWINCH). One `stty` at a time, the last size winning. */
+    private syncSize(): void {
+        const size = `${this.term.rows}x${this.term.cols}`;
+        if (this.sizing || !this.tty || !this.proc || size === this.ttySize) return;
+        let fd: number;
+        try {
+            fd = fs.openSync(this.tty, fs.constants.O_RDWR | fs.constants.O_NOCTTY);
+        } catch {
             return;
         }
-        this.scroll = 0;
-        this.lines.push({ text: line, kind: 'Command' });
-        this.input.remember(line);
-        if (/^\s*(clear|cls)\s*$/.test(line)) {
-            this.lines = [];
-            return;
+        this.sizing = true;
+        this.ttySize = size;
+        const done = (): void => {
+            this.sizing = false;
+            this.syncSize();
+        };
+        try {
+            const child = nodeSpawn('stty', ['rows', String(this.term.rows), 'cols', String(this.term.cols)], { stdio: [fd, 'ignore', 'ignore'] });
+            child.on('error', done);
+            child.on('exit', done);
+        } catch {
+            this.sizing = false;
+        } finally {
+            fs.closeSync(fd);
         }
-        if (line.trim() === '') return;
-        const proc = this.start();
-        if (!proc) return;
-        this.running = true;
-        const done = isPowerShell(this.shell)
-            ? `Write-Output "${this.marker}$(if ($?) {0} else {1})|$((Get-Location).Path)"`
-            : `printf '%s\\n' "${this.marker}$?|$PWD"`;
-        proc.stdin?.write(`${line}\n${done}\n`);
-        this.trim();
-    }
-
-    /** Take in the shell's output, noticing when the command is done. */
-    private output(text: string): void {
-        this.pending += text.replace(/\r\n/g, '\n');
-        for (;;) {
-            const at = this.pending.indexOf(this.marker);
-            if (at < 0) break;
-            const end = this.pending.indexOf('\n', at);
-            if (end < 0) {
-                // The rest of the marker's line is still to come.
-                this.addText(this.pending.slice(0, at));
-                this.pending = this.pending.slice(at);
-                this.opts.refresh();
-                return;
-            }
-            this.addText(this.pending.slice(0, at));
-            this.flush();
-            const info = this.pending.slice(at + this.marker.length, end);
-            this.pending = this.pending.slice(end + 1);
-            this.finished(info);
-        }
-        const nl = this.pending.lastIndexOf('\n');
-        if (nl >= 0) {
-            this.addText(this.pending.slice(0, nl + 1));
-            this.pending = this.pending.slice(nl + 1);
-        }
-        this.trim();
-        this.opts.refresh();
-    }
-
-    /** Add output text; what doesn't end a line waits in `partial`. */
-    private addText(text: string): void {
-        if (text === '') return;
-        const parts = (this.partial + text).split('\n');
-        this.partial = parts.pop() ?? '';
-        for (const part of parts) this.lines.push({ text: clean(part), kind: 'Output' });
-    }
-
-    /** End the line in progress. */
-    private flush(): void {
-        if (this.partial !== '') this.lines.push({ text: clean(this.partial), kind: 'Output' });
-        this.partial = '';
-    }
-
-    private finished(info: string): void {
-        const bar = info.indexOf('|');
-        const code = bar >= 0 ? info.slice(0, bar) : info;
-        const dir = bar >= 0 ? info.slice(bar + 1).trim() : '';
-        if (dir !== '') this.cwd = dir;
-        this.running = false;
-        if (code !== '0' && code.trim() !== '') this.note(`[exit ${code.trim()}]`);
-        this.trim();
-        this.opts.refresh();
-    }
-
-    private trim(): void {
-        if (this.lines.length > SCROLLBACK) this.lines.splice(0, this.lines.length - SCROLLBACK);
-    }
-
-    /** Stop the running command. That takes the shell with it; the next
-     * command starts a new one in the same directory. */
-    interrupt(): void {
-        const proc = this.proc;
-        if (!proc || !this.running) return;
-        this.proc = undefined;
-        this.running = false;
-        kill(proc);
-        this.pending = '';
-        this.flush();
-        this.note('^C');
-        this.opts.refresh();
     }
 
     /** Stop the shell (Wim is exiting). */
@@ -237,18 +253,21 @@ export class Terminal {
         const proc = this.proc;
         this.proc = undefined;
         if (proc) kill(proc);
+        this.term.dispose();
     }
 
     paste(text: string): void {
-        // One line: a pasted line break would run the command.
-        this.input.insert(text.replace(/\s*\n\s*/g, ' ').trimEnd());
+        if (!this.proc) return;
+        const body = text.replace(/\r?\n/g, '\r');
+        this.scroll = 0;
+        this.send(this.term.modes.bracketedPasteMode ? `\x1b[200~${body}\x1b[201~` : body);
     }
 
     // ----- Keys and mouse ------------------------------------------------------------
 
     key(key: KeyInput): TerminalAction {
         if (key.ctrl) {
-            switch (key.key) {
+            switch (key.key.toLowerCase()) {
                 case 'h':
                     return { t: 'Move', dir: 'Left' };
                 case 'j':
@@ -259,121 +278,214 @@ export class Terminal {
                     return { t: 'Move', dir: 'Right' };
             }
         }
-        switch (key.key) {
-            // Ctrl+c is Esc: it stops a command, else clears what is typed,
-            // else goes back to the editor.
-            case 'Esc':
-                if (this.running) {
-                    this.interrupt();
-                    return NONE;
-                }
-                if (this.input.text !== '') {
-                    this.input.clear();
-                    return NONE;
-                }
-                return { t: 'Move', dir: 'Up' };
-            case 'PageUp':
-                this.scrollBy(Math.max(this.rows - 1, 1));
-                return NONE;
-            case 'PageDown':
-                this.scrollBy(-Math.max(this.rows - 1, 1));
-                return NONE;
+        const alternate = this.term.buffer.active.type === 'alternate';
+        // Page keys scroll back through the shell's output; full-screen
+        // programs get them.
+        if (!alternate && (key.key === 'PageUp' || key.key === 'PageDown') && !key.alt) {
+            const page = Math.max(this.term.rows - 1, 1);
+            this.scrollBy(key.key === 'PageUp' ? page : -page);
+            return NONE;
         }
-        this.scroll = 0;
-        if (this.input.key(key) === 'Send') {
-            const line = this.input.text;
-            this.input.clear();
-            this.run(line);
+        if (this.exited) {
+            if (key.key === 'Enter') this.start();
+            return NONE;
+        }
+        const data = encodeKey(key, this.term.modes.applicationCursorKeysMode);
+        if (data !== undefined) {
+            this.scroll = 0;
+            this.send(data);
         }
         return NONE;
     }
 
     scrollBy(rows: number): void {
-        this.scroll = Math.max(this.scroll + rows, 0);
+        if (this.term.buffer.active.type === 'alternate') {
+            // Full-screen programs have no scrollback: the wheel is the arrow
+            // keys there, as in most terminals.
+            const arrow = encodeKey({ key: rows > 0 ? 'Up' : 'Down', ctrl: false, alt: false }, this.term.modes.applicationCursorKeysMode);
+            if (arrow) this.send(arrow.repeat(Math.abs(rows)));
+            return;
+        }
+        this.scroll = Math.min(Math.max(this.scroll + rows, 0), this.term.buffer.active.baseY);
     }
 
     // ----- Painting ------------------------------------------------------------------
 
-    /** Draw the terminal in `r`: a title row, the output and the prompt. */
     paint(cmds: DrawCmd[], r: Box, cw: number, lh: number, focused: boolean): void {
-        const text = (x: number, y: number, s: string, color: string): void => {
-            if (s !== '') cmds.push(['text', x, y, s, color]);
+        const text = (x: number, y: number, s: string, color: string, style?: TextStyle): void => {
+            if (s.trim() !== '') cmds.push(style ? ['text', x, y, s, color, style] : ['text', x, y, s, color]);
         };
         cmds.push(['rect', r.left, r.top, r.right - r.left, r.bottom - r.top, theme.BG]);
         cmds.push(['clip', r.left, r.top, r.right - r.left, r.bottom - r.top]);
         // The title.
         cmds.push(['rect', r.left, r.top, r.right - r.left, lh, theme.STATUS_BG]);
-        const shell = path.basename(this.shell).replace(/\.exe$/i, '');
-        const dir = this.dir();
-        const home = os.homedir();
-        const shown = dir === home || dir.startsWith(home + path.sep) ? '~' + dir.slice(home.length) : dir;
         if (focused) cmds.push(['rect', r.left + cw, r.top, 10 * cw, lh, theme.MODE_TREE]);
         text(r.left + cw, r.top, ' TERMINAL ', focused ? theme.BG : theme.COMMENT);
-        const info = `${shell}  ${shown}${this.running ? '  running…' : ''}`;
-        text(r.left + 12 * cw, r.top, info, theme.COMMENT);
+        const shell = path.basename(this.shell);
+        const dir = this.dir ?? this.opts.cwd();
+        const home = os.homedir();
+        const shown = dir === home || dir.startsWith(home + path.sep) ? '~' + dir.slice(home.length) : dir;
+        const info = this.title !== '' && !this.exited ? this.title : `${shell}  ${shown}`;
+        const scrolled = this.scroll > 0 ? `  [${this.scroll} up]` : '';
+        text(r.left + 12 * cw, r.top, info + scrolled, theme.COMMENT);
 
-        const x = r.left + cw;
-        const cols = Math.max(Math.floor((r.right - x) / cw) - 1, 4);
-        const promptTop = r.bottom - lh;
-        const rows = Math.max(Math.floor((promptTop - (r.top + lh)) / lh), 1);
-        this.rows = rows;
-
-        // The tail of the output, with long lines wrapped, scrolled up by
-        // `scroll` rows.
-        const wanted = rows + this.scroll;
-        const tail: { text: string; color: string }[] = [];
-        const all = this.partial === '' ? this.lines : [...this.lines, { text: clean(this.partial), kind: 'Output' as const }];
-        for (let i = all.length - 1; i >= 0 && tail.length < wanted; i--) {
-            const line = all[i];
-            const chars = Array.from(line.kind === 'Command' ? `❯ ${line.text}` : line.text);
-            const color = line.kind === 'Command' ? theme.FUNCTION : line.kind === 'Note' ? theme.COMMENT : theme.FG;
-            const pieces: string[] = [];
-            for (let at = 0; at < Math.max(chars.length, 1); at += cols) pieces.push(chars.slice(at, at + cols).join(''));
-            for (let p = pieces.length - 1; p >= 0 && tail.length < wanted; p--) tail.push({ text: pieces[p], color });
+        // The screen.
+        const left = r.left + cw;
+        const top = r.top + lh;
+        const cols = Math.max(Math.floor((r.right - left - cw / 2) / cw), 10);
+        const rows = Math.max(Math.floor((r.bottom - top) / lh), 2);
+        this.fit(cols, rows);
+        const buf = this.term.buffer.active;
+        this.scroll = Math.min(this.scroll, buf.baseY);
+        const first = buf.baseY - this.scroll;
+        const cell = buf.getNullCell();
+        for (let row = 0; row < rows; row++) {
+            const line = buf.getLine(first + row);
+            if (!line) continue;
+            const y = top + row * lh;
+            // A run of cells with the same look, drawn as one text.
+            let run = '';
+            let runX = 0;
+            let runColor = '';
+            let runStyle: TextStyle | undefined;
+            const flush = (): void => {
+                // Without the blanks around it (the background is drawn).
+                const lead = run.length - run.trimStart().length;
+                text(runX + lead * cw, y, run.trim(), runColor, runStyle);
+                run = '';
+            };
+            for (let col = 0; col < cols; col++) {
+                if (!line.getCell(col, cell)) break;
+                const width = cell.getWidth();
+                // The second half of a wide character.
+                if (width === 0) continue;
+                let fg = cellColor(cell.isFgDefault(), cell.isFgRGB(), cell.getFgColor()) ?? theme.FG;
+                let bg = cellColor(cell.isBgDefault(), cell.isBgRGB(), cell.getBgColor());
+                if (cell.isInverse()) [fg, bg] = [bg ?? theme.BG, fg];
+                if (cell.isDim() && cell.isFgDefault()) fg = theme.COMMENT;
+                const x = left + col * cw;
+                if (bg !== undefined) cmds.push(['rect', x, y, width * cw, lh, bg]);
+                if (cell.isUnderline()) cmds.push(['rect', x, y + lh - 2, width * cw, 1, fg]);
+                const chars = cell.isInvisible() ? ' ' : cell.getChars() || ' ';
+                const style = textStyle(cell.isBold() !== 0, cell.isItalic() !== 0);
+                // Wide characters are drawn on their own, as text puts each
+                // character in one cell.
+                if (run !== '' && (width !== 1 || fg !== runColor || style !== runStyle)) flush();
+                if (run === '') {
+                    runX = x;
+                    runColor = fg;
+                    runStyle = style;
+                }
+                run += chars;
+                if (width !== 1) flush();
+            }
+            flush();
         }
-        this.scroll = Math.min(this.scroll, Math.max(tail.length - rows, 0));
-        const visible = tail.slice(this.scroll, this.scroll + rows).reverse();
-        let y = promptTop - visible.length * lh;
-        for (const row of visible) {
-            text(x, y, row.text, row.color);
-            y += lh;
-        }
 
-        // The prompt, with the part of the input around the cursor.
-        cmds.push(['rect', r.left, promptTop, r.right - r.left, lh, theme.CURSOR_LINE]);
-        text(x, promptTop, '❯', this.running ? theme.COMMENT : theme.MODE_TREE);
-        const room = Math.max(cols - 2, 1);
-        const chars = Array.from(this.input.text);
-        const cursor = this.input.cursor;
-        const from = Math.max(cursor - room + 1, 0);
-        text(x + 2 * cw, promptTop, chars.slice(from, from + room).join(''), theme.FG);
-        if (focused) {
-            const cx = x + (2 + cursor - from) * cw;
-            cmds.push(['rect', cx, promptTop, cw, lh, theme.CURSOR]);
-            const under = chars[cursor];
-            if (under !== undefined && under !== ' ') text(cx, promptTop, under, theme.BG);
+        // The cursor, where the program is.
+        if (this.scroll === 0 && this.cursorVisible && !this.exited && buf.cursorX < cols) {
+            const cx = left + buf.cursorX * cw;
+            const cy = top + buf.cursorY * lh;
+            if (focused) {
+                cmds.push(['rect', cx, cy, cw, lh, theme.CURSOR]);
+                const under = buf.getLine(buf.baseY + buf.cursorY)?.getCell(buf.cursorX, cell)?.getChars();
+                if (under) text(cx, cy, under, theme.BG);
+            } else {
+                cmds.push(['stroke', cx, cy, cw, lh, theme.CURSOR]);
+            }
         }
         cmds.push(['unclip']);
     }
 }
 
-/** Stop a process and what it started. */
-function kill(proc: ChildProcess): void {
-    const pid = proc.pid;
-    if (process.platform === 'win32' && pid !== undefined) {
-        nodeSpawn('taskkill', ['/pid', String(pid), '/T', '/F'], { stdio: 'ignore', windowsHide: true }).on('error', () => {});
-        return;
+function textStyle(bold: boolean, italic: boolean): TextStyle | undefined {
+    if (bold && italic) return 'italic bold';
+    return bold ? 'bold' : italic ? 'italic' : undefined;
+}
+
+/** A cell's color: undefined for the default, else from its RGB value or
+ * the 256-color palette. */
+function cellColor(isDefault: boolean, isRgb: boolean, value: number): string | undefined {
+    if (isDefault) return undefined;
+    if (isRgb) return '#' + value.toString(16).padStart(6, '0');
+    return paletteColor(value);
+}
+
+/** One of the 256 colors: the theme's 16, then xterm's color cube and grays. */
+export function paletteColor(n: number): string {
+    if (n < 16) return theme.ANSI[n];
+    const hex = (v: number): string => v.toString(16).padStart(2, '0');
+    if (n < 232) {
+        const levels = [0, 95, 135, 175, 215, 255];
+        const i = n - 16;
+        return '#' + hex(levels[Math.floor(i / 36)]) + hex(levels[Math.floor(i / 6) % 6]) + hex(levels[i % 6]);
     }
-    const signal = (): void => {
+    const gray = 8 + (n - 232) * 10;
+    return '#' + hex(gray) + hex(gray) + hex(gray);
+}
+
+/** What a key sends to the program, as xterm sends it. Option (Alt) with
+ * the arrows and Backspace moves and deletes by word, as in macOS
+ * terminals. */
+export function encodeKey(key: KeyInput, appCursor: boolean): string | undefined {
+    const meta = key.alt ? '\x1b' : '';
+    const arrows: Record<string, string> = { Up: 'A', Down: 'B', Right: 'C', Left: 'D', Home: 'H', End: 'F' };
+    switch (key.key) {
+        case 'Esc':
+            return '\x1b';
+        case 'Enter':
+            return meta + '\r';
+        case 'Backspace':
+            return meta + '\x7f';
+        case 'Delete':
+            return key.alt ? '\x1bd' : '\x1b[3~';
+        case 'Tab':
+            return '\t';
+        case 'BackTab':
+            return '\x1b[Z';
+        case 'PageUp':
+            return '\x1b[5~';
+        case 'PageDown':
+            return '\x1b[6~';
+        case 'Left':
+        case 'Right':
+            if (key.alt) return key.key === 'Left' ? '\x1bb' : '\x1bf';
+            return (appCursor ? '\x1bO' : '\x1b[') + arrows[key.key];
+        case 'Up':
+        case 'Down':
+        case 'Home':
+        case 'End':
+            return (appCursor ? '\x1bO' : '\x1b[') + arrows[key.key];
+    }
+    if (Array.from(key.key).length !== 1) return undefined;
+    if (!key.ctrl) return meta + key.key;
+    const c = key.key.toLowerCase();
+    if (/^[a-z]$/.test(c)) return meta + String.fromCharCode(c.charCodeAt(0) - 96);
+    const controls: Record<string, string> = { '@': '\x00', ' ': '\x00', '[': '\x1b', '\\': '\x1c', ']': '\x1d', '^': '\x1e', _: '\x1f', '?': '\x7f' };
+    return controls[c] === undefined ? undefined : meta + controls[c];
+}
+
+/** Whether `command` is a program on the PATH. */
+function onPath(command: string): boolean {
+    for (const dir of (process.env.PATH ?? '').split(path.delimiter)) {
+        if (dir === '') continue;
         try {
-            if (pid !== undefined) process.kill(-pid, 'SIGKILL');
-            else proc.kill('SIGKILL');
+            fs.accessSync(path.join(dir, command), fs.constants.X_OK);
+            return true;
         } catch {
-            // Already gone.
+            // Not here.
         }
-    };
-    signal();
-    // A process the shell was starting at that moment can miss the first
-    // signal; the group lasts as long as any of it does.
-    for (const ms of [50, 300]) setTimeout(signal, ms).unref();
+    }
+    return false;
+}
+
+/** Stop the shell's process group: `sh`, `cat` and `script`. The programs in
+ * the pseudo-terminal get a hangup when it closes. */
+function kill(proc: ChildProcess): void {
+    try {
+        if (proc.pid !== undefined) process.kill(-proc.pid, 'SIGKILL');
+        else proc.kill('SIGKILL');
+    } catch {
+        // Already gone.
+    }
 }

@@ -14,7 +14,7 @@ import { Buffer, Line, Pos, isWhitespace, order, pos } from './buffer';
 import * as buffers from './buffers';
 import { BufferSlot } from './buffers';
 import { Action, Command, FindKind, parse } from './command';
-import { READONLY } from './errors';
+import { EditorError, READONLY } from './errors';
 import { runEx } from './ex';
 import { KeyInput, ch, charOf, ctrl, isCharKey, keyEq, keyIs, keyToString, plain } from './keys';
 import * as motion from './motion';
@@ -156,6 +156,9 @@ export class Editor {
     historyIndex: number | undefined;
 
     message: Message | undefined;
+    /** A question on the command line waiting for `y` or `n`, and what `y`
+     * does. */
+    question: { text: string; yes: () => void } | undefined;
     quitRequested = false;
 
     /** Every open buffer. The active buffer's state lives in the fields above
@@ -214,6 +217,32 @@ export class Editor {
 
     setError(text: string): void {
         this.message = { text, error: true };
+    }
+
+    /** Ask a yes-or-no question on the command line; the next key answers
+     * it, and `y` runs `yes`. */
+    ask(text: string, yes: () => void): void {
+        this.question = { text: `${text} (y/n)`, yes };
+        this.message = { text: this.question.text, error: false };
+    }
+
+    /** Answer the question with a key: `y` (or `Y`) is yes, anything else
+     * no. Returns whether the key was the answer: `y`, `n` and Esc are;
+     * another key (`:` for `:q!`, say) is left to do what it does. */
+    answer(key: KeyInput): boolean {
+        const q = this.question;
+        this.question = undefined;
+        this.message = undefined;
+        const c = charOf(key);
+        if (!q) return false;
+        if (c !== 'y' && c !== 'Y') return c === 'n' || c === 'N' || key.key === 'Esc';
+        try {
+            q.yes();
+        } catch (e) {
+            if (!(e instanceof EditorError)) throw e;
+            this.setError(e.message);
+        }
+        return true;
     }
 
     modeName(): string {
@@ -290,14 +319,14 @@ export class Editor {
     }
 
     /** Close the active buffer (`:q`), or the window when it is the last one.
-     * Refuses (with a message) when it has unsaved changes unless `force` is set. */
+     * With unsaved changes, asks first unless `force` is set. */
     quitBuffer(force: boolean): boolean {
         if (this.closeWindow?.()) return true;
-        if (this.buffers.length === 1) return this.requestQuit(force);
         if (this.isModified() && !force) {
-            this.setError('E37: No write since last change (add ! to override)');
+            this.ask(`Discard changes to "${this.fileName()}"?`, () => this.quitBuffer(true));
             return false;
         }
+        if (this.buffers.length === 1) return this.requestQuit(force);
         buffers.deleteBuffer(this, undefined, true);
         return true;
     }
@@ -434,6 +463,10 @@ export class Editor {
     // ----- Key handling ----------------------------------------------------------
 
     handleKey(key: KeyInput): void {
+        if (this.question && this.answer(key)) {
+            this.scrollToCursor();
+            return;
+        }
         if (!this.replaying) this.message = undefined;
         if (isCmdLine(this.mode)) this.cmdlineKey(key, this.mode);
         else if (isInsert(this.mode)) this.insertKey(key);

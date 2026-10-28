@@ -1,4 +1,4 @@
-// Tests for the integrated terminal, with a real shell.
+// Tests for the integrated terminal, with a real shell on a pseudo-terminal.
 
 import assert from 'node:assert/strict';
 import * as fs from 'node:fs';
@@ -11,91 +11,111 @@ import { MemoryClipboard } from '../src/clipboard';
 import { defaultConfig } from '../src/config';
 import { parseKeys } from '../src/editor/keys';
 import { DrawCmd } from '../src/protocol';
+import { encodeKey, paletteColor } from '../src/terminal';
+import { theme } from '../src/theme';
 
 const posix = process.platform !== 'win32';
+
+type TextCmd = Extract<DrawCmd, ['text', ...unknown[]]>;
 
 function harness() {
     const frames: DrawCmd[][] = [];
     const config = defaultConfig();
     config.terminal.shell = 'sh';
     const app = new WimApp({ icons: false, clipboard: new MemoryClipboard(), servers: [], config, onFrame: (_t, _d, c) => frames.push(c), onQuit: () => {} });
-    app.handleMessage({ t: 'resize', width: 1400, height: 800, charW: 10, lineH: 20 });
+    let width = 1400;
+    const resize = (): void => app.handleMessage({ t: 'resize', width, height: 800, charW: 10, lineH: 20 });
+    resize();
+    const texts = (): TextCmd[] => frames[frames.length - 1].filter((c): c is TextCmd => c[0] === 'text');
     return {
         app,
+        texts,
         type: (keys: string) => {
             for (const k of parseKeys(keys)) app.handleMessage({ t: 'key', key: k.key, ctrl: k.ctrl, alt: k.alt });
         },
-        text: () =>
-            frames[frames.length - 1]
-                .filter((c) => c[0] === 'text')
-                .map((c) => c[3])
-                .join('\n'),
-        /** Wait until no command is running. */
-        async idle(): Promise<void> {
-            for (let i = 0; i < 200 && /running…/.test(this.text()); i++) {
-                await new Promise((r) => setTimeout(r, 25));
-                app.handleMessage({ t: 'resize', width: 1400, height: 800, charW: 10, lineH: 20 });
-            }
-            assert.doesNotMatch(this.text(), /running…/);
+        /** Ctrl and a key, as the window sends it. */
+        ctrl: (key: string) => app.handleMessage({ t: 'key', key, ctrl: true, alt: false }),
+        setWidth: (w: number) => {
+            width = w;
+            resize();
         },
+        text: () => texts().map((c) => c[3]).join('\n'),
         /** Wait until the screen shows `pattern`. */
-        async until(pattern: RegExp): Promise<void> {
+        async until(pattern: RegExp): Promise<RegExpExecArray> {
             for (let i = 0; i < 200; i++) {
-                if (pattern.test(this.text())) return;
+                const m = pattern.exec(this.text());
+                if (m) return m;
                 await new Promise((r) => setTimeout(r, 25));
-                app.handleMessage({ t: 'resize', width: 1400, height: 800, charW: 10, lineH: 20 });
+                resize();
             }
             assert.match(this.text(), pattern);
+            throw new Error('unreachable');
         },
     };
 }
 
-test('the terminal shows under the editor, runs commands and keeps its directory', { skip: !posix }, async () => {
+test('the terminal runs the shell on a real terminal, sized to the panel', { skip: !posix }, async () => {
     const dir = fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(), 'wim-term-')));
     const h = harness();
     h.app.handleMessage({ t: 'command', name: 'terminal' });
     assert.match(h.text(), / TERMINAL /);
     assert.match(h.text(), / TERM /, 'the status line shows the terminal has the keys');
     h.type(`cd ${dir}<CR>`);
-    await h.idle();
-    h.type('echo "hello $((1+2))"; pwd<CR>');
-    await h.until(new RegExp(`hello 3\\n${dir}`));
-    assert.match(h.text(), /❯ echo "hello/);
-    // A later command still runs in that directory, and failures are noted.
-    h.type('false<CR>');
-    await h.until(/\[exit 1\]/);
-    await h.idle();
-    h.type('pwd<CR>');
-    await h.until(new RegExp(`${dir}\\n.*pwd[\\s\\S]*${dir}`));
+    h.type('tty -s && echo "is a $((1+1))tty"; pwd; stty size<CR>');
+    await h.until(new RegExp(`is a 2tty\\n${dir}`));
+    const [, rows, cols] = await h.until(/^(\d+) (\d+)$/m);
+    // The panel is 1400px wide, in 10px cells, less a cell's margin each side.
+    assert.equal(Number(cols), 138);
+    assert.ok(Number(rows) >= 6, `${rows} rows`);
+    // A narrower window makes a narrower terminal, which the shell is told.
+    h.setWidth(1000);
+    await new Promise((r) => setTimeout(r, 200));
+    h.type('clear; stty size<CR>');
+    await h.until(/^\d+ 98$/m);
     h.app.dispose();
 });
 
-test('Ctrl+c stops a running command, and the shell starts again where it was', { skip: !posix }, async () => {
+test('Ctrl+c interrupts the running program; colors are shown', { skip: !posix }, async () => {
     const h = harness();
     h.app.handleMessage({ t: 'command', name: 'terminal' });
-    h.type('cd /tmp<CR>');
-    await h.idle();
     h.type('sleep 30<CR>');
-    await h.until(/running…/);
-    h.type('<C-c>');
-    await h.until(/\^C/);
-    assert.doesNotMatch(h.text(), /running…/);
+    await new Promise((r) => setTimeout(r, 300));
+    h.ctrl('c');
     h.type('echo back<CR>');
-    await h.until(/\nback/);
+    await h.until(/^back$/m);
+    h.type("printf '\\033[31mred-text\\033[0m\\n'<CR>");
+    await h.until(/^red-text$/m);
+    const red = h.texts().find((c) => c[3] === 'red-text');
+    assert.equal(red?.[4], theme.ANSI[1]);
     h.app.dispose();
 });
 
 test('Ctrl+k and Ctrl+j move between the editor and the terminal; Cmd+J hides it', { skip: !posix }, () => {
     const h = harness();
     h.app.handleMessage({ t: 'command', name: 'terminal' });
-    h.type('half<Esc>');
-    assert.match(h.text(), / TERM /, 'Esc clears what is typed first');
-    assert.doesNotMatch(h.text(), /half/);
-    h.type('<C-k>');
+    h.type('<Esc>');
+    assert.match(h.text(), / TERM /, 'Esc goes to the program');
+    h.ctrl('k');
     assert.match(h.text(), /NORMAL/);
     h.type('<C-j>');
     assert.match(h.text(), / TERM /);
     h.app.handleMessage({ t: 'command', name: 'terminal' });
     assert.doesNotMatch(h.text(), / TERMINAL /);
     h.app.dispose();
+});
+
+test('keys are sent as xterm sends them', () => {
+    const k = (key: string, ctrl = false, alt = false) => ({ key, ctrl, alt });
+    assert.equal(encodeKey(k('c', true), false), '\x03');
+    assert.equal(encodeKey(k('a'), false), 'a');
+    assert.equal(encodeKey(k('Enter'), false), '\r');
+    assert.equal(encodeKey(k('Backspace'), false), '\x7f');
+    assert.equal(encodeKey(k('Up'), false), '\x1b[A');
+    assert.equal(encodeKey(k('Up'), true), '\x1bOA', 'application cursor keys');
+    assert.equal(encodeKey(k('Left', false, true), false), '\x1bb', 'Option+Left is back a word');
+    assert.equal(encodeKey(k('Backspace', false, true), false), '\x1b\x7f');
+    assert.equal(encodeKey(k('Delete'), false), '\x1b[3~');
+    assert.equal(paletteColor(1), theme.ANSI[1]);
+    assert.equal(paletteColor(196), '#ff0000');
+    assert.equal(paletteColor(232), '#080808');
 });

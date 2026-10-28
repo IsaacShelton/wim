@@ -72,8 +72,7 @@ export type Prompt =
           resolve: (result: PermissionResult) => void;
       };
 
-/** Permission modes in the order Shift+Tab cycles through them, then the
- * rest. */
+/** Permission modes, in the order the picker lists them. */
 export const MODES: { mode: PermissionMode; label: string; description: string }[] = [
     { mode: 'default', label: 'Default', description: 'Ask before edits and commands' },
     { mode: 'acceptEdits', label: 'Accept edits', description: 'Edit files without asking' },
@@ -82,9 +81,6 @@ export const MODES: { mode: PermissionMode; label: string; description: string }
     { mode: 'bypassPermissions', label: 'Bypass permissions', description: 'Never ask: everything is allowed' },
     { mode: 'dontAsk', label: "Don't ask", description: 'Deny anything not already allowed' },
 ];
-
-/** How many modes Shift+Tab cycles through. */
-const CYCLED_MODES = 4;
 
 export const EFFORTS: EffortLevel[] = ['low', 'medium', 'high', 'xhigh', 'max'];
 
@@ -685,12 +681,6 @@ export class AgentSession {
             this.mode = before;
             this.notice(`Can't switch to ${modeLabel(mode)}: ${e.message}`, true);
         });
-    }
-
-    /** The next mode Shift+Tab goes to. */
-    nextMode(): PermissionMode {
-        const at = MODES.findIndex((m) => m.mode === (this.mode ?? 'default'));
-        return MODES[at >= 0 && at < CYCLED_MODES ? (at + 1) % CYCLED_MODES : 0].mode;
     }
 
     setEffort(effort: EffortLevel | undefined): void {

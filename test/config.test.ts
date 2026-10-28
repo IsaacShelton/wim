@@ -13,6 +13,9 @@ test('the defaults keep Claude Code off and have a preset for each level', () =>
     assert.deepEqual(c.claude.presets.low, { model: 'claude-haiku-5-5', effort: 'low' });
     assert.deepEqual(c.claude.presets.medium, { model: 'claude-sonnet-5-5', effort: 'medium' });
     assert.deepEqual(c.claude.presets.high, { model: 'claude-opus-5-5', effort: 'high' });
+    assert.equal(c.claude.defaultPreset, 'high', 'new sessions start on the high preset');
+    // `null` keeps Claude Code's own settings.
+    assert.equal(parseConfig(JSON.stringify({ claude: { defaultPreset: null } })).config.claude.defaultPreset, undefined);
 });
 
 test('settings override the defaults, and the rest stays', () => {

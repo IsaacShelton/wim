@@ -27,8 +27,8 @@ export interface Config {
         enabled: boolean;
         /** Settings for low, medium and high complexity tasks. */
         presets: Record<PresetName, Preset>;
-        /** The preset new sessions start with (by default, Claude Code's own
-         * settings). */
+        /** The preset new sessions start with (by default `high`); unset
+         * (`null` in the file) keeps Claude Code's own settings. */
         defaultPreset?: PresetName;
         /** How long the prompt cache lives after a request, in minutes. */
         cacheMinutes: number;
@@ -48,6 +48,7 @@ export const DEFAULT_CONFIG: Config = {
             medium: { model: 'claude-sonnet-5-5', effort: 'medium' },
             high: { model: 'claude-opus-5-5', effort: 'high' },
         },
+        defaultPreset: 'high',
         cacheMinutes: 60,
     },
     terminal: {},
@@ -103,9 +104,11 @@ export function parseConfig(text: string): { config: Config; warnings: string[] 
             if (typeof claude.cacheMinutes === 'number' && claude.cacheMinutes > 0) config.claude.cacheMinutes = claude.cacheMinutes;
             else warn('claude.cacheMinutes', 'a number above 0');
         }
-        if (claude.defaultPreset !== undefined) {
+        if (claude.defaultPreset === null) {
+            delete config.claude.defaultPreset;
+        } else if (claude.defaultPreset !== undefined) {
             if (PRESET_NAMES.includes(claude.defaultPreset as PresetName)) config.claude.defaultPreset = claude.defaultPreset as PresetName;
-            else warn('claude.defaultPreset', '"low", "medium" or "high"');
+            else warn('claude.defaultPreset', '"low", "medium", "high" or null');
         }
         const presets = claude.presets;
         if (presets !== undefined && !isObject(presets)) {

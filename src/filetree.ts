@@ -2,8 +2,11 @@
 //
 // Keys while it has focus: `j`/`k` move, `gg`/`G` jump, `<CR>`/`o` open a
 // file or toggle a directory, `l` expands, `h` collapses (or goes to the
-// parent), `a` creates a file or directory, `R` re-reads the disk, `q` hides
-// the tree, `<Esc>` returns to the editor.
+// parent), `a` creates a file or directory, `dd` deletes one (after asking),
+// `R` re-reads the disk, `q` hides the tree, `<Esc>` returns to the editor.
+//
+// Names are colored by their git status; a directory takes the status of
+// what's changed inside it.
 
 import { spawnSync } from 'node:child_process';
 import * as fs from 'node:fs';
@@ -15,6 +18,13 @@ import { stripPrefix } from './paths';
 /** Entries never shown in the tree. */
 const HIDDEN = ['.git', '.DS_Store'];
 
+/** A path's git status, as the tree colors it. Deleted files aren't in the
+ * tree, but make their directories `Modified`. */
+export type GitStatus = 'Untracked' | 'Staged' | 'Modified' | 'Conflict';
+
+/** Which status a directory shows when it holds several. */
+const STATUS_RANK: Record<GitStatus, number> = { Untracked: 1, Staged: 2, Modified: 3, Conflict: 4 };
+
 export interface Row {
     path: string;
     name: string;
@@ -23,6 +33,7 @@ export interface Row {
     expanded: boolean;
     /** A directory with nothing (visible) in it. */
     empty: boolean;
+    git: GitStatus | undefined;
 }
 
 export type TreeAction =
@@ -31,7 +42,9 @@ export type TreeAction =
     | { t: 'Close' }
     | { t: 'FocusEditor' }
     /** Ask for the name of a file to create in `dir`. */
-    | { t: 'Create'; dir: string };
+    | { t: 'Create'; dir: string }
+    /** Ask whether to delete `path`. */
+    | { t: 'Delete'; path: string; isDir: boolean };
 
 const NONE: TreeAction = { t: 'None' };
 
@@ -43,14 +56,20 @@ export class FileTree {
     private listings = new Map<string, Entry[]>();
     /** Paths git ignores, hidden like nvim-tree's `git_ignored` filter. */
     private ignored: Set<string>;
+    /** Changed paths, and the directories holding them. */
+    private status = new Map<string, GitStatus>();
+    /** Directories git doesn't track: everything in them is untracked. */
+    private untrackedDirs: string[] = [];
     rows: Row[] = [];
     selected = 0;
     scroll = 0;
     private viewRows = 20;
     private pendingG = false;
+    private pendingD = false;
 
     constructor(private root: string) {
         this.ignored = gitIgnored(root);
+        this.readGitStatus();
         this.rebuild();
     }
 
@@ -58,6 +77,7 @@ export class FileTree {
         if (root === this.root) return;
         this.ignored = gitIgnored(root);
         this.root = root;
+        this.readGitStatus();
         this.expanded.clear();
         this.listings.clear();
         this.rows = [];
@@ -75,7 +95,28 @@ export class FileTree {
     refresh(): void {
         this.listings.clear();
         this.ignored = gitIgnored(this.root);
+        this.readGitStatus();
         this.rebuild();
+    }
+
+    /** Read git's status again (after a file is written, say), without
+     * re-reading directories. */
+    refreshGitStatus(): void {
+        this.readGitStatus();
+        for (const row of this.rows) row.git = this.gitStatus(row.path);
+    }
+
+    private readGitStatus(): void {
+        const { status, untrackedDirs } = gitStatus(this.root);
+        this.status = status;
+        this.untrackedDirs = untrackedDirs;
+    }
+
+    /** The git status of `p`, a file or directory under the root. */
+    gitStatus(p: string): GitStatus | undefined {
+        const s = this.status.get(p);
+        if (s) return s;
+        return this.untrackedDirs.some((d) => p.startsWith(d + path.sep)) ? 'Untracked' : undefined;
     }
 
     private listing(dir: string): Entry[] {
@@ -112,7 +153,7 @@ export class FileTree {
             const p = path.join(dir, name);
             const expanded = isDir && this.expanded.has(p);
             const empty = isDir && this.listing(p).length === 0;
-            rows.push({ path: p, name, isDir, depth, expanded, empty });
+            rows.push({ path: p, name, isDir, depth, expanded, empty, git: this.gitStatus(p) });
             if (expanded) this.pushChildren(p, depth + 1, rows);
         }
     }
@@ -174,6 +215,21 @@ export class FileTree {
         return p;
     }
 
+    /** Delete `p` (a directory with everything in it) and re-read the
+     * disk. Throws if it can't be deleted. */
+    remove(p: string): void {
+        const at = this.rows.findIndex((r) => r.path === p);
+        fs.rmSync(p, { recursive: true });
+        this.refresh();
+        // The selection stays where the deleted row was.
+        if (at >= 0) this.select(Math.min(at, this.rows.length - 1));
+    }
+
+    /** `p` relative to the tree's root, as shown in prompts. */
+    relative(p: string): string {
+        return stripPrefix(p, this.root) || p;
+    }
+
     /** `dir` as typed in a prompt: relative to the root, with a trailing
      * separator (empty for the root itself). */
     promptPath(dir: string): string {
@@ -206,7 +262,9 @@ export class FileTree {
 
     handleKey(key: KeyInput): TreeAction {
         const afterG = this.pendingG;
+        const afterD = this.pendingD;
         this.pendingG = false;
+        this.pendingD = false;
         const half = Math.max(Math.floor(this.viewRows / 2), 1);
         const k = key.key;
         const plain = !key.ctrl;
@@ -224,6 +282,10 @@ export class FileTree {
         } else if ((k === 'h' && plain) || k === 'Left') this.collapseOrParent();
         else if (k === 'R' && plain) this.refresh();
         else if (k === 'a' && plain) return { t: 'Create', dir: this.selectedDir() };
+        else if (k === 'd' && plain && afterD) {
+            const row = this.rows[this.selected];
+            if (row) return { t: 'Delete', path: row.path, isDir: row.isDir };
+        } else if (k === 'd' && plain) this.pendingD = true;
         else if (k === 'q' && plain) return { t: 'Close' };
         else if (k === 'Esc') return { t: 'FocusEditor' };
         return NONE;
@@ -239,6 +301,66 @@ function isDirectory(p: string): boolean {
         return fs.statSync(p).isDirectory();
     } catch {
         return false;
+    }
+}
+
+/** Changed paths under `root` with their status (directories take the
+ * strongest status inside them), and directories git doesn't track. Empty
+ * outside a repository. */
+function gitStatus(root: string): { status: Map<string, GitStatus>; untrackedDirs: string[] } {
+    const status = new Map<string, GitStatus>();
+    const untrackedDirs: string[] = [];
+    const git = (args: string[]) => spawnSync('git', ['-C', root, ...args], { encoding: 'utf8', windowsHide: true, maxBuffer: 64 * 1024 * 1024 });
+    // Status paths are relative to the top of the repository.
+    const top = git(['rev-parse', '--show-toplevel']);
+    if (top.status !== 0 || typeof top.stdout !== 'string') return { status, untrackedDirs };
+    const out = git(['status', '--porcelain=v1', '-z']);
+    if (out.status !== 0 || typeof out.stdout !== 'string') return { status, untrackedDirs };
+    // On Windows, git gives the top with forward slashes.
+    const base = path.resolve(top.stdout.trim());
+    const realRoot = realpath(root);
+    const mark = (p: string, s: GitStatus): void => {
+        // Through the directories up to the root, each keeping the strongest
+        // status inside it.
+        for (let at = p; ; at = path.dirname(at)) {
+            const rel = stripPrefix(at, realRoot);
+            if (rel === undefined) break;
+            const shown = rel === '' ? root : path.join(root, rel);
+            const old = status.get(shown);
+            if (!old || STATUS_RANK[s] > STATUS_RANK[old]) status.set(shown, s);
+            if (rel === '') break;
+        }
+    };
+    const entries = out.stdout.split('\0');
+    for (let i = 0; i < entries.length; i++) {
+        const entry = entries[i];
+        if (entry.length < 4) continue;
+        const x = entry[0];
+        const y = entry[1];
+        const file = entry.slice(3);
+        // A rename or copy is followed by the path it came from.
+        if (x === 'R' || x === 'C') i++;
+        const p = path.join(base, file.replace(/\/$/, ''));
+        let s: GitStatus;
+        if (x === '?') s = 'Untracked';
+        else if (x === 'U' || y === 'U' || (x === 'A' && y === 'A') || (x === 'D' && y === 'D')) s = 'Conflict';
+        else if (y !== ' ') s = 'Modified';
+        else s = x === 'D' ? 'Modified' : 'Staged';
+        // A whole untracked directory is listed as just the directory.
+        if (s === 'Untracked' && file.endsWith('/')) {
+            const rel = stripPrefix(p, realRoot);
+            if (rel !== undefined) untrackedDirs.push(rel === '' ? root : path.join(root, rel));
+        }
+        mark(p, s);
+    }
+    return { status, untrackedDirs };
+}
+
+function realpath(p: string): string {
+    try {
+        return fs.realpathSync.native(p);
+    } catch {
+        return p;
     }
 }
 

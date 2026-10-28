@@ -74,6 +74,13 @@ made where a request was open to interpretation.
 3.2  Tab and Shift+Tab cycle to the next and previous buffer.
 3.3  Open buffers are shown along the top of the window when there is more
      than one.
+3.4  `,x` and `:q` on a buffer with unsaved changes ask y/n rather than
+     refusing (asked for later).
+     Decided: `Discard changes to "name"? (y/n)` on the command line, for
+     `:q` (also on the last buffer, before quitting) and `:bd` (which `,x`
+     maps to). `y` closes it; `n` or Esc keeps it; any other key keeps it
+     and does what it does, so typing `:q!` still works. `:qa` and closing
+     the window are unchanged.
 
 
 4. File tree
@@ -92,6 +99,18 @@ made where a request was open to interpretation.
      (or the selected file's folder), relative to the tree's root; a
      trailing `/` makes a folder, missing folders are made, and the new
      entry is selected while the tree keeps focus.
+4.5  `dd` in the tree deletes a file, after a y/n question (asked for
+     later).
+     Decided: the question is on the command line; `y` deletes, `n` or Esc
+     keeps it. A folder is deleted with everything in it, and the question
+     says so. Buffers of a deleted file stay open.
+4.6  Names in the tree are colored by git status (asked for later).
+     Decided: untracked, staged, modified (or deleted inside a folder) and
+     conflicted each have a color from the theme; a folder shows the
+     strongest status inside it (conflicted, then modified, staged,
+     untracked). As the open file's color may now be its status, its name
+     is also bold. Status is read when the tree is shown, after writes and
+     agent edits, on leaving the terminal or agents panel, and with `R`.
 
 
 5. Windows and key bindings
@@ -286,7 +305,8 @@ made where a request was open to interpretation.
      interrupts Claude, from either mode.
      Decided: "context" is the session's context use (percentage, and by
      kind with `c`, as `/context` shows it) and cost. Model, permission mode
-     (Shift+Tab cycles as in the terminal) and effort come from pickers.
+     and effort come from pickers. Shift+Tab goes to the previous session,
+     as Tab goes to the next (asked for later; not the terminal's mode cycle).
      The bypass-permissions mode is offered (it is never the default).
      Decided: permission prompts and AskUserQuestion are answered in the
      panel, as in the terminal: Yes, Yes and don't ask again (Claude Code's
@@ -318,8 +338,11 @@ made where a request was open to interpretation.
      Decided: `L`, `M`, `H` in Normal mode, `P` to pick, or a click on the
      preset in the header. A preset applies to the next request, also while
      a session is working; picking a model or effort by hand leaves the
-     preset. `claude.defaultPreset` (unset by default, which keeps Claude
-     Code's own settings) is what new sessions start with.
+     preset. `claude.defaultPreset` is what new sessions start with.
+14.9 The default agent uses the high preset (asked for later).
+     Decided: `claude.defaultPreset` is `high` by default (and set in
+     wim.config.json); `null` keeps Claude Code's own settings, as unset
+     did before.
 14.7 The panel's top shows context use and whether the prompt cache is
      stale.
      Decided: a second row under the model, mode and effort: a meter and
@@ -347,14 +370,22 @@ made where a request was open to interpretation.
 16. Terminal
 ------------
 16.1 An integrated terminal: zsh on macOS, PowerShell on Windows.
-     Decided: it sits under the editor (Cmd+J, `,tt`, `:Terminal`). Wim has
-     no native code, so there is no pseudo-terminal: the shell runs on
-     pipes, commands are typed in Wim's prompt and the output is plain text.
-     Full-screen programs and programs that read input do not work. It is
-     a login shell (so PATH is set up) but not an interactive one, since
-     that would run ~/.zshrc, prompt themes and all, with no terminal.
-     Stopping a command restarts the shell in the same directory.
-     The Windows PowerShell setup has not been tried.
+     Decided: it sits under the editor (Cmd+J, `,tt`, `:Terminal`).
+16.2 The terminal is a real tty (asked for later).
+     Decided: the shell runs on a pseudo-terminal made by the system's
+     `script` command (behind `cat`, as macOS's `script` refuses a socket
+     for input), so Wim still has no native code; @xterm/headless, plain
+     JavaScript, emulates the terminal, and Wim paints its screen with the
+     theme's 16 colors (and 256 and true colors). The shell is an
+     interactive login shell, so ~/.zshrc applies. The pseudo-terminal is
+     resized with `stty` from outside, which tells the program (SIGWINCH).
+     Keys go to the program as xterm sends them, except Ctrl+h/j/k/l, which
+     move between windows (5.1, 14.4); Esc goes to the program. The wheel
+     and PageUp/PageDown scroll back, except in full-screen programs. When
+     the shell exits, Enter starts another. Where there is no `script`
+     (Windows), the earlier line-based terminal stays: commands typed in
+     Wim's prompt, output as plain text. The Linux (util-linux `script`)
+     and Windows setups have not been tried.
 
 
 17. Bundled font

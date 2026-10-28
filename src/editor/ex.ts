@@ -197,7 +197,14 @@ function exCommand(ed: Editor, input: string): void {
                 return;
             }
             if (args !== '' && !/^[0-9]+$/.test(args)) fail(`E94: No matching buffer for ${args}`);
-            deleteBuffer(ed, args === '' ? undefined : Number(args), bang);
+            const id = args === '' ? undefined : Number(args);
+            const info = ed.bufferList().find((b) => (id === undefined ? b.active : b.id === id));
+            // Closing a buffer with unsaved changes asks first.
+            if (info?.modified && !bang) {
+                ed.ask(`Discard changes to "${info.name}"?`, () => deleteBuffer(ed, id, true));
+                return;
+            }
+            deleteBuffer(ed, id, bang);
             return;
         }
         case 's':

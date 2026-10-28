@@ -72,6 +72,19 @@ const ONE_DARK = {
     POPUP_BG: '#21252b',
     POPUP_BORDER: '#5c6370',
     POPUP_SELECTION: '#3e4451',
+
+    // The file tree's names by git status.
+    GIT_UNTRACKED: '#98c379',
+    GIT_STAGED: '#56b6c2',
+    GIT_MODIFIED: '#d19a66',
+    GIT_CONFLICT: '#e06c75',
+
+    /** The terminal's 16 colors: black, red, green, yellow, blue, magenta,
+     * cyan and white, then their bright forms. */
+    ANSI: [
+        '#3f4451', '#e06c75', '#98c379', '#e5c07b', '#61afef', '#c678dd', '#56b6c2', '#abb2bf',
+        '#5c6370', '#ef7b84', '#a5d48a', '#f0cb8a', '#74bdf7', '#d48deb', '#66c5d1', '#ffffff',
+    ] as string[],
 };
 
 export type Theme = typeof ONE_DARK;
@@ -144,6 +157,17 @@ const NORD: Theme = {
     POPUP_BG: '#3B4252', // Pmenu
     POPUP_BORDER: '#4C566A', // FloatBorder
     POPUP_SELECTION: '#434C5E', // PmenuSel
+
+    GIT_UNTRACKED: '#A3BE8C', // aurora green
+    GIT_STAGED: '#8FBCBB', // frost polar water
+    GIT_MODIFIED: '#D08770', // aurora orange
+    GIT_CONFLICT: '#BF616A', // aurora red
+
+    // Nord's terminal colors.
+    ANSI: [
+        '#3B4252', '#BF616A', '#A3BE8C', '#EBCB8B', '#81A1C1', '#B48EAD', '#88C0D0', '#E5E9F0',
+        '#4C566A', '#BF616A', '#A3BE8C', '#EBCB8B', '#81A1C1', '#B48EAD', '#8FBCBB', '#ECEFF4',
+    ],
 };
 
 const THEMES = { onedark: ONE_DARK, nord: NORD };
