@@ -82,7 +82,7 @@ export async function main(argv: string[]): Promise<void> {
         icons: fontPath !== undefined,
         config,
         configWarnings: warnings,
-        onFrame: (title, dirty, cmds) => send(client, { t: 'frame', title, dirty, cmds }),
+        onFrame: (title, dirty, cmds, animating) => send(client, { t: 'frame', title, dirty, cmds, animating }),
         onAudio: (cmd) => send(client, { t: 'audio', cmd }),
         onQuit: shutdown,
     });

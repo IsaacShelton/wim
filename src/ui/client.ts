@@ -18,6 +18,8 @@ let charW = 9;
 let lineH = 23;
 let frame: Extract<ServerMessage, { t: 'frame' }> | undefined;
 let drawQueued = false;
+/** Whether the window has asked for the frame after the one it has. */
+let tickSent = false;
 let quitting = false;
 let socket: WebSocket | undefined;
 let pressed = false;
@@ -64,6 +66,12 @@ function queueDraw(): void {
     requestAnimationFrame(() => {
         drawQueued = false;
         draw();
+        // Ask for a glide's next frame as soon as this one is up, so the
+        // frames come in step with the display.
+        if (frame?.animating && !tickSent) {
+            tickSent = true;
+            send({ t: 'tick' });
+        }
     });
 }
 
@@ -307,13 +315,33 @@ function drawBlock(c: string, x: number, y: number): boolean {
 
 /** Images by address, loaded once; drawing waits for them to arrive. */
 const images = new Map<string, HTMLImageElement>();
+/** Images decoded once and for all. WebKit lets go of a large image's
+ * decoded pixels and decodes it again when it is next drawn, which stalls
+ * scrolling for a moment each time one comes into view. */
+const bitmaps = new WeakMap<HTMLImageElement, ImageBitmap>();
+
+/** Decode `img` into a bitmap to draw instead, once it can be. */
+function keepDecoded(img: HTMLImageElement): void {
+    createImageBitmap(img).then(
+        (bitmap) => {
+            bitmaps.set(img, bitmap);
+            queueDraw();
+        },
+        // The image itself is drawn instead.
+        () => {},
+    );
+}
 
 function drawImage(cmd: Extract<DrawCmd, ['image', ...unknown[]]>): void {
     const [, x, y, w, h, src, fit] = cmd;
     let img = images.get(src);
     if (!img) {
         img = new Image();
-        img.addEventListener('load', queueDraw);
+        const loaded = img;
+        img.addEventListener('load', () => {
+            keepDecoded(loaded);
+            queueDraw();
+        });
         img.addEventListener('error', queueDraw);
         img.src = `${src}&t=${encodeURIComponent(token)}`;
         images.set(src, img);
@@ -323,6 +351,7 @@ function drawImage(cmd: Extract<DrawCmd, ['image', ...unknown[]]>): void {
         drawText(x + charW, y + charW, "Can't show this image", '#e06c75');
         return;
     }
+    const source = bitmaps.get(img) ?? img;
     if (fit) {
         // Shrink to fit, keeping the aspect ratio; small images keep their size.
         const scale = Math.min(1, w / img.naturalWidth, h / img.naturalHeight);
@@ -330,13 +359,13 @@ function drawImage(cmd: Extract<DrawCmd, ['image', ...unknown[]]>): void {
         const dh = img.naturalHeight * scale;
         ctx.imageSmoothingEnabled = true;
         ctx.imageSmoothingQuality = 'high';
-        ctx.drawImage(img, x + (w - dw) / 2, y + (h - dh) / 2, dw, dh);
+        ctx.drawImage(source, x + (w - dw) / 2, y + (h - dh) / 2, dw, dh);
         return;
     }
     // Enlarged a lot, show the pixels rather than blur them.
     ctx.imageSmoothingEnabled = w < img.naturalWidth * 2;
     ctx.imageSmoothingQuality = 'high';
-    ctx.drawImage(img, x, y, w, h);
+    ctx.drawImage(source, x, y, w, h);
 }
 
 // ----- Diagrams -----------------------------------------------------------------------
@@ -379,7 +408,7 @@ function drawDiagram(cmd: Extract<DrawCmd, ['diagram', ...unknown[]]>): void {
     if (typeof img === 'string' || !img.complete || w <= 0) return;
     ctx.imageSmoothingEnabled = true;
     ctx.imageSmoothingQuality = 'high';
-    ctx.drawImage(img, x, y, w, h);
+    ctx.drawImage(bitmaps.get(img) ?? img, x, y, w, h);
 }
 
 async function renderDiagram(key: string, id: string, source: string, theme: Record<string, string>): Promise<void> {
@@ -411,6 +440,7 @@ async function renderDiagram(key: string, id: string, source: string, theme: Rec
         const img = new Image();
         img.src = `data:image/svg+xml;charset=utf-8,${encodeURIComponent(new XMLSerializer().serializeToString(root))}`;
         await img.decode();
+        keepDecoded(img);
         diagrams.set(key, img);
         send({ t: 'diagram', id, width, height });
     } catch (e) {
@@ -681,6 +711,7 @@ function connect(): void {
         const msg = JSON.parse(String(e.data)) as ServerMessage;
         if (msg.t === 'frame') {
             frame = msg;
+            tickSent = false;
             if (document.title !== msg.title) document.title = msg.title;
             queueDraw();
         } else if (msg.t === 'quit') {

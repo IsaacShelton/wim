@@ -25,11 +25,16 @@ export type ClientMessage =
     | { t: 'diagram'; id: string; width: number; height: number; error?: string }
     /** A file dropped on the window, where it was dropped, with its bytes in
      * base64 (or why the window couldn't read them). One message per file. */
-    | { t: 'drop'; x: number; y: number; name: string; data?: string; error?: string };
+    | { t: 'drop'; x: number; y: number; name: string; data?: string; error?: string }
+    /** The window drew an `animating` frame and is ready for the next one. */
+    | { t: 'tick' };
 
 /** Messages from Node to the window. */
 export type ServerMessage =
-    | { t: 'frame'; title: string; dirty: boolean; cmds: DrawCmd[] }
+    /** `animating`: something is gliding, so the window asks for the next
+     * frame (with `tick`) once it has drawn this one, in step with the
+     * display. */
+    | { t: 'frame'; title: string; dirty: boolean; cmds: DrawCmd[]; animating?: boolean }
     /** Wim is exiting; the window should close. */
     | { t: 'quit' }
     | { t: 'audio'; cmd: AudioCommand };

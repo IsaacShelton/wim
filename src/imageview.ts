@@ -6,8 +6,9 @@
 const STEP = 1.25;
 const MIN_SCALE = 0.02;
 const MAX_SCALE = 64;
-/** The share of the remaining distance covered each frame when gliding. */
+/** The share of the remaining distance covered every `EASE_MS` when gliding. */
 const EASE = 0.3;
+const EASE_MS = 16;
 
 export interface Size {
     width: number;
@@ -38,6 +39,8 @@ export class ImageView {
     /** Where it is drawn now; the same as `target` unless gliding. */
     private shown: State;
     private gliding = false;
+    /** When the glide last moved, in ms; unset as it leaves rest. */
+    private ticked: number | undefined;
 
     constructor(private readonly image: Size) {
         this.target = { scale: 1, cx: image.width / 2, cy: image.height / 2 };
@@ -77,6 +80,7 @@ export class ImageView {
     private go(next: State, glide: boolean): void {
         this.target = this.clamp(next);
         if (glide) {
+            if (!this.gliding) this.ticked = undefined;
             this.gliding = true;
         } else {
             this.shown = { ...this.target };
@@ -111,17 +115,21 @@ export class ImageView {
         this.go({ scale: from.scale, cx: from.cx - dx / from.scale, cy: from.cy - dy / from.scale }, glide);
     }
 
-    /** Glide one frame closer to the target; returns whether there is further
-     * to go. */
-    tick(view: Size): boolean {
+    /** Glide to where it is at `now` (ms), however long the frames take;
+     * returns whether there is further to go. */
+    tick(view: Size, now: number): boolean {
         if (!this.gliding) return false;
         if (this.fit) this.target.scale = this.fitScale(view);
+        // The first frame already moves.
+        const dt = Math.max(now - (this.ticked ?? now - EASE_MS), 0);
+        this.ticked = now;
+        const ease = 1 - (1 - EASE) ** (dt / EASE_MS);
         const t = this.target;
         const s = this.shown;
         // Zoom evenly by moving the scale's logarithm.
-        const scale = Math.exp(Math.log(s.scale) + (Math.log(t.scale) - Math.log(s.scale)) * EASE);
-        const cx = s.cx + (t.cx - s.cx) * EASE;
-        const cy = s.cy + (t.cy - s.cy) * EASE;
+        const scale = Math.exp(Math.log(s.scale) + (Math.log(t.scale) - Math.log(s.scale)) * ease);
+        const cx = s.cx + (t.cx - s.cx) * ease;
+        const cy = s.cy + (t.cy - s.cy) * ease;
         // Done once less than half a screen pixel is left to go.
         const near =
             Math.abs(scale - t.scale) * Math.max(this.image.width, this.image.height) < 0.5 &&
@@ -134,6 +142,11 @@ export class ImageView {
         }
         this.shown = { scale, cx, cy };
         return true;
+    }
+
+    /** Whether it is on its way somewhere. */
+    get moving(): boolean {
+        return this.gliding;
     }
 
     place(view: Size): Placement {

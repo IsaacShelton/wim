@@ -60,7 +60,9 @@ const FLASH_DURATION = 300;
 /** How far the mouse must move before a press becomes a drag, in pixels. */
 const DRAG_THRESHOLD = 4;
 /** Time between frames of an animation, in ms. */
-const FRAME = 16;
+/** While something glides, the window asks for each frame as the display
+ * is ready for it; failing that (hidden, say), they come this often. */
+const FALLBACK_FRAME = 50;
 /** How quickly the caret and the text glide (with `editor.smoothCaret` and
  * `editor.smoothScroll`): each closes most of the way in about three times
  * this, in ms. */
@@ -162,7 +164,7 @@ export interface AppOptions {
     /** Problems found in the settings file, shown at startup. */
     configWarnings?: string[];
     /** Called whenever the window should be repainted. */
-    onFrame: (title: string, dirty: boolean, cmds: DrawCmd[]) => void;
+    onFrame: (title: string, dirty: boolean, cmds: DrawCmd[], animating: boolean) => void;
     /** Called to control the window's sound player. */
     onAudio?: (cmd: AudioCommand) => void;
     /** Called once when Wim should exit. */
@@ -227,16 +229,15 @@ export class WimApp {
     /** Hover documentation or diagnostics next to the cursor. */
     private float: Float | undefined;
     private refreshQueued = false;
-    /** Draws the next frame while an image glides to a new zoom or place. */
-    private imageTimer: NodeJS.Timeout | undefined;
     /** The active window's view and caret on their way to where they are
      * (with smooth scrolling or caret), for that window and buffer. */
     private readonly topGlide = new Glide(SCROLL_GLIDE);
     private readonly lineGlide = new Glide(CARET_GLIDE);
     private readonly colGlide = new Glide(CARET_GLIDE);
     private glidesFor: { win: Win; bufferId: number; markdown: boolean } | undefined;
-    /** Draws the next frame while the view or caret glides. */
-    private glideTimer: NodeJS.Timeout | undefined;
+    /** Draws the next frame while something glides, if the window doesn't
+     * ask for it first. */
+    private frameTimer: NodeJS.Timeout | undefined;
     /** An image zoom button just clicked, drawn pressed for a moment. */
     private pressedButton: ImageAction | undefined;
     private pressedTimer: NodeJS.Timeout | undefined;
@@ -373,6 +374,10 @@ export class WimApp {
             case 'diagram':
                 this.diagramSizes.set(msg.id, msg.error !== undefined ? { error: msg.error } : { width: msg.width, height: msg.height });
                 this.diagramVersion++;
+                break;
+            case 'tick':
+                // The window is ready for the next frame of a glide, drawn
+                // below.
                 break;
             case 'drop':
                 // Images dropped on the agents panel go with the next message.
@@ -727,8 +732,7 @@ export class WimApp {
 
     /** Stop the language servers (Wim is exiting). */
     dispose(): void {
-        if (this.imageTimer) clearTimeout(this.imageTimer);
-        if (this.glideTimer) clearTimeout(this.glideTimer);
+        if (this.frameTimer) clearTimeout(this.frameTimer);
         if (this.pressedTimer) clearTimeout(this.pressedTimer);
         this.completion.close();
         this.signature.close();
@@ -1087,7 +1091,6 @@ export class WimApp {
         else if (key.key === '0') this.imageAction(view, 'Fit');
         else if (key.key in pans && !key.alt) view.pan(...pans[key.key], size, true);
         else return false;
-        this.glideImage();
         return true;
     }
 
@@ -1162,27 +1165,12 @@ export class WimApp {
         return false;
     }
 
-    /** Draw frames until the image has glided to where it is going. */
-    private glideImage(): void {
-        if (this.imageTimer) return;
-        const frame = (): void => {
-            this.imageTimer = undefined;
-            const view = this.imageView();
-            if (!view || this.quitting) return;
-            const moving = view.tick(rectSize(imageArea(this.layout().textArea, this.metrics.lineH)));
-            this.render();
-            if (moving) this.imageTimer = setTimeout(frame, FRAME);
-        };
-        this.imageTimer = setTimeout(frame, FRAME);
-    }
-
     /** Zoom in, out, or back to fitting the window, gliding there. */
     private imageAction(view: ImageView, action: ImageAction, layout = this.layout()): void {
         const size = rectSize(imageArea(layout.textArea, layout.lineH));
         if (action === 'In') view.zoom(1, size, undefined, true);
         else if (action === 'Out') view.zoom(-1, size, undefined, true);
         else view.reset(size, true);
-        this.glideImage();
     }
 
     /** After `<C-w>`: `h`/`j`/`k`/`l` (or arrows) move to the window that way,
@@ -1797,8 +1785,7 @@ export class WimApp {
             this.quitting = true;
             this.clearMapTimer();
             if (this.flashTimer) clearTimeout(this.flashTimer);
-            if (this.imageTimer) clearTimeout(this.imageTimer);
-            if (this.glideTimer) clearTimeout(this.glideTimer);
+            if (this.frameTimer) clearTimeout(this.frameTimer);
             if (this.pressedTimer) clearTimeout(this.pressedTimer);
             this.dispose();
             this.opts.onQuit();
@@ -1828,14 +1815,19 @@ export class WimApp {
                 this.render();
             }, 16);
         }
+        const now = performance.now();
+        const image = this.imageView();
+        image?.tick(rectSize(imageArea(layout.textArea, layout.lineH)), now);
         const panes = this.panes(layout);
-        const shown = this.shown(layout, panes);
-        if (this.gliding() && !this.glideTimer) {
-            this.glideTimer = setTimeout(() => {
-                this.glideTimer = undefined;
-                this.render();
-            }, FRAME);
-        }
+        const shown = this.shown(layout, panes, now);
+        const animating = this.gliding() || (image?.moving ?? false);
+        if (this.frameTimer) clearTimeout(this.frameTimer);
+        this.frameTimer = animating
+            ? setTimeout(() => {
+                  this.frameTimer = undefined;
+                  this.render();
+              }, FALLBACK_FRAME)
+            : undefined;
         const modified = this.editor.isModified() ? ' [+]' : '';
         const title = `${this.editor.fileName()}${modified} - Wim`;
         const dirty = this.editor.firstModifiedBuffer() !== undefined;
@@ -1872,14 +1864,14 @@ export class WimApp {
         const cmds = painter.paint();
         this.tabHits = painter.tabHits;
         this.badgeHit = painter.badgeHit;
-        this.opts.onFrame(title, dirty, cmds);
+        this.opts.onFrame(title, dirty, cmds, animating);
     }
 
     /** Where the active window's view and caret are shown: gliding toward
      * where they are when smooth scrolling or caret is on, and jumping there
      * in another window or buffer, or between a Markdown file's text and its
      * rendered view. A long jump only glides its last screen. */
-    private shown(layout: Layout, panes: Pane[]): Shown {
+    private shown(layout: Layout, panes: Pane[], now: number): Shown {
         const ed = this.editor;
         const line = ed.cursor.line;
         const col = ed.displayCol(line, ed.cursor.col);
@@ -1893,7 +1885,6 @@ export class WimApp {
             this.colGlide.reset();
             this.glidesFor = { win, bufferId: ed.bufferId(), markdown };
         }
-        const now = Date.now();
         const { smoothCaret, smoothScroll } = this.config.editor;
         // A rendered Markdown view scrolls by its rows.
         const top = content?.t === 'Markdown' ? content.top : ed.scrollTop;
