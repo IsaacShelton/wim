@@ -1430,6 +1430,19 @@ test('with smooth scrolling and caret, the text and the caret glide to their pla
         const [x] = caret(last());
         await settle();
         assert.ok(caret(last())[0] > x, 'it went on to the end');
+
+        // A rendered Markdown view glides by its rows.
+        const notes = path.join(dir, 'notes.md');
+        fs.writeFileSync(notes, Array.from({ length: 200 }, (_, i) => `line ${i}`).join('\n\n'));
+        const md = harness(notes, [], { config });
+        md.type(',m');
+        const mdLast = (): DrawCmd[] => md.frames[md.frames.length - 1];
+        await settle();
+        md.type(' ');
+        assert.ok(lineYs(mdLast()).some((y) => y % 20 !== 0), 'the rendered text is on its way');
+        await settle();
+        assert.ok(lineYs(mdLast()).every((y) => y % 20 === 0), 'and has arrived');
+        assert.doesNotMatch(md.text(), /^line 0$/m, 'a page down');
     } finally {
         process.chdir(cwd);
         fs.rmSync(dir, { recursive: true });

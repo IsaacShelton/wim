@@ -130,8 +130,9 @@ interface Layout {
 
 type Focus = 'Editor' | 'Tree' | 'Agents' | 'Terminal';
 
-/** Where the active window's view and caret are shown: the top line, and
- * the caret's line and display column. Fractional while they glide. */
+/** Where the active window's view and caret are shown: the top line (or
+ * row, in a rendered Markdown view), and the caret's line and display
+ * column. Fractional while they glide. */
 interface Shown {
     top: number;
     line: number;
@@ -233,7 +234,7 @@ export class WimApp {
     private readonly topGlide = new Glide(SCROLL_GLIDE);
     private readonly lineGlide = new Glide(CARET_GLIDE);
     private readonly colGlide = new Glide(CARET_GLIDE);
-    private glidesFor: { win: Win; bufferId: number } | undefined;
+    private glidesFor: { win: Win; bufferId: number; markdown: boolean } | undefined;
     /** Draws the next frame while the view or caret glides. */
     private glideTimer: NodeJS.Timeout | undefined;
     /** An image zoom button just clicked, drawn pressed for a moment. */
@@ -1827,7 +1828,8 @@ export class WimApp {
                 this.render();
             }, 16);
         }
-        const shown = this.shown(layout);
+        const panes = this.panes(layout);
+        const shown = this.shown(layout, panes);
         if (this.gliding() && !this.glideTimer) {
             this.glideTimer = setTimeout(() => {
                 this.glideTimer = undefined;
@@ -1839,7 +1841,7 @@ export class WimApp {
         const dirty = this.editor.firstModifiedBuffer() !== undefined;
         const painter = new Painter(this.editor, layout, {
             metrics: this.metrics,
-            panes: this.panes(layout, shown),
+            panes,
             shown,
             diagnosticCounts: this.lsp.counts(this.editor.filePath),
             lspProgress: this.lsp.progressText(),
@@ -1875,23 +1877,28 @@ export class WimApp {
 
     /** Where the active window's view and caret are shown: gliding toward
      * where they are when smooth scrolling or caret is on, and jumping there
-     * in another window or buffer. A long jump only glides its last screen. */
-    private shown(layout: Layout): Shown {
+     * in another window or buffer, or between a Markdown file's text and its
+     * rendered view. A long jump only glides its last screen. */
+    private shown(layout: Layout, panes: Pane[]): Shown {
         const ed = this.editor;
         const line = ed.cursor.line;
         const col = ed.displayCol(line, ed.cursor.col);
         const win = this.windows.active;
+        const content = panes.find((p) => p.active)?.content;
+        const markdown = content?.t === 'Markdown';
         const g = this.glidesFor;
-        if (!g || g.win !== win || g.bufferId !== ed.bufferId()) {
+        if (!g || g.win !== win || g.bufferId !== ed.bufferId() || g.markdown !== markdown) {
             this.topGlide.reset();
             this.lineGlide.reset();
             this.colGlide.reset();
-            this.glidesFor = { win, bufferId: ed.bufferId() };
+            this.glidesFor = { win, bufferId: ed.bufferId(), markdown };
         }
         const now = Date.now();
         const { smoothCaret, smoothScroll } = this.config.editor;
+        // A rendered Markdown view scrolls by its rows.
+        const top = content?.t === 'Markdown' ? content.top : ed.scrollTop;
         return {
-            top: smoothScroll ? this.topGlide.step(ed.scrollTop, now, layout.rows) : ed.scrollTop,
+            top: smoothScroll ? this.topGlide.step(top, now, layout.rows) : top,
             line: smoothCaret ? this.lineGlide.step(line, now, layout.rows) : line,
             col: smoothCaret ? this.colGlide.step(col, now, layout.cols) : col,
         };
@@ -1946,7 +1953,7 @@ export class WimApp {
     }
 
     /** What each window shows, for painting. */
-    private panes(layout: Layout, shown: Shown): Pane[] {
+    private panes(layout: Layout): Pane[] {
         const ed = this.editor;
         const { charW: cw, lineH: lh } = layout;
         return layout.windows.flatMap((rect): Pane[] => {
@@ -1982,7 +1989,7 @@ export class WimApp {
                 bufferId: win.bufferId,
                 filePath: file,
                 cursor,
-                scrollTop: active ? shown.top : Math.min(win.scrollTop, last),
+                scrollTop: active ? ed.scrollTop : Math.min(win.scrollTop, last),
                 scrollLeft: active ? ed.scrollLeft : win.scrollLeft,
                 selection: active ? ed.selection() : undefined,
                 area: rect.area,
@@ -2281,9 +2288,11 @@ class Painter {
         const { area, bar } = pane.rect;
         const c = pane.content;
         this.clip(area);
-        if (c.t === 'Text') this.paintText(c.view);
+        // The active window is drawn where its view has glided to.
+        const top = this.st.shown.top;
+        if (c.t === 'Text') this.paintText(pane.active ? { ...c.view, scrollTop: top } : c.view);
         else if (c.t === 'Image') this.paintImage(area, c.file, c.image, c.placement);
-        else if (c.t === 'Markdown') this.paintMarkdown(area, c.rows, c.top, c.cols);
+        else if (c.t === 'Markdown') this.paintMarkdown(area, c.rows, pane.active ? top : c.top, c.cols);
         else this.paintAudio(area, c.file, c.info);
         this.cmds.push(['unclip']);
         if (bar) {
@@ -2313,10 +2322,15 @@ class Painter {
             const m = row.media;
             if (m?.t === 'Diagram' && m.width === 0) this.cmds.push(['diagram', 0, 0, 0, 0, m.id, m.source, diagram]);
         }
+        // While the view glides, its top row is partly above the area, and
+        // one more row shows at the bottom.
+        const start = Math.floor(top);
+        const offset = (top - start) * lh;
+        const shownRows = offset > 0 ? height + 1 : height;
         // Pictures, from the first row of each in view (which may start above it).
-        let first = top;
+        let first = start;
         while (first > 0 && rows[first]?.kind === 'media' && !rows[first].media) first--;
-        for (let r = first; r < top + height && r < rows.length; r++) {
+        for (let r = first; r < start + shownRows && r < rows.length; r++) {
             const row = rows[r];
             const m: Media | undefined = row.media;
             if (!m || m.width === 0) continue;
@@ -2330,9 +2344,9 @@ class Painter {
                 this.cmds.push(['diagram', x, y, m.width, m.height, m.id, m.source, diagram]);
             }
         }
-        for (let r = 0; r < height; r++) {
-            const row = rows[top + r];
-            const y = area.top + r * lh;
+        for (let r = 0; r < shownRows; r++) {
+            const row = rows[start + r];
+            const y = area.top + r * lh - offset;
             if (!row) {
                 this.text(area.left + TEXT_PADDING, y, '~', theme.TILDE);
                 continue;

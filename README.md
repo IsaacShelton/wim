@@ -76,7 +76,7 @@ default, and a mistake in it is reported at startup and ignored.
 | `claude.cacheMinutes` | How long the prompt cache lasts after a request, for the cache indicator (default 60) |
 | `terminal.shell` | The shell the terminal runs (default `zsh`, or `powershell.exe` on Windows) |
 | `editor.smoothCaret` | Whether the caret glides quickly to where it moves instead of jumping (default `false`) |
-| `editor.smoothScroll` | Whether the text glides when it scrolls (`<C-d>`, `<C-u>`, `<C-f>`, `<C-b>`, `zz`, the mouse wheel, ...) instead of jumping (default `false`) |
+| `editor.smoothScroll` | Whether the text glides when it scrolls (`<C-d>`, `<C-u>`, `<C-f>`, `<C-b>`, `zz`, the mouse wheel, ...) instead of jumping, in rendered Markdown too (default `false`) |
 
 ## Layout
 
