@@ -4,6 +4,7 @@
 // file or toggle a directory, `l` expands, `h` collapses (or goes to the
 // parent), `a` creates a file or directory, `dd` deletes one (after asking),
 // `R` re-reads the disk, `q` hides the tree, `<Esc>` returns to the editor.
+// `<BS>` collapses like `h`.
 //
 // Names are colored by their git status; a directory takes the status of
 // what's changed inside it.
@@ -279,7 +280,7 @@ export class FileTree {
         else if ((k === 'l' && plain) || k === 'Right') {
             const row = this.rows[this.selected];
             if (row && !row.expanded) return this.activate();
-        } else if ((k === 'h' && plain) || k === 'Left') this.collapseOrParent();
+        } else if ((k === 'h' && plain) || k === 'Left' || k === 'Backspace') this.collapseOrParent();
         else if (k === 'R' && plain) this.refresh();
         else if (k === 'a' && plain) return { t: 'Create', dir: this.selectedDir() };
         else if (k === 'd' && plain && afterD) {

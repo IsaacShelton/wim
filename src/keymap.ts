@@ -151,6 +151,7 @@ export class Keymap {
             [N, 'Ô', keys('V')],
             [N, '\u{f8ff}', keys('V')],
             [N, '<C-n>', command('ToggleTree')],
+            [N, '<C-e>', command('ToggleAgents')],
             [N, '<leader>cc', command('ToggleAgents')],
             [N, '<leader>tt', command('ToggleTerminal')],
             [N, '<leader>th', command('ToggleTheme')],

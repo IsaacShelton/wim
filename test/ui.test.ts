@@ -301,6 +301,8 @@ test('file tree navigates directories', () => {
     assert.deepEqual(press(tree, 'jj<CR>'), { t: 'Open', path: path.join(root, 'src/main.rs') });
     press(tree, 'hh');
     assert.deepEqual(names(tree), ['src', 'A.md', 'b.txt'], 'h goes to parent, then collapses it');
+    press(tree, '<CR><BS>');
+    assert.deepEqual(names(tree), ['src', 'A.md', 'b.txt'], 'Backspace on an open folder collapses it');
     assert.deepEqual(press(tree, 'G<CR>'), { t: 'Open', path: path.join(root, 'b.txt') });
 
     tree.reveal(path.join(root, 'src/deep/x.rs'));

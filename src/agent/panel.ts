@@ -4,12 +4,16 @@
 // mode reads the conversation (`j`/`k`, `G`, Ctrl+d...) and switches
 // sessions and settings; `i` moves to the prompt at the bottom to type.
 
+import * as path from 'node:path';
 import { Clipboard } from '../clipboard';
 import { KeyInput, charOf } from '../editor/keys';
 import { PRESET_NAMES, Preset, PresetName } from '../config';
+import { findFiles } from '../finder';
+import { formatBytes } from '../image';
 import { Box, Picker, PickerItem, Run } from '../popup';
 import { DrawCmd } from '../protocol';
 import { theme } from '../theme';
+import { Attachment, imageAttachment, readAttachment } from './attachment';
 import { AgentBackend, ContextUsage, ModelInfo, PermissionMode, UsageInfo } from './backend';
 import { TextInput } from './input';
 import { AgentSession, EFFORTS, MODES, Prompt, modeLabel } from './session';
@@ -39,6 +43,8 @@ type Hit =
     | { t: 'Usage' }
     | { t: 'Choice'; index: number }
     | { t: 'Input' }
+    /** An attached image's ✕. */
+    | { t: 'Detach'; index: number }
     | { t: 'Transcript' };
 
 type SessionChoice = { t: 'New' } | { t: 'Open'; index: number } | { t: 'Resume'; id: string; title: string };
@@ -54,6 +60,9 @@ const CACHE_TICK = 15000;
 const METER_COLS = 8;
 /** Widest a session's tab gets, in columns. */
 const TAB_COLS = 24;
+
+/** Files the image picker lists: the types Claude takes. */
+const IMAGE_FILE = /\.(png|jpe?g|gif|webp)$/i;
 
 const SPINNER = ['·', '✢', '✳', '✶', '✻', '✽', '✻', '✶', '✳', '✢'];
 
@@ -165,6 +174,8 @@ const HELP: [string, string][] = [
     ['Enter', 'Send (\\ or ⌥ before it: a new line)'],
     ['↑ ↓', 'Earlier messages, in the prompt'],
     ['Ctrl+x', 'Interrupt the agent'],
+    ['f', 'Attach an image (or drop one on the panel)'],
+    ['Backspace', 'Remove the last image, in an empty prompt'],
     ['/clear', 'A new session in place of this one, with its settings'],
     ['j k  Ctrl+d Ctrl+u', 'Scroll the conversation'],
     ['gg  G', 'Go to the top / the end'],
@@ -236,6 +247,8 @@ export class AgentPanel {
     current = 0;
     focus: PanelFocus = 'Input';
     readonly input = new TextInput();
+    /** Images to send with the next message. */
+    readonly attachments: Attachment[] = [];
     /** Where an answer, or what to do instead of a denied tool, is typed. */
     private readonly answer = new TextInput();
     private readonly views = new WeakMap<AgentSession, { scroll: number; follow: boolean }>();
@@ -392,6 +405,8 @@ export class AgentPanel {
         // panel is the rightmost window, so Ctrl+l stays).
         if (key.ctrl && key.key === 'h') return { t: 'FocusEditor' };
         if (key.ctrl && key.key === 'l') return NONE;
+        // Ctrl+e hides the panel again, as it shows it.
+        if (key.ctrl && key.key === 'e') return { t: 'Hide' };
         if (s.prompt) {
             const action = this.promptKey(s, s.prompt, key);
             if (action) return action;
@@ -411,15 +426,43 @@ export class AgentPanel {
         this.input.insert(text);
     }
 
+    /** An image dropped on the panel: its bytes in base64, or why the window
+     * couldn't read it. */
+    drop(name: string, data: string | undefined, error?: string): void {
+        const a = data !== undefined ? imageAttachment(name, Buffer.from(data, 'base64')) : (error ?? `Can't read ${name}`);
+        if (this.session?.prompt) {
+            this.message = typeof a === 'string' ? a : 'Answer the prompt first, then drop the image again';
+            return;
+        }
+        this.focus = 'Input';
+        this.attach(a);
+    }
+
+    private attach(a: Attachment | string): void {
+        if (typeof a === 'string') {
+            this.message = a;
+            return;
+        }
+        this.attachments.push(a);
+        this.message = `Attached ${a.name} (${formatBytes(a.bytes)})`;
+    }
+
     private inputKey(s: AgentSession, key: KeyInput): PanelAction {
         if (key.key === 'Esc') {
             this.focus = 'Transcript';
+        } else if (key.key === 'Tab' || key.key === 'BackTab') {
+            // Sessions switch from the prompt too, so Tab isn't typed into it.
+            this.cycle(key.key === 'Tab' ? 1 : -1);
+        } else if (key.key === 'Backspace' && !key.alt && this.input.text === '' && this.attachments.length > 0) {
+            const a = this.attachments.pop();
+            this.message = `Removed ${a?.name}`;
         } else if (this.input.key(key) === 'Send') {
             const text = this.input.text;
-            if (text.trim() === '') return NONE;
-            if (/^\/clear\s*$/.test(text.trim())) this.clearSession(s);
-            else s.send(text);
-            this.input.remember(text);
+            const images = this.attachments.splice(0);
+            if (text.trim() === '' && images.length === 0) return NONE;
+            if (images.length === 0 && /^\/clear\s*$/.test(text.trim())) this.clearSession(s);
+            else s.send(text, images);
+            if (text.trim() !== '') this.input.remember(text);
             this.input.clear();
             this.view(s).follow = true;
             this.showHelp = false;
@@ -612,6 +655,9 @@ export class AgentPanel {
                 break;
             case 's':
                 return this.sessionPicker();
+            case 'f':
+                if (s.prompt) break;
+                return this.imagePicker();
             case 'x':
                 this.closeSession(s);
                 break;
@@ -645,6 +691,10 @@ export class AgentPanel {
                 this.yankReply(s);
                 break;
             case 'q':
+                if (this.showHelp) {
+                    this.showHelp = false;
+                    return NONE;
+                }
                 return { t: 'Hide' };
             case ':':
                 return { t: 'Cmdline' };
@@ -704,6 +754,37 @@ export class AgentPanel {
     }
 
     // ----- Pickers -------------------------------------------------------------------
+
+    /** `f`: an image file under the working directory to attach. */
+    private imagePicker(): PanelAction {
+        const root = this.opts.cwd();
+        const items: PickerItem<string>[] = [];
+        const picker = new Picker<string>(
+            'Attach an Image',
+            (file) => {
+                this.attach(readAttachment(path.join(root, file)));
+                this.focus = 'Input';
+            },
+            { preview: true, message: 'No images', onClose: () => search.cancel() },
+        );
+        picker.busy = true;
+        const search = findFiles(
+            root,
+            (files) => {
+                for (const file of files) {
+                    if (IMAGE_FILE.test(file)) items.push({ label: file, truncateStart: true, preview: { file: path.join(root, file) }, value: file });
+                }
+                picker.setItems(items, 'No images', true);
+                this.opts.refresh();
+            },
+            (error) => {
+                picker.busy = false;
+                picker.setItems(items, error ?? 'No images', true);
+                this.opts.refresh();
+            },
+        );
+        return { t: 'Picker', picker: picker as unknown as Picker<never> };
+    }
 
     private sessionPicker(): PanelAction {
         const items: PickerItem<SessionChoice>[] = [{ label: '+ New session', value: { t: 'New' } }];
@@ -864,6 +945,10 @@ export class AgentPanel {
                 }
                 break;
             case 'Input':
+                this.focus = 'Input';
+                break;
+            case 'Detach':
+                this.attachments.splice(hit.index, 1);
                 this.focus = 'Input';
                 break;
             case 'Transcript':
@@ -1135,8 +1220,11 @@ export class AgentPanel {
         const first = Math.min(Math.max(cursorRow - shownRows + 1, 0), rows.length - shownRows);
         const hintY = r.bottom - lh;
         const top = hintY - shownRows * lh - 4;
-        cv.rect({ left: r.left + 1, top: top - 1, right: r.right, bottom: top }, active ? theme.MODE_AGENT : theme.TILDE);
-        this.hits.push([{ left: r.left + 1, top, right: r.right, bottom: hintY }, { t: 'Input' }]);
+        // Images to send with the message, above it, each with a ✕.
+        const shelf = !typing && this.attachments.length > 0 ? lh + 4 : 0;
+        cv.rect({ left: r.left + 1, top: top - shelf - 1, right: r.right, bottom: top - shelf }, active ? theme.MODE_AGENT : theme.TILDE);
+        if (shelf > 0) this.paintAttachments(cv, top - shelf + 2, x, cols);
+        this.hits.push([{ left: r.left + 1, top: top - shelf, right: r.right, bottom: hintY }, { t: 'Input' }]);
         const ty = top + 2;
         cv.text(x, ty, '❯', active ? theme.MODE_AGENT : theme.COMMENT);
         if (input.text === '') {
@@ -1160,7 +1248,26 @@ export class AgentPanel {
         else if (s.mode && s.mode !== 'default') hint = [`⏵⏵ ${modeLabel(s.mode).toLowerCase()} on (p to change)`, modeColor(s.mode)];
         else hint = [this.focus === 'Input' && !p ? 'Esc for Normal mode · ? for keys' : 'i to type · ? for keys', theme.COMMENT];
         cv.text(x, hintY, cut(hint[0], cols), hint[1]);
-        return top;
+        return top - shelf;
+    }
+
+    /** The attached images, in a row: `▣ name ✕`. */
+    private paintAttachments(cv: Canvas, y: number, x: number, cols: number): void {
+        const { cw, lh } = cv;
+        let col = 0;
+        this.attachments.forEach((a, index) => {
+            const label = cut(a.name, 24);
+            const w = width(label) + 6;
+            if (col + w > cols) return;
+            const left = x + col * cw;
+            cv.rect({ left, top: y, right: left + (w - 1) * cw, bottom: y + lh }, theme.CURSOR_LINE, 3);
+            cv.text(left + cw / 2, y, '▣', theme.MODE_AGENT);
+            cv.text(left + cw * 2, y, label, theme.FG);
+            const close = left + (w - 3) * cw;
+            cv.text(close, y, '✕', theme.COMMENT);
+            this.hits.push([{ left: close - cw / 2, top: y, right: close + cw * 1.5, bottom: y + lh }, { t: 'Detach', index }]);
+            col += w;
+        });
     }
 
     private paintTranscript(cv: Canvas, s: AgentSession, area: Box, x: number, cols: number, now: number): void {

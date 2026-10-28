@@ -141,8 +141,22 @@ function drawRect(cmd: Extract<DrawCmd, ['rect', ...unknown[]]>): void {
         ctx.roundRect(x, y, w, h, radius);
         ctx.fill();
     } else {
-        ctx.fillRect(x, y, w, h);
+        fillSnapped(x, y, x + w, y + h);
     }
+}
+
+/** Round a position to the nearest device pixel. Cells are a fraction of a
+ * pixel wide, and shapes ending between pixels blend with what is behind
+ * them, leaving faint lines between cells that should touch. */
+function snap(v: number): number {
+    const dpr = window.devicePixelRatio || 1;
+    return Math.round(v * dpr) / dpr;
+}
+
+function fillSnapped(left: number, top: number, right: number, bottom: number): void {
+    const x = snap(left);
+    const y = snap(top);
+    ctx.fillRect(x, y, snap(right) - x, snap(bottom) - y);
 }
 
 /** Draw text on the character grid. ASCII runs are drawn whole; other
@@ -163,11 +177,132 @@ function drawText(x: number, y: number, text: string, color: string): void {
                 ctx.fillText(run, x + runCol * charW, mid);
                 run = '';
             }
-            ctx.fillText(c, x + col * charW, mid);
+            const cx = x + col * charW;
+            if (!drawPowerline(c, cx, y) && !drawBlock(c, cx, y)) ctx.fillText(c, cx, mid);
         }
         col++;
     }
     if (run !== '') ctx.fillText(run, x + runCol * charW, mid);
+}
+
+/** Draw a Powerline separator (U+E0B0 to U+E0BF) as a shape filling its
+ * cell, as the font's glyph is shorter than our lines and leaves gaps.
+ * Returns false for other characters. */
+function drawPowerline(c: string, left: number, top: number): boolean {
+    const code = c.codePointAt(0)!;
+    if (code < 0xe0b0 || code > 0xe0bf) return false;
+    // On the same pixels as the cell backgrounds beside it.
+    const x = snap(left);
+    const y = snap(top);
+    const r = snap(left + charW);
+    const b = snap(top + lineH);
+    const w = r - x;
+    const h = b - y;
+    ctx.beginPath();
+    switch (code) {
+        case 0xe0b0: // Right-pointing triangle.
+        case 0xe0b1:
+            ctx.moveTo(x, y);
+            ctx.lineTo(r, y + h / 2);
+            ctx.lineTo(x, b);
+            break;
+        case 0xe0b2: // Left-pointing triangle.
+        case 0xe0b3:
+            ctx.moveTo(r, y);
+            ctx.lineTo(x, y + h / 2);
+            ctx.lineTo(r, b);
+            break;
+        case 0xe0b4: // Right half circle.
+        case 0xe0b5:
+            ctx.moveTo(x, y);
+            ctx.ellipse(x, y + h / 2, w, h / 2, 0, -Math.PI / 2, Math.PI / 2);
+            break;
+        case 0xe0b6: // Left half circle.
+        case 0xe0b7:
+            ctx.moveTo(r, b);
+            ctx.ellipse(r, y + h / 2, w, h / 2, 0, Math.PI / 2, (3 * Math.PI) / 2);
+            break;
+        case 0xe0b8: // Lower left triangle.
+            ctx.moveTo(x, y);
+            ctx.lineTo(r, b);
+            ctx.lineTo(x, b);
+            break;
+        case 0xe0ba: // Lower right triangle.
+            ctx.moveTo(r, y);
+            ctx.lineTo(r, b);
+            ctx.lineTo(x, b);
+            break;
+        case 0xe0bc: // Upper left triangle.
+            ctx.moveTo(x, y);
+            ctx.lineTo(r, y);
+            ctx.lineTo(x, b);
+            break;
+        case 0xe0be: // Upper right triangle.
+            ctx.moveTo(x, y);
+            ctx.lineTo(r, y);
+            ctx.lineTo(r, b);
+            break;
+        case 0xe0b9: // Backslash.
+        case 0xe0bf:
+            ctx.moveTo(x, y);
+            ctx.lineTo(r, b);
+            break;
+        case 0xe0bb: // Forward slash.
+        case 0xe0bd:
+            ctx.moveTo(x, b);
+            ctx.lineTo(r, y);
+            break;
+    }
+    // The odd ones are outlines; the rest are filled.
+    if (code & 1) {
+        ctx.strokeStyle = ctx.fillStyle;
+        ctx.lineWidth = 1;
+        ctx.stroke();
+    } else {
+        ctx.closePath();
+        ctx.fill();
+    }
+    return true;
+}
+
+/** The quadrants lit by U+2596 to U+259F: 1 upper left, 2 upper right,
+ * 4 lower left, 8 lower right. */
+const QUADRANTS = [4, 8, 1, 13, 9, 7, 11, 2, 6, 14];
+
+/** Draw a block element (U+2580 to U+259F) as rectangles filling its cell,
+ * as the font's glyph is shorter than our lines and leaves gaps. Returns
+ * false for other characters. */
+function drawBlock(c: string, x: number, y: number): boolean {
+    const code = c.codePointAt(0)!;
+    if (code < 0x2580 || code > 0x259f) return false;
+    // A part of the cell, in fractions of its width and height.
+    const part = (l: number, t: number, r: number, b: number): void =>
+        fillSnapped(x + l * charW, y + t * lineH, x + r * charW, y + b * lineH);
+    if (code === 0x2580) {
+        part(0, 0, 1, 0.5); // Upper half.
+    } else if (code <= 0x2588) {
+        part(0, 1 - (code - 0x2580) / 8, 1, 1); // Lower eighths, to full.
+    } else if (code <= 0x258f) {
+        part(0, 0, (0x2590 - code) / 8, 1); // Left eighths.
+    } else if (code === 0x2590) {
+        part(0.5, 0, 1, 1); // Right half.
+    } else if (code <= 0x2593) {
+        // Light, medium and dark shades.
+        ctx.globalAlpha = (code - 0x2590) / 4;
+        part(0, 0, 1, 1);
+        ctx.globalAlpha = 1;
+    } else if (code === 0x2594) {
+        part(0, 0, 1, 1 / 8); // Upper eighth.
+    } else if (code === 0x2595) {
+        part(7 / 8, 0, 1, 1); // Right eighth.
+    } else {
+        const lit = QUADRANTS[code - 0x2596];
+        if (lit & 1) part(0, 0, 0.5, 0.5);
+        if (lit & 2) part(0.5, 0, 1, 0.5);
+        if (lit & 4) part(0, 0.5, 0.5, 1);
+        if (lit & 8) part(0.5, 0.5, 1, 1);
+    }
+    return true;
 }
 
 /** Images by address, loaded once; drawing waits for them to arrive. */
@@ -428,6 +563,37 @@ canvas.addEventListener(
 );
 
 canvas.addEventListener('contextmenu', (e) => e.preventDefault());
+
+// ----- Dropping files ------------------------------------------------------------------------
+
+/** The largest file sent to Node (Claude takes images up to 5 MB). */
+const MAX_DROP_BYTES = 5 * 1024 * 1024;
+
+// Without this, dropping a file would open it in place of Wim.
+window.addEventListener('dragover', (e) => {
+    e.preventDefault();
+    if (e.dataTransfer) e.dataTransfer.dropEffect = 'copy';
+});
+
+window.addEventListener('drop', (e) => {
+    e.preventDefault();
+    const x = e.clientX;
+    const y = e.clientY;
+    for (const file of Array.from(e.dataTransfer?.files ?? [])) {
+        const name = file.name;
+        if (file.size > MAX_DROP_BYTES) {
+            send({ t: 'drop', x, y, name, error: `${name} is too large (at most 5 MB)` });
+            continue;
+        }
+        const reader = new FileReader();
+        reader.onload = () => {
+            const url = String(reader.result);
+            send({ t: 'drop', x, y, name, data: url.slice(url.indexOf(',') + 1) });
+        };
+        reader.onerror = () => send({ t: 'drop', x, y, name, error: `Can't read ${name}` });
+        reader.readAsDataURL(file);
+    }
+});
 
 // ----- Closing -------------------------------------------------------------------------------
 

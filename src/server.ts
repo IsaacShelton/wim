@@ -14,8 +14,9 @@ import { audioMime } from './audio';
 import { imageMime } from './image';
 
 const WS_GUID = '258EAFA5-E914-47DA-95CA-C5AB0DC85B11';
-/** Larger messages than this from the window are refused. */
-const MAX_MESSAGE = 1 << 20;
+/** Larger messages than this from the window are refused. Images dropped on
+ * the window come in base64, and the window sends none over 5 MB. */
+const MAX_MESSAGE = 16 << 20;
 
 /** One WebSocket connection. Emits `message` (string) and `close`. */
 export class WebSocketConnection extends EventEmitter {

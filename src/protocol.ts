@@ -22,7 +22,10 @@ export type ClientMessage =
     | ({ t: 'audio' } & AudioReport)
     /** How big the window drew a Mermaid diagram, in CSS pixels, or why it
      * couldn't. */
-    | { t: 'diagram'; id: string; width: number; height: number; error?: string };
+    | { t: 'diagram'; id: string; width: number; height: number; error?: string }
+    /** A file dropped on the window, where it was dropped, with its bytes in
+     * base64 (or why the window couldn't read them). One message per file. */
+    | { t: 'drop'; x: number; y: number; name: string; data?: string; error?: string };
 
 /** Messages from Node to the window. */
 export type ServerMessage =

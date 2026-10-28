@@ -345,6 +345,16 @@ export class WimApp {
                 this.diagramSizes.set(msg.id, msg.error !== undefined ? { error: msg.error } : { width: msg.width, height: msg.height });
                 this.diagramVersion++;
                 break;
+            case 'drop':
+                // Images dropped on the agents panel go with the next message.
+                if (layout.agents && contains(layout.agents, msg.x, msg.y)) {
+                    this.editorToNormal();
+                    this.focus = 'Agents';
+                    this.agents.drop(msg.name, msg.data, msg.error);
+                } else {
+                    this.editor.setError('Drop images on the agents panel (Cmd+L) to attach them');
+                }
+                break;
         }
         this.render();
     }

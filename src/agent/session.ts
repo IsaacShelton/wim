@@ -18,6 +18,7 @@ import {
     UsageInfo,
 } from './backend';
 import type { Preset, PresetName } from '../config';
+import type { Attachment } from './attachment';
 
 /** One item of the conversation. */
 export type Entry =
@@ -254,11 +255,13 @@ export class AgentSession {
         this.changed();
     }
 
-    /** Send a message (or a slash command), starting Claude Code if needed. */
-    send(text: string): void {
-        if (this.closed || text.trim() === '') return;
-        this.entries.push({ t: 'User', text });
-        if (this.title === 'New session') this.title = text.split('\n')[0].slice(0, 60);
+    /** Send a message (or a slash command), with any images, starting
+     * Claude Code if needed. */
+    send(text: string, images: readonly Attachment[] = []): void {
+        if (this.closed || (text.trim() === '' && images.length === 0)) return;
+        const shown = images.map((i) => `[Image: ${i.name}]`).join(' ');
+        this.entries.push({ t: 'User', text: shown === '' ? text : text.trim() === '' ? shown : `${shown}\n${text}` });
+        if (this.title === 'New session') this.title = (text.trim() === '' ? shown : text).split('\n')[0].slice(0, 60);
         if (!this.running) {
             this.turnStart = Date.now();
             this.turnTokens = 0;
@@ -271,7 +274,14 @@ export class AgentSession {
                 this.changed();
                 return;
             }
-            this.input?.push({ type: 'user', message: { role: 'user', content: text }, parent_tool_use_id: null });
+            const content: SDKUserMessage['message']['content'] =
+                images.length === 0
+                    ? text
+                    : [
+                          ...images.map((i) => ({ type: 'image' as const, source: { type: 'base64' as const, media_type: i.mime, data: i.data } })),
+                          ...(text.trim() === '' ? [] : [{ type: 'text' as const, text }]),
+                      ];
+            this.input?.push({ type: 'user', message: { role: 'user', content }, parent_tool_use_id: null });
         });
     }
 

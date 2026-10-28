@@ -161,7 +161,7 @@ still works).
 set up like the nvim-tree config: 30 columns wide, Nerd Font folder and file icons (from an
 installed Nerd Font such as FiraMono Nerd Font), git-ignored files hidden, no root label. It
 follows the current file. In the tree: `j`/`k` move, `gg`/`G` jump, `<CR>`/`o` opens a file or
-toggles a folder, `l` expands, `h` collapses or goes to the parent, `a` creates a file in the
+toggles a folder, `l` expands, `h` or `<BS>` collapses or goes to the parent, `a` creates a file in the
 selected folder (or the selected file's folder; a trailing `/` makes a folder, and missing
 folders are made too), `dd` deletes the selected file or folder (with everything in it) after
 asking `(y/n)`, `R` re-reads the disk, `q` hides it, `<Esc>` returns to the editor. Ctrl+h / Ctrl+l (or `<C-w>h`, `<C-w>l`, `<C-w>w`)
@@ -347,6 +347,7 @@ Ctrl+a/e/w/u). Ctrl+c is Esc there too, and Ctrl+h goes to the editor, as in Nor
 | `c` | Context use by kind, as `/context` shows it |
 | `u` | Plan usage limits (5-hour, weekly) |
 | `y` | Copy the last reply |
+| `f` | Attach an image (PNG, JPEG, GIF or WebP, up to 5 MB) from the working directory, to send with the next message |
 | `?` | All of these keys |
 | `q` / Esc / Ctrl+h | Hide the panel / back to the editor / back to the editor (Ctrl+l from the rightmost window returns) |
 | Ctrl+x | Interrupt Claude, in either mode (Ctrl+c is Esc, as in the editor) |
@@ -360,6 +361,10 @@ with Space where it asks for more than one, or typing another answer. Slash comm
 (`/compact`, `/context`, ...) are sent to Claude Code, except `/clear`, which closes the
 session (it can still be resumed) and opens a new one in its place with the same model,
 permission mode and effort.
+
+Images dropped on the panel (from Finder, say) are attached to the next message too. Attached
+images show above the prompt: click an image's ✕, or press Backspace in an empty prompt, to remove
+it. A message can be just images.
 
 When Claude edits a file that is open in a buffer, the buffer is reloaded (as one undoable
 change), and after a command buffers whose files changed are reloaded too. A buffer with
@@ -388,7 +393,7 @@ Normal-mode mappings don't apply in the middle of a command, so `f,` still finds
 | Ctrl+h/j/k/l | Insert | Move the cursor left/down/up/right |
 | Tab / Shift+Tab | Normal | Next / previous buffer |
 | Ctrl+n | Normal | Toggle the file tree |
-| `,cc` (or Cmd+L) | Normal | Show the agents panel (see [Agents](#agents)) |
+| Ctrl+e, `,cc` (or Cmd+L) | Normal | Show or hide the agents panel (see [Agents](#agents)) |
 | `` Ctrl+` `` (or `,tt`, or Cmd+J) | Any | Show or hide the terminal (see [Terminal](#terminal)) |
 | `,th` | Normal | Switch between Wim's colors (One Dark) and Nord |
 | Ctrl+y | Normal | Forward in the jump list (`<C-i>`, which is Tab in a terminal) |

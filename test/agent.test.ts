@@ -32,6 +32,8 @@ import { ClientMessage, DrawCmd } from '../src/protocol';
 /** A Claude Code session that the test drives. */
 class FakeQuery implements AgentQuery {
     readonly sent: string[] = [];
+    /** The messages' content, as sent (text, or content blocks). */
+    readonly contents: unknown[] = [];
     model: string | undefined = 'unset';
     mode: PermissionMode | undefined;
     effort: unknown = 'unset';
@@ -43,7 +45,10 @@ class FakeQuery implements AgentQuery {
 
     constructor(readonly opts: StartOptions) {
         void (async () => {
-            for await (const m of opts.prompt) this.sent.push(String(m.message.content));
+            for await (const m of opts.prompt) {
+                this.sent.push(String(m.message.content));
+                this.contents.push(m.message.content);
+            }
         })();
     }
 
@@ -275,6 +280,15 @@ test('Cmd+L shows the agents panel at its prompt, and Ctrl+h / Ctrl+l move betwe
     assert.match(h.text(), /New session/);
     h.type('<Esc>q');
     assert.doesNotMatch(h.text(), /New session/);
+});
+
+test('Ctrl+e shows the agents panel, and hides it again from the panel', () => {
+    const h = harness();
+    h.type('<C-e>');
+    assert.match(h.text(), / AGENT /);
+    h.type('<C-e>');
+    assert.doesNotMatch(h.text(), /New session/);
+    assert.match(h.text(), /NORMAL/);
 });
 
 test('a message goes to Claude Code, and the reply streams in', async () => {
@@ -566,7 +580,11 @@ test('sessions: n starts another, Tab and numbers switch, s resumes a saved one 
     assert.match(h.text(), /first/);
     h.type('2');
     assert.match(h.text(), /second/);
-    h.type('s');
+    h.type('i<Tab>');
+    assert.match(h.text(), /first/, 'Tab cycles sessions from the prompt too');
+    h.type('<S-Tab>');
+    assert.match(h.text(), /second/, 'so does Shift+Tab');
+    h.type('<Esc>s');
     await settle();
     assert.match(h.text(), /Fix the parser/);
     assert.match(h.text(), /3h ago · main/);
@@ -769,4 +787,75 @@ test('u shows the plan usage limits', async () => {
     assert.match(h.text(), /42%/);
     assert.match(h.text(), /resets in 2h/);
     assert.match(h.text(), /Weekly/);
+});
+
+/** A 1×1 PNG. */
+const PNG = Buffer.from('89504e470d0a1a0a0000000d494844520000000100000001080600000001f15c4890000000d49444154789c6360f8cfc0f01f0005000201ef1a9f5f0000000049454e44ae426082', 'hex');
+
+/** Wait for `cond`, as a file search finishes. */
+async function until(cond: () => boolean): Promise<void> {
+    for (let i = 0; i < 200 && !cond(); i++) await new Promise((r) => setTimeout(r, 10));
+    assert.ok(cond());
+}
+
+test('images dropped on the agents panel go with the next message, as image blocks', async () => {
+    const h = harness();
+    h.send({ t: 'command', name: 'agents' });
+    h.send({ t: 'drop', x: 1300, y: 400, name: 'shot.png', data: PNG.toString('base64') });
+    assert.match(h.text(), /shot\.png/);
+    assert.match(h.text(), /Attached shot\.png/);
+    // What isn't an image, or is too large, isn't attached.
+    h.send({ t: 'drop', x: 1300, y: 400, name: 'notes.txt', data: Buffer.from('hello').toString('base64') });
+    assert.match(h.text(), /notes\.txt isn't a PNG, JPEG, GIF or WebP image/);
+    h.send({ t: 'drop', x: 1300, y: 400, name: 'huge.png', error: 'huge.png is too large (at most 5 MB)' });
+    assert.match(h.text(), /huge\.png is too large/);
+    h.type('what is this?<CR>');
+    await settle();
+    const q = h.backend.last;
+    assert.deepEqual(q.contents, [
+        [
+            { type: 'image', source: { type: 'base64', media_type: 'image/png', data: PNG.toString('base64') } },
+            { type: 'text', text: 'what is this?' },
+        ],
+    ]);
+    assert.match(h.text(), /\[Image: shot\.png\]/);
+    assert.match(h.text(), /what is this\?/);
+    // Sent: the prompt has no images any more.
+    h.type('again<CR>');
+    await settle();
+    assert.deepEqual(q.contents[1], 'again');
+});
+
+test('a drop outside the agents panel says where to drop images', () => {
+    const h = harness();
+    h.send({ t: 'drop', x: 100, y: 100, name: 'shot.png', data: PNG.toString('base64') });
+    assert.match(h.text(), /Drop images on the agents panel/);
+});
+
+test('f picks an image file to attach; Backspace in an empty prompt removes it, and an image alone can be sent', async () => {
+    const dir = tempDir('agent-images');
+    fs.writeFileSync(path.join(dir, 'diagram.png'), PNG);
+    fs.writeFileSync(path.join(dir, 'readme.txt'), 'not an image\n');
+    const cwd = process.cwd();
+    process.chdir(dir);
+    try {
+        const h = harness();
+        h.send({ t: 'command', name: 'agents' });
+        h.type('<Esc>f');
+        await until(() => /diagram\.png/.test(h.text()) && !/readme\.txt/.test(h.text()));
+        h.type('<CR>');
+        assert.match(h.text(), /Attached diagram\.png/);
+        h.type('<BS>');
+        assert.match(h.text(), /Removed diagram\.png/);
+        assert.equal(h.app.agents.attachments.length, 0);
+        h.type('<Esc>f');
+        await until(() => /diagram\.png/.test(h.text()));
+        h.type('<CR><CR>');
+        await settle();
+        assert.deepEqual(h.backend.last.contents, [[{ type: 'image', source: { type: 'base64', media_type: 'image/png', data: PNG.toString('base64') } }]]);
+        assert.match(h.text(), /\[Image: diagram\.png\]/);
+    } finally {
+        process.chdir(cwd);
+        fs.rmSync(dir, { recursive: true });
+    }
 });
