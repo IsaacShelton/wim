@@ -73,6 +73,13 @@ const ONE_DARK = {
     POPUP_BORDER: '#5c6370',
     POPUP_SELECTION: '#3e4451',
 
+    // The file tree: folders, and special files (README.md, ...), which are
+    // also underlined.
+    TREE_FOLDER: '#61afef',
+    TREE_OPEN_FOLDER: '#61afef',
+    TREE_FOLDER_ICON: '#61afef',
+    TREE_SPECIAL_FILE: '#abb2bf',
+
     // The file tree's names by git status.
     GIT_UNTRACKED: '#98c379',
     GIT_STAGED: '#56b6c2',
@@ -158,10 +165,17 @@ const NORD: Theme = {
     POPUP_BORDER: '#4C566A', // FloatBorder
     POPUP_SELECTION: '#434C5E', // PmenuSel
 
-    GIT_UNTRACKED: '#A3BE8C', // aurora green
-    GIT_STAGED: '#8FBCBB', // frost polar water
-    GIT_MODIFIED: '#D08770', // aurora orange
-    GIT_CONFLICT: '#BF616A', // aurora red
+    // As nord.nvim colors nvim-tree.
+    TREE_FOLDER: '#88C0D0', // Directory
+    TREE_OPEN_FOLDER: '#D8DEE9', // NvimTreeOpenedFolderName
+    TREE_FOLDER_ICON: '#81A1C1', // NvimTreeFolderIcon
+    TREE_SPECIAL_FILE: '#EBCB8B', // NvimTreeSpecialFile
+
+    GIT_UNTRACKED: '#A3BE8C', // NvimTreeGitNew
+    // nord.nvim leaves staged and merge (nvim-tree's Constant) as plain text.
+    GIT_STAGED: '#D8DEE9',
+    GIT_MODIFIED: '#EBCB8B', // NvimTreeGitDirty
+    GIT_CONFLICT: '#D8DEE9',
 
     // Nord's terminal colors.
     ANSI: [

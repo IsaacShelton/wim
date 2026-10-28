@@ -4,6 +4,7 @@
 
 import * as fs from 'node:fs';
 import * as path from 'node:path';
+import { spawnSync } from 'node:child_process';
 
 import { AgentBackend, SdkBackend } from './agent/backend';
 import { AgentPanel, PanelAction } from './agent/panel';
@@ -2018,6 +2019,24 @@ function toKeyInput(msg: { key: string; ctrl: boolean; alt: boolean }): KeyInput
     return { key: msg.key, ctrl: false, alt: Boolean(msg.alt) };
 }
 
+const BRANCH_REFRESH_MS = 2000;
+let branchCache: { dir: string; at: number; name: string } | undefined;
+
+/** The git branch checked out in `dir` (a short commit when detached), or an
+ * empty string outside a repository. Asked of git at most every couple of
+ * seconds, as the status bar paints often. */
+function gitBranch(dir: string): string {
+    const now = Date.now();
+    if (branchCache && branchCache.dir === dir && now - branchCache.at < BRANCH_REFRESH_MS) return branchCache.name;
+    const git = (args: string[]): string => {
+        const out = spawnSync('git', ['-C', dir, ...args], { encoding: 'utf8', windowsHide: true, stdio: ['ignore', 'pipe', 'ignore'] });
+        return out.status === 0 && typeof out.stdout === 'string' ? out.stdout.trim() : '';
+    };
+    const name = git(['branch', '--show-current']) || git(['rev-parse', '--short', 'HEAD']);
+    branchCache = { dir, at: now, name };
+    return name;
+}
+
 /** The color of a name in the tree with a git status. */
 function gitColor(status: GitStatus): string {
     switch (status) {
@@ -2616,8 +2635,11 @@ class Painter {
         for (let i = first; i < last; i++) {
             const row = tree.rows[i];
             const y = r.top + lh * (i - first);
-            if (i === tree.selected) {
-                this.rect(rect(r.left, y, r.right, y + lh), this.st.focus === 'Tree' ? theme.SELECTION : theme.CURSOR_LINE);
+            // The open file has the selection's background, until the tree has
+            // focus and its own cursor takes over.
+            const treeFocused = this.st.focus === 'Tree';
+            if (treeFocused ? i === tree.selected : currentFile === row.path) {
+                this.rect(rect(r.left, y, r.right, y + lh), theme.SELECTION);
             }
             const x = r.left + TEXT_PADDING + row.depth * 2 * cw;
             if (this.st.icons) {
@@ -2626,7 +2648,7 @@ class Painter {
                 if (row.isDir) {
                     if (row.empty) glyph = row.expanded ? icons.FOLDER_EMPTY_OPEN : icons.FOLDER_EMPTY;
                     else glyph = row.expanded ? icons.FOLDER_OPEN : icons.FOLDER_CLOSED;
-                    color = theme.FUNCTION;
+                    color = theme.TREE_FOLDER_ICON;
                 } else {
                     const icon = icons.forFile(row.name);
                     glyph = icon.glyph;
@@ -2638,10 +2660,14 @@ class Painter {
             }
             let color: string = theme.FG;
             if (row.git) color = gitColor(row.git);
-            else if (row.isDir) color = theme.FUNCTION;
+            else if (row.isDir) color = row.expanded ? theme.TREE_OPEN_FOLDER : theme.TREE_FOLDER;
+            else if (row.special) color = theme.TREE_SPECIAL_FILE;
             else if (currentFile === row.path) color = theme.GUTTER_CURRENT;
-            // The open file is bold, as its color may be its git status.
-            this.text(x + cw * 2, y, row.name, color, currentFile === row.path ? 'bold' : undefined);
+            this.text(x + cw * 2, y, row.name, color);
+            if (row.special) {
+                const left = x + cw * 2;
+                this.rect(rect(left, y + lh - 2, left + Array.from(row.name).length * cw, y + lh - 1), color);
+            }
         }
         this.cmds.push(['unclip']);
     }
@@ -2713,6 +2739,10 @@ class Painter {
         this.rect(rect(r.left, r.top, pillRight, r.bottom), modeColor);
         this.text(r.left, r.top, label, theme.BG);
 
+        const branch = gitBranch(currentDir());
+        const branchLabel = branch === '' ? '' : ` ${this.st.icons ? '\ue0a0 ' : ''}${branch} `;
+        const branchRight = pillRight + Array.from(branchLabel).length * cw;
+
         const cursor = ed.cursor;
         // A rendered Markdown view goes by its rows.
         const lines = markdown ? markdown.rows.length : ed.buffer.lineCount();
@@ -2746,7 +2776,7 @@ class Painter {
         // cut, then left out, while the name keeps at least MIN_NAME columns;
         // after that the name loses its start.
         const width = (s: string): number => Array.from(s).length;
-        const room = Math.floor((r.right - r.left) / cw) - label.length - width(right) - 1;
+        const room = Math.floor((r.right - r.left) / cw) - label.length - width(branchLabel) - width(right) - 1;
         const name = ` ${ed.fileName()}${ed.isModified() ? ' [+]' : ''}`;
         let spare = room - Math.min(width(name), MIN_NAME);
         const parts: [string, string][] = [];
@@ -2779,9 +2809,12 @@ class Painter {
             this.text(x + 2 * cw, r.top, text, color);
         }
         // Each part's width includes its two spaces of gap.
-        const nameCols = Math.floor((x - pillRight) / cw);
+        const nameCols = Math.floor((x - branchRight) / cw);
         const shown = width(name) <= nameCols ? name : ' …' + Array.from(name).slice(-Math.max(nameCols - 2, 0)).join('');
-        if (nameCols > 2) this.text(pillRight, r.top, shown, theme.FG);
+        if (nameCols > 2) {
+            if (branchLabel !== '') this.text(pillRight, r.top, branchLabel, theme.MODE_TREE);
+            this.text(branchRight, r.top, shown, theme.FG);
+        }
     }
 
     private paintCmdline(): void {

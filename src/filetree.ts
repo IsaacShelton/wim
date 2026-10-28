@@ -2,12 +2,12 @@
 //
 // Keys while it has focus: `j`/`k` move, `gg`/`G` jump, `<CR>`/`o` open a
 // file or toggle a directory, `l` expands, `h` collapses (or goes to the
-// parent), `a` creates a file or directory, `dd` deletes one (after asking),
+// parent), `a` creates a file or directory, `d` deletes one (after asking),
 // `R` re-reads the disk, `q` hides the tree, `<Esc>` returns to the editor.
 // `<BS>` collapses like `h`.
 //
 // Names are colored by their git status; a directory takes the status of
-// what's changed inside it.
+// what's changed inside it. nvim-tree's special files are underlined.
 
 import { spawnSync } from 'node:child_process';
 import * as fs from 'node:fs';
@@ -18,6 +18,9 @@ import { stripPrefix } from './paths';
 
 /** Entries never shown in the tree. */
 const HIDDEN = ['.git', '.DS_Store'];
+
+/** Names always underlined, as nvim-tree's `special_files` default. */
+const SPECIAL_FILES = ['Cargo.toml', 'Makefile', 'README.md', 'readme.md'];
 
 /** A path's git status, as the tree colors it. Deleted files aren't in the
  * tree, but make their directories `Modified`. */
@@ -34,6 +37,8 @@ export interface Row {
     expanded: boolean;
     /** A directory with nothing (visible) in it. */
     empty: boolean;
+    /** One of nvim-tree's special files. */
+    special: boolean;
     git: GitStatus | undefined;
 }
 
@@ -66,7 +71,6 @@ export class FileTree {
     scroll = 0;
     private viewRows = 20;
     private pendingG = false;
-    private pendingD = false;
 
     constructor(private root: string) {
         this.ignored = gitIgnored(root);
@@ -154,7 +158,8 @@ export class FileTree {
             const p = path.join(dir, name);
             const expanded = isDir && this.expanded.has(p);
             const empty = isDir && this.listing(p).length === 0;
-            rows.push({ path: p, name, isDir, depth, expanded, empty, git: this.gitStatus(p) });
+            const special = !isDir && SPECIAL_FILES.includes(name);
+            rows.push({ path: p, name, isDir, depth, expanded, empty, special, git: this.gitStatus(p) });
             if (expanded) this.pushChildren(p, depth + 1, rows);
         }
     }
@@ -251,6 +256,25 @@ export class FileTree {
         if (i >= 0) this.select(i);
     }
 
+    /** Closes the folder the selection is in and selects it (an expanded
+     * folder that is itself selected is closed in place). */
+    private closeCurrentFolder(): void {
+        const row = this.rows[this.selected];
+        if (!row) return;
+        if (row.expanded) {
+            this.expanded.delete(row.path);
+            this.rebuild();
+            return;
+        }
+        const parent = path.dirname(row.path);
+        const i = this.rows.findIndex((r) => r.path === parent);
+        if (i < 0) return;
+        this.expanded.delete(parent);
+        this.rebuild();
+        const j = this.rows.findIndex((r) => r.path === parent);
+        this.select(j >= 0 ? j : i);
+    }
+
     scrollBy(delta: number): void {
         const max = Math.max(this.rows.length - this.viewRows, 0);
         this.scroll = Math.min(Math.max(this.scroll + delta, 0), max);
@@ -263,9 +287,7 @@ export class FileTree {
 
     handleKey(key: KeyInput): TreeAction {
         const afterG = this.pendingG;
-        const afterD = this.pendingD;
         this.pendingG = false;
-        this.pendingD = false;
         const half = Math.max(Math.floor(this.viewRows / 2), 1);
         const k = key.key;
         const plain = !key.ctrl;
@@ -280,13 +302,14 @@ export class FileTree {
         else if ((k === 'l' && plain) || k === 'Right') {
             const row = this.rows[this.selected];
             if (row && !row.expanded) return this.activate();
-        } else if ((k === 'h' && plain) || k === 'Left' || k === 'Backspace') this.collapseOrParent();
+        } else if ((k === 'h' && plain) || k === 'Left') this.collapseOrParent();
+        else if (k === 'Backspace') this.closeCurrentFolder();
         else if (k === 'R' && plain) this.refresh();
         else if (k === 'a' && plain) return { t: 'Create', dir: this.selectedDir() };
-        else if (k === 'd' && plain && afterD) {
+        else if (k === 'd' && plain) {
             const row = this.rows[this.selected];
             if (row) return { t: 'Delete', path: row.path, isDir: row.isDir };
-        } else if (k === 'd' && plain) this.pendingD = true;
+        }
         else if (k === 'q' && plain) return { t: 'Close' };
         else if (k === 'Esc') return { t: 'FocusEditor' };
         return NONE;

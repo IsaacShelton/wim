@@ -203,11 +203,13 @@ export class Overlay {
         // the half rows above and below (see `frame`).
         const areaH = area.bottom - area.top;
         const extra = p.inputOnly ? 0 : 1;
+        // The title hangs half a row into the box, so the text starts below it.
+        const topPad = Math.max(PAD, Math.ceil(this.lh / 2) + 2);
         const h = Math.min(
-            Math.ceil(((rows + extra) * this.lh + 2 * PAD) / this.lh) * this.lh,
+            Math.ceil(((rows + extra) * this.lh + topPad + PAD) / this.lh) * this.lh,
             Math.floor((areaH - this.lh) / this.lh) * this.lh,
         );
-        rows = Math.max(Math.min(rows, Math.floor((h - 2 * PAD) / this.lh) - extra), 1);
+        rows = Math.max(Math.min(rows, Math.floor((h - topPad - PAD) / this.lh) - extra), 1);
         const left = area.left + Math.floor((area.right - area.left - (totalCols + 2) * this.cw) / 2);
         const middle = p.inputOnly ? area.top + Math.floor(areaH / 3) : area.top + Math.floor((areaH - h) / 2);
         // The title's row lines up with a row of text, which it replaces
@@ -217,7 +219,7 @@ export class Overlay {
         const b = { left, top, right: left + w, bottom: top + h };
         this.frame(b, p.title);
         const x = b.left + this.cw;
-        let y = b.top + PAD;
+        let y = b.top + topPad;
         // The prompt.
         const prompt = p.inputOnly ? p.query : `> ${p.query}`;
         this.runs(x, y, [[prompt, theme.FG]], cols);
