@@ -9,6 +9,7 @@ import { Clipboard } from '../clipboard';
 import { KeyInput, charOf } from '../editor/keys';
 import { PRESET_NAMES, Preset, PresetName } from '../config';
 import { findFiles } from '../finder';
+import { Glide } from '../glide';
 import { formatBytes } from '../image';
 import { Box, Picker, PickerItem, Run } from '../popup';
 import { DrawCmd } from '../protocol';
@@ -240,6 +241,21 @@ export interface PanelOptions {
     defaultPreset?: PresetName;
     /** How long the prompt cache lasts after a request, in minutes. */
     cacheMinutes: number;
+    /** Whether the conversation glides when it scrolls. */
+    smoothScroll?: () => boolean;
+}
+
+/** How quickly the conversation glides, in ms (as the editor's text does). */
+const SCROLL_GLIDE = 40;
+
+/** A place in the conversation: a row of it and a column. */
+interface Spot {
+    row: number;
+    col: number;
+}
+
+function rowText(row: Row): string {
+    return row.runs.map(([s]) => s).join('');
 }
 
 export class AgentPanel {
@@ -271,6 +287,19 @@ export class AgentPanel {
     /** Rows of the conversation shown in the last frame, and in all. */
     private transcriptRows = 10;
     private transcriptTotal = 0;
+    /** The conversation's rows in the last frame, where they were drawn and
+     * how far down they were (fractional while they glide), for selecting. */
+    private shownRows: Row[] = [];
+    private shownArea: Box | undefined;
+    private shownTop = 0;
+    private shownX = 0;
+    private shownCw = 1;
+    private shownLh = 1;
+    private readonly scrollGlide = new Glide(SCROLL_GLIDE);
+    private glideFor: unknown;
+    /** The text selected with the mouse: where it started and where it is. */
+    private selection: { anchor: Spot; head: Spot } | undefined;
+    private selecting = false;
 
     constructor(private readonly opts: PanelOptions) {}
 
@@ -391,6 +420,7 @@ export class AgentPanel {
         const s = this.session ?? this.newSession();
         this.syncPrompt();
         this.message = undefined;
+        if (!(key.key === 'y' && !key.ctrl)) this.selection = undefined;
         const g = this.pendingG;
         this.pendingG = false;
         if (key.key !== 'x' || key.ctrl) this.closeWarned = false;
@@ -750,7 +780,89 @@ export class AgentPanel {
         this.message = `Closed "${cut(s.title, 30)}" (s to resume it)`;
     }
 
+    /** The selected text of the conversation, if any. */
+    selectedText(): string | undefined {
+        const sel = this.selection;
+        if (!sel) return undefined;
+        const [a, b] = this.ordered(sel);
+        const lines: string[] = [];
+        for (let r = a.row; r <= b.row && r < this.shownRows.length; r++) {
+            const chars = Array.from(rowText(this.shownRows[r]));
+            const from = r === a.row ? a.col : 0;
+            const to = r === b.row ? b.col : chars.length;
+            lines.push(chars.slice(from, to).join('').trimEnd());
+        }
+        const text = lines.join('\n');
+        return text.trim() === '' ? undefined : text;
+    }
+
+    /** Cmd+C: copy the selection. Returns whether there was one. */
+    copySelection(): boolean {
+        const text = this.selectedText();
+        if (text === undefined) return false;
+        this.opts.clipboard.setText(text);
+        this.message = 'Copied the selection';
+        return true;
+    }
+
+    private ordered(sel: { anchor: Spot; head: Spot }): [Spot, Spot] {
+        const { anchor: a, head: b } = sel;
+        return a.row < b.row || (a.row === b.row && a.col <= b.col) ? [a, b] : [b, a];
+    }
+
+    /** The place in the conversation under a point, kept inside it. */
+    private spotAt(x: number, y: number): Spot | undefined {
+        const area = this.shownArea;
+        if (!area || this.shownRows.length === 0) return undefined;
+        const row = Math.floor((y - area.top) / this.shownLh + this.shownTop);
+        const clamped = Math.min(Math.max(row, 0), this.shownRows.length - 1);
+        const width = Array.from(rowText(this.shownRows[clamped])).length;
+        const col = Math.round((x - this.shownX) / this.shownCw);
+        return { row: clamped, col: Math.min(Math.max(col, 0), width) };
+    }
+
+    /** The mouse went down at a point of the conversation. */
+    private beginSelect(x: number, y: number): void {
+        const at = this.spotAt(x, y);
+        this.selection = at && { anchor: at, head: at };
+        this.selecting = at !== undefined;
+    }
+
+    /** The mouse moved with its button down: extend the selection, scrolling
+     * when it is past the conversation's edge. */
+    dragTo(x: number, y: number): void {
+        const sel = this.selection;
+        const area = this.shownArea;
+        if (!this.selecting || !sel || !area) return;
+        if (y < area.top) this.scrollBy(-1);
+        else if (y >= area.bottom) this.scrollBy(1);
+        const at = this.spotAt(x, y);
+        if (at) sel.head = at;
+    }
+
+    /** The mouse went up: a plain click selects nothing. */
+    endSelect(): void {
+        const sel = this.selection;
+        if (sel && sel.anchor.row === sel.head.row && sel.anchor.col === sel.head.col) this.selection = undefined;
+        this.selecting = false;
+    }
+
+    /** Whether the conversation is still gliding to where it scrolled. */
+    get moving(): boolean {
+        const s = this.session;
+        if (!s) return false;
+        const v = this.view(s);
+        const target = v.follow ? Math.max(this.transcriptTotal - this.transcriptRows, 0) : v.scroll;
+        return this.scrollGlide.moving || (this.opts.smoothScroll?.() === true && this.shownTop !== target);
+    }
+
     private yankReply(s: AgentSession): void {
+        const selected = this.selectedText();
+        if (selected !== undefined) {
+            this.opts.clipboard.setText(selected);
+            this.message = 'Copied the selection';
+            return;
+        }
         const reply = [...s.entries].reverse().find((e) => e.t === 'Text');
         if (reply?.t !== 'Text') {
             this.message = 'No reply to copy yet';
@@ -921,6 +1033,8 @@ export class AgentPanel {
         const hit = this.hits.find(([b]) => contains(b, x, y))?.[1];
         const s = this.session;
         this.message = undefined;
+        this.selection = undefined;
+        this.selecting = false;
         if (!s || !hit) return NONE;
         switch (hit.t) {
             case 'Session':
@@ -960,6 +1074,7 @@ export class AgentPanel {
                 break;
             case 'Transcript':
                 this.focus = 'Transcript';
+                this.beginSelect(x, y);
                 break;
         }
         return NONE;
@@ -1290,11 +1405,35 @@ export class AgentPanel {
         v.scroll = Math.min(v.scroll, max);
         this.transcriptRows = visible;
         this.transcriptTotal = rows.length;
+        // Glide to the scroll position, starting afresh for another session.
+        const glideFor = this.showHelp ? 'help' : s;
+        if (this.glideFor !== glideFor) {
+            this.glideFor = glideFor;
+            this.scrollGlide.reset();
+        }
+        const top = this.opts.smoothScroll?.() ? Math.min(Math.max(this.scrollGlide.step(v.scroll, now, visible), 0), max) : v.scroll;
+        if (!this.opts.smoothScroll?.()) this.scrollGlide.reset();
+        this.shownRows = rows;
+        this.shownArea = area;
+        this.shownTop = top;
+        this.shownX = x;
+        this.shownCw = cv.cw;
+        this.shownLh = lh;
+        const first = Math.floor(top);
+        const offset = (top - first) * lh;
+        const sel = this.selection && this.ordered(this.selection);
         cv.cmds.push(['clip', area.left, area.top, area.right - area.left, area.bottom - area.top]);
-        for (let i = 0; i < visible && v.scroll + i < rows.length; i++) {
-            const row = rows[v.scroll + i];
-            const y = area.top + i * lh;
+        for (let i = 0; first + i < rows.length && i <= visible; i++) {
+            const index = first + i;
+            const row = rows[index];
+            const y = area.top + i * lh - offset;
             if (row.bg) cv.rect({ left: area.left, top: y, right: area.right, bottom: y + lh }, row.bg);
+            if (sel && index >= sel[0].row && index <= sel[1].row) {
+                const len = width(rowText(row));
+                const from = index === sel[0].row ? sel[0].col : 0;
+                const to = index === sel[1].row ? sel[1].col : len + 1;
+                cv.rect({ left: x + from * cv.cw, top: y, right: x + Math.max(to, from) * cv.cw, bottom: y + lh }, theme.SELECTION);
+            }
             cv.runs(x, y, row.runs, cols);
             if (row.choice !== undefined) this.hits.push([{ left: area.left, top: y, right: area.right, bottom: y + lh }, { t: 'Choice', index: row.choice }]);
         }
@@ -1302,8 +1441,8 @@ export class AgentPanel {
         if (rows.length > visible) {
             const h = area.bottom - area.top;
             const thumb = Math.max((visible / rows.length) * h, lh / 2);
-            const top = area.top + (v.scroll / Math.max(max, 1)) * (h - thumb);
-            cv.rect({ left: area.right - 4, top, right: area.right - 1, bottom: top + thumb }, theme.GUTTER, 1);
+            const thumbTop = area.top + (top / Math.max(max, 1)) * (h - thumb);
+            cv.rect({ left: area.right - 4, top: thumbTop, right: area.right - 1, bottom: thumbTop + thumb }, theme.GUTTER, 1);
         }
         cv.cmds.push(['unclip']);
         this.hits.push([area, { t: 'Transcript' }]);

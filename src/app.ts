@@ -214,7 +214,7 @@ export class WimApp {
     /** The press that may become a drag in the text area. */
     /** A press that may become a drag: in the text area, or on the sound
      * player's scrubber or volume bar (`control`). */
-    private press: { x: number; y: number; dragging: boolean; control?: 'Scrub' | 'Volume' } | undefined;
+    private press: { x: number; y: number; dragging: boolean; control?: 'Scrub' | 'Volume'; agents?: true } | undefined;
     /** The one sound that can be playing. */
     readonly player: AudioPlayer;
     /** Split windows; the editor works in the active one. */
@@ -231,6 +231,10 @@ export class WimApp {
     private refreshQueued = false;
     /** The active window's view and caret on their way to where they are
      * (with smooth scrolling or caret), for that window and buffer. */
+    /** Watches the tree's root for files coming and going. */
+    private treeWatcher: fs.FSWatcher | undefined;
+    private treeWatchTimer: NodeJS.Timeout | undefined;
+    private treeWatchRoot: string | undefined;
     private readonly topGlide = new Glide(SCROLL_GLIDE);
     private readonly lineGlide = new Glide(CARET_GLIDE);
     private readonly colGlide = new Glide(CARET_GLIDE);
@@ -331,6 +335,7 @@ export class WimApp {
             presets: this.config.claude.presets,
             defaultPreset: this.config.claude.defaultPreset,
             cacheMinutes: this.config.claude.cacheMinutes,
+            smoothScroll: () => this.config.editor.smoothScroll,
         });
         this.terminal = createTerminal({ shell: this.config.terminal.shell, cwd: currentDir, refresh });
         if (opts.configWarnings?.length) this.editor.setError(opts.configWarnings.join('; '));
@@ -411,6 +416,10 @@ export class WimApp {
                 break;
             case 'copy':
             case 'cut':
+                if (this.focus === 'Agents') {
+                    this.agents.copySelection();
+                    break;
+                }
                 this.editor.copySelection(name === 'cut');
                 break;
             case 'paste':
@@ -730,8 +739,38 @@ export class WimApp {
         });
     }
 
+    /** Refresh the tree when files or folders under `root` change on disk
+     * (made by a shell, an agent, git...). Changes come in bursts, so the
+     * tree is read again once they settle. */
+    private watchTree(root: string): void {
+        if (root === this.treeWatchRoot) return;
+        this.treeWatcher?.close();
+        this.treeWatcher = undefined;
+        this.treeWatchRoot = root;
+        try {
+            this.treeWatcher = fs.watch(root, { recursive: true, persistent: false }, (_event, name) => {
+                if (name && /(^|[\\/])(\.git|node_modules)([\\/]|$)/.test(String(name))) return;
+                if (this.treeWatchTimer) clearTimeout(this.treeWatchTimer);
+                this.treeWatchTimer = setTimeout(() => {
+                    this.treeWatchTimer = undefined;
+                    if (!this.treeVisible) return;
+                    this.tree.refresh();
+                    this.refresh();
+                }, 200);
+            });
+            this.treeWatcher.on('error', () => {
+                this.treeWatcher?.close();
+                this.treeWatcher = undefined;
+            });
+        } catch {
+            // Watching isn't supported here: `R` and focusing still refresh.
+        }
+    }
+
     /** Stop the language servers (Wim is exiting). */
     dispose(): void {
+        this.treeWatcher?.close();
+        if (this.treeWatchTimer) clearTimeout(this.treeWatchTimer);
         if (this.frameTimer) clearTimeout(this.frameTimer);
         if (this.pressedTimer) clearTimeout(this.pressedTimer);
         this.completion.close();
@@ -1618,6 +1657,7 @@ export class WimApp {
             this.tree.refreshGitStatus();
         }
         this.gitStale = false;
+        this.watchTree(cwd);
         this.tree.setViewRows(layout.treeRows);
         const file = this.editor.filePath;
         if (file !== undefined && file !== this.revealed) {
@@ -1642,12 +1682,17 @@ export class WimApp {
             if (hit?.bar && contains(hit.bar, x, y)) return;
         }
         if (kind === 'up') {
+            if (this.press?.agents) this.agents.endSelect();
             this.press = undefined;
             return;
         }
         if (kind === 'move') {
             const p = this.press;
             if (!p) return;
+            if (p.agents) {
+                this.agents.dragTo(x, y);
+                return;
+            }
             if (p.control) {
                 this.audioMouse(layout, x, y, p.control);
                 return;
@@ -1684,6 +1729,7 @@ export class WimApp {
             this.editorToNormal();
             this.focus = 'Agents';
             this.agentAction(this.agents.mouse(x, y));
+            this.press = { x, y, dragging: false, agents: true };
             return;
         }
         const sidebar = layout.sidebar;
@@ -1820,7 +1866,7 @@ export class WimApp {
         image?.tick(rectSize(imageArea(layout.textArea, layout.lineH)), now);
         const panes = this.panes(layout);
         const shown = this.shown(layout, panes, now);
-        const animating = this.gliding() || (image?.moving ?? false);
+        const animating = this.gliding() || (image?.moving ?? false) || (this.agentsVisible && this.agents.moving);
         if (this.frameTimer) clearTimeout(this.frameTimer);
         this.frameTimer = animating
             ? setTimeout(() => {
