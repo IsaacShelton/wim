@@ -292,6 +292,7 @@ export class WimApp {
         // `wim .` or `wim some/dir`: work in that directory, with no file open.
         let file = opts.path;
         let dirError: string | undefined;
+        const openedDir = file !== undefined && isDirectory(file);
         if (file !== undefined && isDirectory(file)) {
             try {
                 process.chdir(file);
@@ -341,6 +342,11 @@ export class WimApp {
         const root = currentDir();
         this.tree = new FileTree(root);
         this.treeCwd = root;
+        // `wim .` starts with the tree open and focused.
+        if (openedDir) {
+            this.treeVisible = true;
+            this.focus = 'Tree';
+        }
         this.agents = new AgentPanel({
             backend: opts.agents ?? new SdkBackend(),
             clipboard: this.clipboard,
@@ -879,6 +885,22 @@ export class WimApp {
                 });
                 break;
             }
+            case 'Rename': {
+                const from = action.path;
+                this.picker = new Picker<never>('Rename', () => {}, {
+                    initialQuery: this.tree.relative(from),
+                    onInput: (name) => {
+                        if (name.trim() === '') return;
+                        try {
+                            const to = this.tree.rename(from, name);
+                            this.renamedOnDisk(from, to);
+                        } catch (e) {
+                            this.editor.setError(`Can't rename ${this.tree.relative(from)}: ${(e as Error).message}`);
+                        }
+                    },
+                });
+                break;
+            }
             case 'Create':
                 this.picker = new Picker<never>('Create File', () => {}, {
                     initialQuery: this.tree.promptPath(action.dir),
@@ -893,6 +915,17 @@ export class WimApp {
                 });
                 break;
         }
+    }
+
+    /** Point open buffers at their files' new paths after a rename. */
+    private renamedOnDisk(from: string, to: string): void {
+        const moved = (p: string | undefined): string | undefined => {
+            if (p === undefined) return p;
+            if (p === from) return to;
+            return p.startsWith(from + path.sep) ? to + p.slice(from.length) : p;
+        };
+        this.editor.filePath = moved(this.editor.filePath);
+        for (const slot of this.editor.buffers) slot.filePath = moved(slot.filePath);
     }
 
     /** The active buffer's rendered view, when it's shown. */

@@ -169,7 +169,7 @@ installed Nerd Font such as FiraMono Nerd Font), git-ignored files hidden, no ro
 follows the current file. In the tree: `j`/`k` move, `gg`/`G` jump, `<CR>`/`o` opens a file or
 toggles a folder, `l` expands, `h` or `<BS>` collapses or goes to the parent, `a` creates a file in the
 selected folder (or the selected file's folder; a trailing `/` makes a folder, and missing
-folders are made too), `dd` deletes the selected file or folder (with everything in it) after
+folders are made too), `r` renames the selected file or folder, `dd` deletes the selected file or folder (with everything in it) after
 asking `(y/n)`, `R` re-reads the disk, `q` hides it, `<Esc>` returns to the editor. Ctrl+h / Ctrl+l (or `<C-w>h`, `<C-w>l`, `<C-w>w`)
 move focus between the tree and the editor. Clicking works too.
 

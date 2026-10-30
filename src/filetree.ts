@@ -2,7 +2,7 @@
 //
 // Keys while it has focus: `j`/`k` move, `gg`/`G` jump, `<CR>`/`o` open a
 // file or toggle a directory, `l` expands, `h` collapses (or goes to the
-// parent), `a` creates a file or directory, `d` deletes one (after asking),
+// parent), `a` creates a file or directory, `r` renames one, `d` deletes one (after asking),
 // `R` re-reads the disk, `q` hides the tree, `<Esc>` returns to the editor.
 // `<BS>` collapses like `h`.
 //
@@ -49,6 +49,8 @@ export type TreeAction =
     | { t: 'FocusEditor' }
     /** Ask for the name of a file to create in `dir`. */
     | { t: 'Create'; dir: string }
+    /** Ask for the new name of `path`. */
+    | { t: 'Rename'; path: string }
     /** Ask whether to delete `path`. */
     | { t: 'Delete'; path: string; isDir: boolean };
 
@@ -221,6 +223,22 @@ export class FileTree {
         return p;
     }
 
+    /** Rename `from` to `name` (relative to the tree's root; missing parent
+     * directories are created). Selects it and returns its new path; throws
+     * if the target exists or the move fails. */
+    rename(from: string, name: string): string {
+        const to = path.resolve(this.root, name.replace(/[\\/]+$/, ''));
+        if (to === from) return from;
+        if (fs.existsSync(to)) throw new Error('it already exists');
+        fs.mkdirSync(path.dirname(to), { recursive: true });
+        fs.renameSync(from, to);
+        const wasExpanded = this.expanded.delete(from);
+        if (wasExpanded) this.expanded.add(to);
+        this.refresh();
+        this.reveal(to);
+        return to;
+    }
+
     /** Delete `p` (a directory with everything in it) and re-read the
      * disk. Throws if it can't be deleted. */
     remove(p: string): void {
@@ -306,7 +324,10 @@ export class FileTree {
         else if (k === 'Backspace') this.closeCurrentFolder();
         else if (k === 'R' && plain) this.refresh();
         else if (k === 'a' && plain) return { t: 'Create', dir: this.selectedDir() };
-        else if (k === 'd' && plain) {
+        else if (k === 'r' && plain) {
+            const row = this.rows[this.selected];
+            if (row) return { t: 'Rename', path: row.path };
+        } else if (k === 'd' && plain) {
             const row = this.rows[this.selected];
             if (row) return { t: 'Delete', path: row.path, isDir: row.isDir };
         }
