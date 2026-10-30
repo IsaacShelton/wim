@@ -23,6 +23,7 @@ import { CmdKind, Mode, WANT_EOL, isCmdLine, isInsert, isVisual } from './mode';
 import { Range } from './range';
 import { Registers } from './registers';
 import * as search from './search';
+import { lineRows as wrapRows } from './wrap';
 
 export interface Options {
     number: boolean;
@@ -38,6 +39,8 @@ export interface Options {
     tabstop: number;
     shiftwidth: number;
     scrolloff: number;
+    /** Show long lines over several rows instead of scrolling sideways. */
+    wrap: boolean;
 }
 
 export function defaultOptions(): Options {
@@ -54,6 +57,7 @@ export function defaultOptions(): Options {
         tabstop: 4,
         shiftwidth: 4,
         scrolloff: 3,
+        wrap: false,
     };
 }
 
@@ -364,14 +368,88 @@ export class Editor {
         return Math.min(this.options.scrolloff, Math.floor(Math.max(this.viewRows - 1, 0) / 2));
     }
 
+    /** How many screen rows `line` takes: one, or more when it wraps. */
+    lineRows(line: number): number {
+        if (!this.options.wrap) return 1;
+        return wrapRows(this.buffer.line(line), this.options.tabstop, this.viewCols, line === this.cursor.line ? this.cursor.col : undefined);
+    }
+
+    /** Screen rows taken by the lines from `from` to `to`, both included. */
+    rowsBetween(from: number, to: number): number {
+        let n = 0;
+        for (let l = from; l <= to; l++) n += this.lineRows(l);
+        return n;
+    }
+
+    /** How many lines, from the top of the view, fit on the screen whole
+     * (at least one). */
+    visibleLines(): number {
+        if (!this.options.wrap) return this.viewRows;
+        const last = this.buffer.lastLine();
+        let n = 0;
+        let rows = 0;
+        for (let l = Math.floor(this.scrollTop); l <= last; l++) {
+            rows += this.lineRows(l);
+            if (rows > this.viewRows) break;
+            n++;
+        }
+        return Math.max(n, 1);
+    }
+
+    /** The screen rows from line `from` down to line `to` (negative when `to`
+     * is above), counting no more than a few screens' worth. */
+    rowsDelta(from: number, to: number): number {
+        const reach = 4 * this.viewRows;
+        if (to >= from) return this.rowsBetween(from, Math.min(to, from + reach) - 1);
+        return -this.rowsBetween(Math.max(to, from - reach), from - 1);
+    }
+
+    /** Where a position is on screen, in rows below the top line's first row
+     * and columns from the left, when lines wrap. */
+    wrapPos(p: Pos): { row: number; col: number } {
+        const cols = Math.max(this.viewCols, 1);
+        const top = Math.floor(this.scrollTop);
+        let row = 0;
+        if (p.line >= top) row = this.rowsBetween(top, Math.min(p.line, top + 2 * this.viewRows + 2) - 1);
+        else row = -this.rowsBetween(p.line, top - 1);
+        const d = this.displayCol(p.line, p.col);
+        return { row: row + Math.floor(d / cols), col: d % cols };
+    }
+
+    /** The position at a screen row (below the top line's first row) and
+     * display column, when lines wrap. */
+    posFromRow(row: number, dcol: number): Pos {
+        const last = this.buffer.lastLine();
+        const cols = Math.max(this.viewCols, 1);
+        let line = Math.floor(this.scrollTop);
+        let left = Math.max(row, 0);
+        while (line < last && left >= this.lineRows(line)) left -= this.lineRows(line++);
+        const seg = Math.min(left, this.lineRows(line) - 1);
+        return pos(line, this.colFromDisplay(line, seg * cols + Math.max(dcol, 0)));
+    }
+
     scrollToCursor(): void {
         const rows = this.viewRows;
         const so = this.scrolloff();
         const line = this.cursor.line;
+        const last = this.buffer.lastLine();
         if (line < this.scrollTop + so) this.scrollTop = Math.max(line - so, 0);
-        if (line + so >= this.scrollTop + rows) this.scrollTop = line + so + 1 - rows;
-        this.scrollTop = Math.min(this.scrollTop, this.buffer.lastLine());
+        if (this.options.wrap) {
+            // Scroll down until the cursor's line (and `so` lines after it)
+            // fit; a line takes at least one row, so none earlier than this
+            // could.
+            const bottom = Math.min(line + so, last);
+            this.scrollTop = Math.max(this.scrollTop, bottom - rows + 1);
+            while (this.scrollTop < line && this.rowsBetween(this.scrollTop, bottom) > rows) this.scrollTop++;
+        } else if (line + so >= this.scrollTop + rows) {
+            this.scrollTop = line + so + 1 - rows;
+        }
+        this.scrollTop = Math.min(this.scrollTop, last);
 
+        if (this.options.wrap) {
+            this.scrollLeft = 0;
+            return;
+        }
         const dcol = this.displayCol(line, this.cursor.col);
         if (dcol < this.scrollLeft) this.scrollLeft = dcol;
         if (dcol >= this.scrollLeft + this.viewCols) this.scrollLeft = dcol + 1 - this.viewCols;
@@ -384,7 +462,7 @@ export class Editor {
         this.scrollTop = Math.min(Math.max(this.scrollTop + delta, 0), last);
         const so = this.scrolloff();
         const top = this.scrollTop === 0 ? 0 : this.scrollTop + so;
-        const bottom = Math.max(Math.max(this.scrollTop + this.viewRows - (1 + so), 0), top);
+        const bottom = Math.max(Math.max(this.scrollTop + this.visibleLines() - (1 + so), 0), top);
         const line = Math.min(Math.max(this.cursor.line, Math.min(top, last)), Math.min(bottom, last));
         if (line !== this.cursor.line) this.cursor = pos(line, this.colForWant(line));
     }
@@ -441,6 +519,9 @@ export class Editor {
             this.cursor = this.buffer.insertText(this.cursor, text);
         } else if (isCmdLine(this.mode)) {
             this.cmdline += text.split('\n')[0];
+        } else if (text !== '') {
+            // Normal and Visual mode: as `"+p`, which reads the clipboard.
+            this.handleKeys([ch('"'), ch('+'), ch('p')]);
         }
     }
 

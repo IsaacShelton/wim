@@ -43,6 +43,9 @@ export interface Config {
         /** Whether the text glides when it scrolls (`<C-d>`, `<C-u>`, the
          * mouse wheel, ...) instead of jumping. */
         smoothScroll: boolean;
+        /** Whether long lines wrap onto several rows instead of scrolling
+         * sideways (`:set wrap`, or the right-click menu). */
+        wrap: boolean;
     };
 }
 
@@ -62,6 +65,7 @@ export const DEFAULT_CONFIG: Config = {
     editor: {
         smoothCaret: false,
         smoothScroll: false,
+        wrap: false,
     },
 };
 
@@ -154,7 +158,7 @@ export function parseConfig(text: string): { config: Config; warnings: string[] 
     if (editor !== undefined && !isObject(editor)) {
         warn('editor', 'an object');
     } else if (editor) {
-        for (const key of ['smoothCaret', 'smoothScroll'] as const) {
+        for (const key of ['smoothCaret', 'smoothScroll', 'wrap'] as const) {
             const value = editor[key];
             if (value === undefined) continue;
             if (typeof value === 'boolean') config.editor[key] = value;

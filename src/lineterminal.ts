@@ -225,6 +225,13 @@ export class LineTerminal implements TerminalPane {
         if (proc) kill(proc);
     }
 
+    // The line based terminal has no screen of cells to select from.
+    select(): void {}
+
+    selectedText(): string | undefined {
+        return undefined;
+    }
+
     paste(text: string): void {
         // One line: a pasted line break would run the command.
         this.input.insert(text.replace(/\s*\n\s*/g, ' ').trimEnd());

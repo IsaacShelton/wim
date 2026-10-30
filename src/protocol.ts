@@ -10,6 +10,9 @@ export type ClientMessage =
     /** Cmd shortcuts (Ctrl+Shift on Windows and Linux). `agents` (Cmd+L)
      * shows or hides the Claude Code panel, and `terminal` (Cmd+J) the shell. */
     | { t: 'command'; name: 'save' | 'copy' | 'cut' | 'paste' | 'agents' | 'terminal' }
+    /** The right button went down at a point (the window's context menu
+     * event). */
+    | { t: 'context'; x: number; y: number }
     /** `mod` is Cmd held (Ctrl on Windows and Linux), as for following a
      * link. */
     | { t: 'mouse'; kind: 'down' | 'move' | 'up'; x: number; y: number; mod?: boolean }
@@ -33,8 +36,9 @@ export type ClientMessage =
 export type ServerMessage =
     /** `animating`: something is gliding, so the window asks for the next
      * frame (with `tick`) once it has drawn this one, in step with the
-     * display. */
-    | { t: 'frame'; title: string; dirty: boolean; cmds: DrawCmd[]; animating?: boolean }
+     * display. `tracking`: a menu is open, so the window sends `move`
+     * for the pointer even with no button down. */
+    | { t: 'frame'; title: string; dirty: boolean; cmds: DrawCmd[]; animating?: boolean; tracking?: boolean }
     /** Wim is exiting; the window should close. */
     | { t: 'quit' }
     | { t: 'audio'; cmd: AudioCommand };

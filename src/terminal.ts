@@ -50,6 +50,11 @@ export interface TerminalPane {
     paste(text: string): void;
     /** Scroll back (positive) or forward through the output. */
     scrollBy(rows: number): void;
+    /** The mouse went down, moved with its button down, or went up at a
+     * point: selects text on the screen. */
+    select(kind: 'down' | 'move' | 'up', x: number, y: number): void;
+    /** The selected text, if any. */
+    selectedText(): string | undefined;
     /** Draw the terminal in `r`: a title row and the screen. */
     paint(cmds: DrawCmd[], r: Box, cw: number, lh: number, focused: boolean): void;
     dispose(): void;
@@ -62,6 +67,11 @@ export function createTerminal(opts: TerminalOptions): TerminalPane {
 }
 
 const NONE: TerminalAction = { t: 'None' };
+/** A cell of the terminal's buffer. */
+interface Spot {
+    row: number;
+    col: number;
+}
 /** Lines of output kept. */
 const SCROLLBACK = 5000;
 /** The control sequence (OSC) number the wrapper reports on. */
@@ -99,6 +109,12 @@ export class Terminal implements TerminalPane {
     private dir: string | undefined;
     /** Rows scrolled back from the end (0 follows the output). */
     scroll = 0;
+    /** The selected cells, as rows of the whole buffer (scrollback
+     * included), from where the mouse went down to where it is. */
+    private selection: { anchor: Spot; head: Spot } | undefined;
+    private selecting = false;
+    /** Where the screen was drawn last, to find cells under the mouse. */
+    private shownAt: { left: number; top: number; cw: number; lh: number; cols: number; rows: number } | undefined;
 
     constructor(private readonly opts: TerminalOptions) {
         this.term = new XTerm({ cols: 80, rows: 24, scrollback: SCROLLBACK, allowProposedApi: true });
@@ -292,6 +308,7 @@ export class Terminal implements TerminalPane {
         }
         const data = encodeKey(key, this.term.modes.applicationCursorKeysMode);
         if (data !== undefined) {
+            this.selection = undefined;
             this.scroll = 0;
             this.send(data);
         }
@@ -307,6 +324,56 @@ export class Terminal implements TerminalPane {
             return;
         }
         this.scroll = Math.min(Math.max(this.scroll + rows, 0), this.term.buffer.active.baseY);
+    }
+
+    // ----- Selection -----------------------------------------------------------------
+
+    /** The cell under a point, kept on the screen. */
+    private spotAt(x: number, y: number): Spot | undefined {
+        const g = this.shownAt;
+        if (!g) return undefined;
+        const buf = this.term.buffer.active;
+        const row = Math.min(Math.max(Math.floor((y - g.top) / g.lh), 0), g.rows - 1);
+        const col = Math.min(Math.max(Math.floor((x - g.left) / g.cw), 0), g.cols - 1);
+        return { row: buf.baseY - this.scroll + row, col };
+    }
+
+    select(kind: 'down' | 'move' | 'up', x: number, y: number): void {
+        const at = this.spotAt(x, y);
+        if (kind === 'down') {
+            this.selection = at && { anchor: at, head: at };
+            this.selecting = at !== undefined;
+        } else if (kind === 'move') {
+            if (this.selecting && this.selection && at) this.selection.head = at;
+        } else {
+            const sel = this.selection;
+            if (sel && sel.anchor.row === sel.head.row && sel.anchor.col === sel.head.col) this.selection = undefined;
+            this.selecting = false;
+        }
+    }
+
+    /** The selection's ends, first to last. */
+    private ordered(): [Spot, Spot] | undefined {
+        const sel = this.selection;
+        if (!sel) return undefined;
+        const { anchor: a, head: b } = sel;
+        return a.row < b.row || (a.row === b.row && a.col <= b.col) ? [a, b] : [b, a];
+    }
+
+    selectedText(): string | undefined {
+        const ends = this.ordered();
+        if (!ends) return undefined;
+        const [a, b] = ends;
+        const buf = this.term.buffer.active;
+        let text = '';
+        for (let r = a.row; r <= b.row; r++) {
+            const line = buf.getLine(r);
+            if (!line) continue;
+            text += line.translateToString(true, r === a.row ? a.col : 0, r === b.row ? b.col + 1 : undefined);
+            // A line the program wrapped goes on in the next.
+            if (r < b.row && !buf.getLine(r + 1)?.isWrapped) text += '\n';
+        }
+        return text.trim() === '' ? undefined : text;
     }
 
     // ----- Painting ------------------------------------------------------------------
@@ -338,11 +405,22 @@ export class Terminal implements TerminalPane {
         const buf = this.term.buffer.active;
         this.scroll = Math.min(this.scroll, buf.baseY);
         const first = buf.baseY - this.scroll;
+        this.shownAt = { left, top, cw, lh, cols, rows };
+        const selected = this.ordered();
         const cell = buf.getNullCell();
         for (let row = 0; row < rows; row++) {
             const line = buf.getLine(first + row);
             if (!line) continue;
             const y = top + row * lh;
+            if (selected) {
+                const [a, b] = selected;
+                const r = first + row;
+                if (r >= a.row && r <= b.row) {
+                    const from = r === a.row ? a.col : 0;
+                    const to = r === b.row ? b.col + 1 : cols;
+                    if (to > from) cmds.push(['rect', left + from * cw, y, (to - from) * cw, lh, theme.SELECTION]);
+                }
+            }
             // A run of cells with the same look, drawn as one text.
             let run = '';
             let runX = 0;

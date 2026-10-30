@@ -20,6 +20,8 @@ import { KeyInput, ch, charOf, ctrl, isNamedKey, keyEq, keyIs, keyNew, keyToStri
 import { isCmdLine } from './editor/mode';
 import { Range } from './editor/range';
 import { lineMatches } from './editor/search';
+import { lineRows } from './editor/wrap';
+import { ContextMenu, MenuAction, MenuItem } from './contextmenu';
 import { FileTree, GitStatus } from './filetree';
 import { Glide } from './glide';
 import { GitDiff, LineChange } from './gitdiff';
@@ -139,6 +141,12 @@ interface Shown {
     top: number;
     line: number;
     col: number;
+    /** With line wrapping, where the caret is: its screen row below the top
+     * line's first row, and its column in that row. */
+    wrapped?: { row: number; col: number };
+    /** With line wrapping, how many screen rows the text is still to glide
+     * up (or down, when negative) to reach `top`. */
+    rowShift?: number;
 }
 
 interface Flash {
@@ -164,7 +172,7 @@ export interface AppOptions {
     /** Problems found in the settings file, shown at startup. */
     configWarnings?: string[];
     /** Called whenever the window should be repainted. */
-    onFrame: (title: string, dirty: boolean, cmds: DrawCmd[], animating: boolean) => void;
+    onFrame: (title: string, dirty: boolean, cmds: DrawCmd[], animating: boolean, tracking: boolean) => void;
     /** Called to control the window's sound player. */
     onAudio?: (cmd: AudioCommand) => void;
     /** Called once when Wim should exit. */
@@ -189,6 +197,8 @@ export class WimApp {
     private readonly icons: boolean;
     private readonly tree: FileTree;
     private treeVisible = false;
+    /** The right-click menu, while it is open. */
+    private menu: ContextMenu | undefined;
     private focus: Focus = 'Editor';
     /** `<C-w>` was pressed; the next key picks a window. */
     private windowCmdPending = false;
@@ -213,7 +223,7 @@ export class WimApp {
     private metrics: Metrics = { width: 1000, height: 720, charW: 9, lineH: 23 };
     /** A press that may become a drag: in the text area, or on the sound
      * player's scrubber or volume bar (`control`). */
-    private press: { x: number; y: number; dragging: boolean; control?: 'Scrub' | 'Volume'; agents?: true } | undefined;
+    private press: { x: number; y: number; dragging: boolean; control?: 'Scrub' | 'Volume'; agents?: true; terminal?: true } | undefined;
     /** The one sound that can be playing. */
     readonly player: AudioPlayer;
     /** Split windows; the editor works in the active one. */
@@ -237,7 +247,11 @@ export class WimApp {
     private readonly topGlide = new Glide(SCROLL_GLIDE);
     private readonly lineGlide = new Glide(CARET_GLIDE);
     private readonly colGlide = new Glide(CARET_GLIDE);
-    private glidesFor: { win: Win; bufferId: number; markdown: boolean } | undefined;
+    private glidesFor: { win: Win; bufferId: number; markdown: boolean; wrap: boolean } | undefined;
+    /** With line wrapping, where the glides are counted from: the top line,
+     * its row (counted in screen rows from where gliding began) and the
+     * caret's. */
+    private wrapTrack: { top: number; abs: number; caretRow: number } | undefined;
     /** Draws the next frame while something glides, if the window doesn't
      * ask for it first. */
     private frameTimer: NodeJS.Timeout | undefined;
@@ -296,6 +310,7 @@ export class WimApp {
             }
         }
         this.editor = new Editor(this.clipboard);
+        this.editor.options.wrap = this.config.editor.wrap;
         const refresh = (): void => this.refresh();
         this.lsp = new LspManager(this.editor, opts.servers ?? defaultServers(), { refresh });
         this.features = new LspFeatures(this.editor, this.lsp, {
@@ -366,6 +381,9 @@ export class WimApp {
             case 'mouse':
                 this.mouse(layout, msg.kind, msg.x, msg.y, msg.mod ?? false);
                 break;
+            case 'context':
+                this.openMenu(layout, msg.x, msg.y);
+                break;
             case 'wheel':
                 this.wheel(layout, msg);
                 break;
@@ -417,6 +435,14 @@ export class WimApp {
             case 'cut':
                 if (this.focus === 'Agents') {
                     this.agents.copySelection();
+                    break;
+                }
+                if (this.focus === 'Terminal') {
+                    const text = this.terminal.selectedText();
+                    if (text !== undefined) {
+                        this.clipboard.setText(text);
+                        this.editor.setMessage('Copied the selection');
+                    }
                     break;
                 }
                 this.editor.copySelection(name === 'cut');
@@ -480,6 +506,10 @@ export class WimApp {
         // Ctrl+` toggles the terminal from anywhere, even where other keys go elsewhere.
         if (keyEq(key, ctrl('`'))) {
             this.toggleTerminal();
+            return;
+        }
+        if (this.menu) {
+            this.menuKey(key);
             return;
         }
         // A question on the command line (from the editor or the tree) is
@@ -647,6 +677,9 @@ export class WimApp {
                 break;
             case 'ToggleMarkdownView':
                 this.toggleMarkdown();
+                break;
+            case 'ToggleWrap':
+                this.toggleWrap();
                 break;
             case 'FollowLink':
                 if (!this.followLinkAtCursor()) this.gotoFileAtCursor();
@@ -1666,6 +1699,7 @@ export class WimApp {
     }
 
     private mouse(layout: Layout, kind: 'down' | 'move' | 'up', x: number, y: number, mod = false): void {
+        if (this.menu && this.menuMouse(kind, x, y)) return;
         if (kind === 'down') {
             this.picker?.dispose();
             this.picker = undefined;
@@ -1682,6 +1716,7 @@ export class WimApp {
         }
         if (kind === 'up') {
             if (this.press?.agents) this.agents.endSelect();
+            if (this.press?.terminal) this.terminal.select('up', x, y);
             this.press = undefined;
             return;
         }
@@ -1690,6 +1725,10 @@ export class WimApp {
             if (!p) return;
             if (p.agents) {
                 this.agents.dragTo(x, y);
+                return;
+            }
+            if (p.terminal) {
+                this.terminal.select('move', x, y);
                 return;
             }
             if (p.control) {
@@ -1713,6 +1752,8 @@ export class WimApp {
         if (layout.terminal && contains(layout.terminal, x, y)) {
             this.editorToNormal();
             this.focus = 'Terminal';
+            this.terminal.select('down', x, y);
+            this.press = { x, y, dragging: false, terminal: true };
             return;
         }
         if (this.badgeHit && contains(this.badgeHit, x, y)) {
@@ -1782,9 +1823,126 @@ export class WimApp {
         }
     }
 
+    // ----- Right-click menu --------------------------------------------------------
+
+    /** The right button went down: move to what is under it and open the
+     * menu for it. */
+    private openMenu(layout: Layout, x: number, y: number): void {
+        this.picker?.dispose();
+        this.picker = undefined;
+        this.float = undefined;
+        this.completion.close();
+        this.signature.close();
+        this.press = undefined;
+        const mac = process.platform === 'darwin';
+        const hint = (key: string): string => (mac ? `⌘${key}` : `Ctrl+Shift+${key}`);
+        const items: MenuItem[] = [];
+        if (layout.terminal && contains(layout.terminal, x, y)) {
+            this.editorToNormal();
+            this.focus = 'Terminal';
+            items.push(
+                { action: 'copy', label: 'Copy', hint: hint('C'), disabled: this.terminal.selectedText() === undefined },
+                { action: 'paste', label: 'Paste', hint: hint('V') },
+            );
+        } else if (layout.agents && contains(layout.agents, x, y)) {
+            this.editorToNormal();
+            this.focus = 'Agents';
+            items.push(
+                { action: 'copy', label: 'Copy', hint: hint('C'), disabled: this.agents.selectedText() === undefined },
+                { action: 'paste', label: 'Paste', hint: hint('V') },
+            );
+        } else if (layout.sidebar && contains(layout.sidebar, x, y)) {
+            this.menu = undefined;
+            return;
+        } else if (contains(layout.textArea, x, y) || layout.windows.some((w) => contains(w.area, x, y))) {
+            const hit = layout.windows.find((w) => contains(w.area, x, y));
+            if (hit && (hit.win !== this.windows.active || this.focus !== 'Editor')) {
+                // Moving to another window ends a selection, but a right
+                // click in the one being edited keeps it to copy.
+                if (this.focus !== 'Editor') this.editorToNormal();
+                this.focusWindow(hit.win);
+            }
+            this.focus = 'Editor';
+            const text = !this.imageView() && !this.editor.audio && !this.markdownView();
+            if (text) {
+                const selected = this.editor.selection() !== undefined;
+                items.push(
+                    { action: 'cut', label: 'Cut', hint: hint('X'), disabled: !selected },
+                    { action: 'copy', label: 'Copy', hint: hint('C'), disabled: !selected },
+                    { action: 'paste', label: 'Paste', hint: hint('V') },
+                    { action: 'selectAll', label: 'Select All', separator: true },
+                );
+            }
+            items.push({ action: 'wrap', label: 'Wrap Lines', checked: this.editor.options.wrap, separator: items.length > 0 });
+        } else {
+            this.menu = undefined;
+            return;
+        }
+        this.menu = new ContextMenu(x, y, items);
+    }
+
+    private closeMenu(): void {
+        this.menu = undefined;
+    }
+
+    private runMenuAction(action: MenuAction): void {
+        switch (action) {
+            case 'cut':
+            case 'copy':
+            case 'paste':
+                this.command(action);
+                break;
+            case 'selectAll':
+                this.editor.handleKeys(parseKeys('<Esc>ggVG'));
+                break;
+            case 'wrap':
+                this.toggleWrap();
+                break;
+        }
+    }
+
+    /** The mouse with the menu open. Returns whether the menu took it. */
+    private menuMouse(kind: 'down' | 'move' | 'up', x: number, y: number): boolean {
+        const menu = this.menu;
+        if (!menu) return false;
+        const { width, height, charW, lineH } = this.metrics;
+        if (kind === 'move') {
+            menu.hover = menu.itemAt(x, y, charW, lineH, width, height);
+            return true;
+        }
+        if (kind === 'up') return true;
+        const i = menu.itemAt(x, y, charW, lineH, width, height);
+        // A click outside closes the menu without doing anything else; one on
+        // a disabled item or a divider does nothing.
+        if (i === undefined && menu.contains(x, y, charW, lineH, width, height)) return true;
+        this.closeMenu();
+        if (i !== undefined) this.runMenuAction(menu.items[i].action);
+        return true;
+    }
+
+    private menuKey(key: KeyInput): void {
+        const menu = this.menu;
+        if (!menu) return;
+        if (key.key === 'Down' || keyEq(key, ctrl('n')) || keyEq(key, ctrl('j'))) menu.move(1);
+        else if (key.key === 'Up' || keyEq(key, ctrl('p')) || keyEq(key, ctrl('k'))) menu.move(-1);
+        else if (key.key === 'Enter') {
+            const item = menu.hover !== undefined ? menu.items[menu.hover] : undefined;
+            this.closeMenu();
+            if (item) this.runMenuAction(item.action);
+        } else this.closeMenu();
+    }
+
+    /** Wrap long lines onto several rows, or scroll sideways to them. */
+    private toggleWrap(): void {
+        const o = this.editor.options;
+        o.wrap = !o.wrap;
+        this.editor.setMessage(o.wrap ? 'wrap' : 'nowrap');
+    }
+
     private posAt(layout: Layout, x: number, y: number): Pos {
         const ed = this.editor;
         const row = Math.max(Math.floor((y - layout.textArea.top) / layout.lineH), 0);
+        if (ed.options.wrap) return ed.posFromRow(row, Math.floor((x - layout.textLeft) / layout.charW));
         const line = Math.min(ed.scrollTop + row, ed.buffer.lastLine());
         const dcol = Math.max(Math.floor((x - layout.textLeft) / layout.charW), 0) + ed.scrollLeft;
         return pos(line, ed.colFromDisplay(line, dcol));
@@ -1889,6 +2047,7 @@ export class WimApp {
             previewLines: (file) => this.previewLines(file),
             imageView: this.imagePlacement(layout),
             pressedButton: this.pressedButton,
+            menu: this.menu,
             player: this.player,
             focus: this.focus,
             icons: this.icons,
@@ -1909,7 +2068,7 @@ export class WimApp {
         const cmds = painter.paint();
         this.tabHits = painter.tabHits;
         this.badgeHit = painter.badgeHit;
-        this.opts.onFrame(title, dirty, cmds, animating);
+        this.opts.onFrame(title, dirty, cmds, animating, this.menu !== undefined);
     }
 
     /** Where the active window's view and caret are shown: gliding toward
@@ -1924,15 +2083,37 @@ export class WimApp {
         const content = panes.find((p) => p.active)?.content;
         const markdown = content?.t === 'Markdown';
         const g = this.glidesFor;
-        if (!g || g.win !== win || g.bufferId !== ed.bufferId() || g.markdown !== markdown) {
+        const wrap = ed.options.wrap && content?.t === 'Text';
+        if (!g || g.win !== win || g.bufferId !== ed.bufferId() || g.markdown !== markdown || g.wrap !== wrap) {
             this.topGlide.reset();
             this.lineGlide.reset();
             this.colGlide.reset();
-            this.glidesFor = { win, bufferId: ed.bufferId(), markdown };
+            this.wrapTrack = undefined;
+            this.glidesFor = { win, bufferId: ed.bufferId(), markdown, wrap };
         }
         const { smoothCaret, smoothScroll } = this.config.editor;
         // A rendered Markdown view scrolls by its rows.
         const top = content?.t === 'Markdown' ? content.top : ed.scrollTop;
+        if (wrap) {
+            // Lines wrap to different heights, so the glides count screen
+            // rows: the top line's row moves by the rows between lines as it
+            // scrolls, and the caret's row follows it.
+            const caret = ed.wrapPos(ed.cursor);
+            const track = this.wrapTrack ?? { top, abs: 0, caretRow: caret.row };
+            this.wrapTrack = track;
+            if (track.top !== top) {
+                track.abs += ed.rowsDelta(track.top, top);
+                track.top = top;
+            }
+            const caretRow = track.abs + caret.row;
+            // Moving to another row makes the column jump, not sweep across.
+            if (caretRow !== track.caretRow) this.colGlide.reset();
+            track.caretRow = caretRow;
+            const shownTop = smoothScroll ? this.topGlide.step(track.abs, now, layout.rows) : track.abs;
+            const shownRow = smoothCaret ? this.lineGlide.step(caretRow, now, layout.rows) : caretRow;
+            const shownCol = smoothCaret ? this.colGlide.step(caret.col, now, layout.cols) : caret.col;
+            return { top, line, col, rowShift: track.abs - shownTop, wrapped: { row: shownRow - shownTop, col: shownCol } };
+        }
         return {
             top: smoothScroll ? this.topGlide.step(top, now, layout.rows) : top,
             line: smoothCaret ? this.lineGlide.step(line, now, layout.rows) : line,
@@ -2032,6 +2213,7 @@ export class WimApp {
                 textLeft,
                 rows: Math.max(Math.floor((rect.area.bottom - rect.area.top) / lh), 1),
                 cols: Math.max(Math.floor((rect.area.right - textLeft - TEXT_PADDING) / cw), 1),
+                wrap: ed.options.wrap,
                 gutterCols,
                 signCols: this.signCols(file),
                 diagnostics: this.lsp.diagnosticsFor(file, buffer),
@@ -2189,6 +2371,10 @@ interface TextView {
     textLeft: number;
     rows: number;
     cols: number;
+    /** Whether long lines wrap onto several rows. */
+    wrap: boolean;
+    /** With wrapping, how many screen rows the text is yet to glide up. */
+    rowShift?: number;
     gutterCols: number;
     signCols: number;
     diagnostics: BufferDiagnostic[];
@@ -2260,6 +2446,8 @@ interface PaintState {
     imageView: { placement: Placement; scale: number } | undefined;
     /** An image zoom button drawn pressed. */
     pressedButton: ImageAction | undefined;
+    /** The right-click menu, when it is open. */
+    menu: ContextMenu | undefined;
     player: AudioPlayer;
 }
 
@@ -2326,7 +2514,7 @@ class Painter {
         this.clip(area);
         // The active window is drawn where its view has glided to.
         const top = this.st.shown.top;
-        if (c.t === 'Text') this.paintText(pane.active ? { ...c.view, scrollTop: top } : c.view);
+        if (c.t === 'Text') this.paintText(pane.active ? { ...c.view, scrollTop: top, rowShift: this.st.shown.rowShift } : c.view);
         else if (c.t === 'Image') this.paintImage(area, c.file, c.image, c.placement);
         else if (c.t === 'Markdown') this.paintMarkdown(area, c.rows, pane.active ? top : c.top, c.cols);
         else this.paintAudio(area, c.file, c.info);
@@ -2500,10 +2688,14 @@ class Painter {
         const searchRe = ed.highlightRegex();
         const lang = highlight.detect(v.filePath);
         const gutterCols = v.gutterCols;
+        const wrap = v.wrap;
         const cw = layout.charW;
         const lh = layout.lineH;
-        const left = v.scrollLeft;
-        const colX = (dcol: number): number => v.textLeft + Math.max(dcol - left, 0) * cw;
+        // The display columns of the row being painted: all from the left, or
+        // with wrapping one row's share of the line.
+        let left = v.scrollLeft;
+        let right = Infinity;
+        const colX = (dcol: number): number => v.textLeft + (Math.min(Math.max(dcol, left), right) - left) * cw;
         const ts = ed.options.tabstop;
         const displayCol = (line: number, col: number): number => displayColIn(buf, ts, line, col);
         const flash = v.flash;
@@ -2529,9 +2721,22 @@ class Painter {
 
         // While the text glides, the top line is partly above the area, and
         // one more line shows at the bottom.
-        const first = Math.floor(v.scrollTop);
+        const area = v.area;
+        let first = Math.floor(v.scrollTop);
         const offset = (v.scrollTop - first) * lh;
         const rows = offset > 0 ? v.rows + 1 : v.rows;
+        const rowsOf = (l: number): number => lineRows(buf.line(l), ts, v.cols, l === cursor.line ? cursor.col : undefined);
+        // With wrapping, the text glides by whole rows from where it was: the
+        // lines above the top fill in the gap as it comes up.
+        const shift = wrap ? v.rowShift ?? 0 : 0;
+        let startY = area.top - offset;
+        if (shift > 0) {
+            startY = area.top + shift * lh;
+            while (startY > area.top && first > 0) startY -= rowsOf(--first) * lh;
+        } else if (shift < 0) {
+            startY = area.top + shift * lh;
+        }
+        const endY = wrap ? area.top + v.rows * lh + (shift !== 0 ? lh : 0) : area.top + rows * lh - offset;
 
         // Diagnostics by line, most severe first.
         const lineDiagnostics = new Map<number, BufferDiagnostic[]>();
@@ -2544,62 +2749,25 @@ class Painter {
         }
         for (const list of lineDiagnostics.values()) list.sort((a, b) => a.severity - b.severity);
         const signCols = v.signCols;
-        const area = v.area;
         const numbersLeft = area.left + signCols * cw;
 
         this.clip(area);
-        for (let row = 0; row < rows; row++) {
-            const line = first + row;
-            const y = area.top + row * lh - offset;
-            if (line > buf.lastLine()) {
+        const last = buf.lastLine();
+        let line = first;
+        for (let y = startY; y < endY; line++) {
+            if (line > last) {
                 this.text(area.left + TEXT_PADDING, y, '~', theme.TILDE);
+                y += lh;
                 continue;
             }
-            if (line === cursor.line && !selection) {
-                this.rect(rect(area.left, y, area.right, y + lh), theme.CURSOR_LINE);
-            }
+            const chars = buf.line(line);
+            const parts = wrap ? rowsOf(line) : 1;
             const change = v.gitChanges?.[line];
-            if (change) this.gitMark(area.left, y, change);
 
-            // Line number gutter: relative numbers, with the absolute number
-            // on the cursor line (Vim's `number` + `relativenumber`).
             // A sign for the line's most severe diagnostic, which also colors
             // its number.
             const diags = lineDiagnostics.get(line) ?? [];
             const starting = diags.find((d) => d.start.line === line);
-            if (starting && signCols > 0) {
-                const sign = (this.st.icons ? SIGNS : PLAIN_SIGNS)[starting.severity] ?? '';
-                this.text(area.left + TEXT_PADDING / 2, y, sign, severityColor(starting.severity));
-            }
-            if (gutterCols > signCols) {
-                const current = line === cursor.line;
-                const label = opts.relativenumber && !current ? String(Math.abs(line - cursor.line)) : String(line + 1);
-                let color: string = current ? theme.GUTTER_CURRENT : theme.GUTTER;
-                if (starting) color = severityColor(starting.severity);
-                if (opts.relativenumber && opts.number && current) {
-                    this.text(numbersLeft + 2, y, label, color);
-                } else {
-                    this.textRight(area.left + (gutterCols - 1) * cw, y, label, color);
-                }
-            }
-
-            if (selection) {
-                const end = pos(selection.end.line, selection.end.col + 1);
-                fillRegion(line, y, selection.start, end, selection.linewise, theme.SELECTION);
-            }
-
-            for (const [start, end] of v.references) fillRegion(line, y, start, end, false, theme.REFERENCE);
-
-            const chars = buf.line(line);
-            if (searchRe) {
-                for (const [s, e] of lineMatches(searchRe, chars)) {
-                    const ds = displayCol(line, s);
-                    const de = displayCol(line, e);
-                    if (de > ds && de >= left) this.rect(rect(colX(Math.max(ds, left)), y, colX(de), y + lh), theme.SEARCH, 2);
-                }
-            }
-
-            if (flash && flashColor) fillRegion(line, y, flash.range.start, flash.range.end, flash.range.linewise, flashColor);
 
             let spans: highlight.Span[] = [];
             if (lang) {
@@ -2608,8 +2776,56 @@ class Painter {
             }
             const semantic = v.semantic(line, chars);
             if (semantic) spans = highlight.overlaySpans(spans, semantic, chars.length);
-            this.lineText(v, chars, spans, y);
-            this.lineDiagnostics(v, line, y, diags);
+            const matches = searchRe ? lineMatches(searchRe, chars) : [];
+
+            for (let part = 0; part < parts; part++, y += lh) {
+                if (wrap) {
+                    left = part * v.cols;
+                    right = left + v.cols;
+                }
+                if (line === cursor.line && !selection) {
+                    this.rect(rect(area.left, y, area.right, y + lh), theme.CURSOR_LINE);
+                }
+                if (change) this.gitMark(area.left, y, change);
+                if (part === 0) {
+                    if (starting && signCols > 0) {
+                        const sign = (this.st.icons ? SIGNS : PLAIN_SIGNS)[starting.severity] ?? '';
+                        this.text(area.left + TEXT_PADDING / 2, y, sign, severityColor(starting.severity));
+                    }
+                    // Line number gutter: relative numbers, with the absolute
+                    // number on the cursor line (Vim's `number` +
+                    // `relativenumber`).
+                    if (gutterCols > signCols) {
+                        const current = line === cursor.line;
+                        const label = opts.relativenumber && !current ? String(Math.abs(line - cursor.line)) : String(line + 1);
+                        let color: string = current ? theme.GUTTER_CURRENT : theme.GUTTER;
+                        if (starting) color = severityColor(starting.severity);
+                        if (opts.relativenumber && opts.number && current) {
+                            this.text(numbersLeft + 2, y, label, color);
+                        } else {
+                            this.textRight(area.left + (gutterCols - 1) * cw, y, label, color);
+                        }
+                    }
+                }
+
+                if (selection) {
+                    const end = pos(selection.end.line, selection.end.col + 1);
+                    fillRegion(line, y, selection.start, end, selection.linewise, theme.SELECTION);
+                }
+
+                for (const [start, end] of v.references) fillRegion(line, y, start, end, false, theme.REFERENCE);
+
+                for (const [s, e] of matches) {
+                    const ds = displayCol(line, s);
+                    const de = displayCol(line, e);
+                    if (de > ds && de >= left) this.rect(rect(colX(Math.max(ds, left)), y, colX(de), y + lh), theme.SEARCH, 2);
+                }
+
+                if (flash && flashColor) fillRegion(line, y, flash.range.start, flash.range.end, flash.range.linewise, flashColor);
+
+                this.lineText(v, chars, spans, y, left, wrap ? v.cols : v.cols + 1);
+                this.lineDiagnostics(v, line, y, diags, left, right, part === parts - 1);
+            }
         }
         this.cmds.push(['unclip']);
     }
@@ -2634,11 +2850,10 @@ class Painter {
 
     /** Underline a line's diagnostics and show the most severe message after
      * its end (Neovim's `underline` and `virtual_text`). */
-    private lineDiagnostics(v: TextView, line: number, y: number, diags: readonly BufferDiagnostic[]): void {
+    private lineDiagnostics(v: TextView, line: number, y: number, diags: readonly BufferDiagnostic[], left: number, right: number, lastPart: boolean): void {
         if (diags.length === 0) return;
         const { ed, layout } = this;
         const cw = layout.charW;
-        const left = v.scrollLeft;
         const displayCol = (l: number, col: number): number => displayColIn(v.buffer, ed.options.tabstop, l, col);
         const lineEnd = displayCol(line, v.buffer.lineLen(line));
         const x = (dcol: number): number => v.textLeft + (dcol - left) * cw;
@@ -2648,11 +2863,12 @@ class Painter {
             // An empty range marks the character there.
             if (to <= from) to = from + 1;
             from = Math.max(from, left);
+            to = Math.min(to, right);
             if (to > from) this.rect(rect(x(from), y + layout.lineH - 2, x(to), y + layout.lineH - 1), severityColor(d.severity));
         }
         const first = diags.find((d) => d.start.line === line);
         const at = lineEnd + 4;
-        if (first && at >= left) this.text(x(at), y, `■ ${first.message.split('\n')[0]}`, severityColor(first.severity));
+        if (first && lastPart && at >= left && at < right) this.text(x(at), y, `■ ${first.message.split('\n')[0]}`, severityColor(first.severity));
     }
 
     /** The completion menu, a float and a picker, over everything else. */
@@ -2660,10 +2876,16 @@ class Painter {
         const { ed, layout } = this;
         const overlay = new Overlay(this.cmds, layout.charW, layout.lineH);
         const area = layout.textArea;
-        const screen = (p: Pos): [number, number] => [
-            layout.textLeft + (ed.displayCol(p.line, p.col) - ed.scrollLeft) * layout.charW,
-            area.top + (p.line - this.st.shown.top) * layout.lineH,
-        ];
+        const screen = (p: Pos): [number, number] => {
+            if (this.st.shown.wrapped) {
+                const w = ed.wrapPos(p);
+                return [layout.textLeft + w.col * layout.charW, area.top + w.row * layout.lineH];
+            }
+            return [
+                layout.textLeft + (ed.displayCol(p.line, p.col) - ed.scrollLeft) * layout.charW,
+                area.top + (p.line - this.st.shown.top) * layout.lineH,
+            ];
+        };
         const menu = this.st.completion;
         const anchor = menu?.anchor();
         const menuBox = menu && anchor ? overlay.completion(menu, area, ...screen(anchor), this.st.icons) : undefined;
@@ -2673,14 +2895,16 @@ class Painter {
         if (sig) overlay.float(sig, area, ...screen(sig.anchor), menuBox);
         const picker = this.st.picker;
         if (picker) overlay.picker(picker, rect(0, 0, this.st.metrics.width, layout.status.top), this.st.previewLines);
+        const { width, height } = this.st.metrics;
+        this.st.menu?.paint(this.cmds, layout.charW, layout.lineH, width, height);
     }
 
-    /** Draw the visible part of a line in its colors, expanding tabs. */
-    private lineText(v: TextView, chars: readonly string[], spans: highlight.Span[], y: number): void {
+    /** Draw `cols` display columns of a line from `left` in its colors,
+     * expanding tabs. */
+    private lineText(v: TextView, chars: readonly string[], spans: highlight.Span[], y: number, left: number, cols: number): void {
         const { ed, layout } = this;
         const ts = Math.max(ed.options.tabstop, 1);
-        const left = v.scrollLeft;
-        const right = left + v.cols + 1;
+        const right = left + cols;
         let run = '';
         let runColor: string = theme.FG;
         let runStyle: TextStyle | undefined;
@@ -2722,13 +2946,14 @@ class Painter {
         // Where the caret is shown, which glides behind the cursor with
         // `editor.smoothCaret`.
         const shown = this.st.shown;
-        const y = area.top + (shown.line - shown.top) * layout.lineH;
+        const wrapped = shown.wrapped;
+        const y = area.top + (wrapped ? wrapped.row : shown.line - shown.top) * layout.lineH;
         if (isCmdLine(mode) || y + layout.lineH <= area.top || y >= area.bottom) return;
         const dcol = ed.displayCol(cursor.line, cursor.col);
         if (dcol < ed.scrollLeft) return;
         const c = ed.buffer.charAt(cursor) ?? ' ';
         const width = c === '\t' ? ed.displayCol(cursor.line, cursor.col + 1) - dcol : 1;
-        const x = layout.textLeft + (shown.col - ed.scrollLeft) * layout.charW;
+        const x = layout.textLeft + (wrapped ? wrapped.col : shown.col - ed.scrollLeft) * layout.charW;
         const cell = rect(x, y, x + layout.charW * width, y + layout.lineH);
         this.clip(area);
         this.paintCaret(cell, c);

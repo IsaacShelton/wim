@@ -63,7 +63,7 @@ default, and a mistake in it is reported at startup and ignored.
         "cacheMinutes": 60
     },
     "terminal": { "shell": "zsh" },
-    "editor": { "smoothCaret": false, "smoothScroll": false }
+    "editor": { "smoothCaret": false, "smoothScroll": false, "wrap": false }
 }
 ```
 
@@ -76,6 +76,7 @@ default, and a mistake in it is reported at startup and ignored.
 | `claude.cacheMinutes` | How long the prompt cache lasts after a request, for the cache indicator (default 60) |
 | `terminal.shell` | The shell the terminal runs (default `zsh`, or `powershell.exe` on Windows) |
 | `editor.smoothCaret` | Whether the caret glides quickly to where it moves instead of jumping (default `false`) |
+| `editor.wrap` | Whether long lines wrap onto several rows instead of scrolling sideways (default `false`) |
 | `editor.smoothScroll` | Whether the text glides when it scrolls (`<C-d>`, `<C-u>`, `<C-f>`, `<C-b>`, `zz`, the mouse wheel, ...) instead of jumping, in rendered Markdown too (default `false`) |
 
 ## Layout
@@ -400,6 +401,7 @@ Normal-mode mappings don't apply in the middle of a command, so `f,` still finds
 | Ctrl+e, `,cc` (or Cmd+L) | Normal | Show or hide the agents panel (see [Agents](#agents)) |
 | `` Ctrl+` `` (or `,tt`, or Cmd+J) | Any | Show or hide the terminal (see [Terminal](#terminal)) |
 | `,th` | Normal | Switch between Wim's colors (One Dark) and Nord |
+| `,tw` | Normal | Turn line wrapping on or off (`:set wrap!`) |
 | Ctrl+y | Normal | Forward in the jump list (`<C-i>`, which is Tab in a terminal) |
 | `,w` `,b` `,e` `,ge` | Normal, Visual, after an operator | Like `w`, `b`, `e`, `ge` for subwords (nvim-spider): camelCase humps, snake_case parts and digit runs; single punctuation is skipped |
 | `,;` `,o` `,'` | Normal | `:w` |
@@ -456,7 +458,7 @@ it was closed.
 
 **Options (`:set`):** `number`, `relativenumber` (both on by default: relative numbers, with
 the absolute number on the cursor line), `ignorecase`, `smartcase`, `hlsearch`,
-`incsearch`, `expandtab`, `autoindent`, `autopairs`, `tabstop`, `shiftwidth`, `scrolloff`,
+`incsearch`, `expandtab`, `autoindent`, `autopairs`, `wrap`, `tabstop`, `shiftwidth`, `scrolloff`,
 `clipboard=unnamed`. Each supports the `no`, `!` and `?` forms.
 
 **Desktop additions:** click to place the cursor, drag to select, Cmd+C / Cmd+X copy or cut the
@@ -464,6 +466,17 @@ selection, Cmd+V pastes, Cmd+S saves, Cmd+L shows the agents panel, Cmd+J the te
 and Linux these are Ctrl+Shift+C, Ctrl+Shift+V and so on, since Ctrl alone belongs to Vim. Closing
 the macOS window with unsaved changes shows a warning first; closing again discards the changes. In
 an Edge or Chrome window, the browser asks before closing with unsaved changes instead.
+
+**Right-click menu:** right-clicking opens a menu for what is under the pointer: Cut, Copy, Paste,
+Select All and Wrap Lines in the editor (Cut and Copy work on a Visual selection, and Paste in Normal
+mode puts the clipboard as `"+p` does), and Copy and Paste in the agents panel and the terminal. Click
+an item, or move with Up/Down and press Enter; Esc or a click elsewhere closes it. Dragging in the
+terminal selects its text, which Copy (or Cmd+C) puts on the clipboard.
+
+**Line wrapping:** `:set wrap` (also `:set wrap!`, `,tw`, or Wrap Lines in the right-click menu) shows
+long lines over several rows, cut at the window's width, instead of scrolling sideways. `j` and `k`
+still move by whole lines. Set `editor.wrap` in the settings file to start with it on. Smooth
+scrolling and the gliding caret work by screen rows while lines wrap.
 
 ## Terminal
 
@@ -487,5 +500,5 @@ untested.
 
 ## Not supported yet
 
-Macros (`q`); Visual Block mode; line wrapping; undo of only part of an Insert session;
+Macros (`q`); Visual Block mode; `gj`/`gk` through wrapped lines; undo of only part of an Insert session;
 resizing split windows

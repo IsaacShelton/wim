@@ -1411,7 +1411,7 @@ test('with smooth scrolling and caret, the text and the caret glide to their pla
         await settle();
         assert.equal(plain.frames.length, count, 'no frames after');
 
-        const config = { ...defaultConfig(), editor: { smoothCaret: true, smoothScroll: true } };
+        const config = { ...defaultConfig(), editor: { smoothCaret: true, smoothScroll: true, wrap: false } };
         const h = harness(file, [], { config });
         const ed = h.app.editor;
         h.type('<C-f>');
@@ -1443,6 +1443,169 @@ test('with smooth scrolling and caret, the text and the caret glide to their pla
         await settle();
         assert.ok(lineYs(mdLast()).every((y) => y % 20 === 0), 'and has arrived');
         assert.doesNotMatch(md.text(), /^line 0$/m, 'a page down');
+    } finally {
+        process.chdir(cwd);
+        fs.rmSync(dir, { recursive: true });
+    }
+});
+
+// ----- Line wrapping and the right-click menu -----------------------------------------
+
+function drawn(h: Harness): string[] {
+    return h.frames[h.frames.length - 1].filter((c) => c[0] === 'text').map((c) => String(c[3]));
+}
+
+test('wrapped lines show over several rows and the cursor follows', () => {
+    const h = harness();
+    h.type(`i${'a'.repeat(100)}${'b'.repeat(100)}<Esc>`);
+    h.type(':set wrap<CR>');
+    assert.equal(h.app.editor.options.wrap, true);
+    assert.equal(h.app.editor.scrollLeft, 0);
+    const text = drawn(h);
+    assert.ok(text.some((t) => /^a+$/.test(t)), 'the line starts on its first row');
+    assert.ok(text.some((t) => /^a*b+$/.test(t)) || text.some((t) => /^b+$/.test(t)), 'and goes on below');
+    const body = text.filter((t) => /^[ab]+$/.test(t)).join('');
+    // The block cursor draws the character under it again, last.
+    assert.equal(body.slice(0, 200), 'a'.repeat(100) + 'b'.repeat(100), 'every character is drawn once');
+    assert.equal(body.length, 201);
+    h.type(':set nowrap<CR>');
+    assert.equal(h.app.editor.options.wrap, false);
+});
+
+test('clicking a wrapped row puts the cursor in that part of the line', () => {
+    const h = harness();
+    h.type(':set wrap<CR>');
+    h.type(`i${'x'.repeat(300)}<Esc>gg`);
+    const ed = h.app.editor;
+    const rows = ed.lineRows(0);
+    assert.ok(rows > 2, 'the line wraps onto several rows');
+    const cols = ed.viewCols;
+    // The second row, third text column.
+    const first = h.frames[h.frames.length - 1].find((c) => c[0] === 'text' && /^x+$/.test(String(c[3])))!;
+    const textLeft = Number(first[1]);
+    h.send({ t: 'mouse', kind: 'down', x: textLeft + 25, y: 20 + 5 });
+    h.send({ t: 'mouse', kind: 'up', x: textLeft + 25, y: 25 });
+    assert.equal(ed.cursor.col, cols + 2);
+});
+
+test('the view scrolls to keep the cursor in wrapped text', () => {
+    const h = harness();
+    h.type(':set wrap<CR>');
+    const ed = h.app.editor;
+    ed.buffer.insertText(ed.cursor, ('y'.repeat(250) + '\n').repeat(40));
+    h.type('gg');
+    h.type('G');
+    assert.ok(ed.scrollTop > 0);
+    const rows = ed.wrapPos(ed.cursor).row;
+    assert.ok(rows >= 0 && rows < ed.viewRows, 'the cursor is on the screen');
+    h.type('gg');
+    assert.equal(ed.scrollTop, 0);
+});
+
+test('the right-click menu pastes, copies the selection and toggles wrapping', () => {
+    const clipboard = new MemoryClipboard();
+    const h = harness(undefined, [], { clipboard });
+    clipboard.text = 'pasted';
+    h.send({ t: 'context', x: 300, y: 100 });
+    assert.ok(drawn(h).includes('Paste'), 'the menu is drawn');
+    assert.ok(drawn(h).includes('Wrap Lines'));
+    const click = (label: string): void => {
+        const at = h.frames[h.frames.length - 1].find((c) => c[0] === 'text' && c[3] === label)!;
+        h.send({ t: 'mouse', kind: 'down', x: Number(at[1]) + 5, y: Number(at[2]) + 5 });
+    };
+    click('Paste');
+    assert.equal(h.app.editor.buffer.text(), 'pasted');
+    assert.ok(!drawn(h).includes('Paste'), 'the menu closed');
+
+    h.type('viw');
+    h.send({ t: 'context', x: 300, y: 100 });
+    click('Copy');
+    assert.equal(clipboard.text, 'pasted');
+
+    h.send({ t: 'context', x: 300, y: 100 });
+    click('Wrap Lines');
+    assert.equal(h.app.editor.options.wrap, true);
+
+    // A click away or Esc only closes it.
+    h.send({ t: 'context', x: 300, y: 100 });
+    h.type('<Esc>');
+    assert.ok(!drawn(h).includes('Wrap Lines'));
+    assert.equal(h.app.editor.options.wrap, true);
+});
+
+test('a menu asks the window for the pointer while it is open', () => {
+    const tracking: boolean[] = [];
+    const h = harness(undefined, [], { onFrame: (_t, _d, cmds, _a, t) => { tracking.push(t); void cmds; } });
+    h.send({ t: 'context', x: 300, y: 100 });
+    assert.equal(tracking[tracking.length - 1], true);
+    h.type('<Esc>');
+    assert.equal(tracking[tracking.length - 1], false);
+});
+
+test('Wrap Lines is also on <leader>tw', () => {
+    const h = harness();
+    h.type(',tw');
+    assert.equal(h.app.editor.options.wrap, true);
+    h.type(',tw');
+    assert.equal(h.app.editor.options.wrap, false);
+});
+
+test('a line exactly as wide as the window takes one row, two while typing at its end', () => {
+    const h = harness();
+    h.type(':set wrap<CR>');
+    const ed = h.app.editor;
+    h.type(`i${'q'.repeat(ed.viewCols)}<Esc>`);
+    assert.equal(ed.mode, 'Normal');
+    assert.equal(ed.lineRows(0), 1, 'no empty row below it');
+    h.type('A');
+    assert.equal(ed.lineRows(0), 2, 'the cursor after the end needs a cell');
+    h.type('<Esc>');
+    assert.equal(ed.lineRows(0), 1);
+    h.type('ax<Esc>');
+    assert.equal(ed.lineRows(0), 2, 'one more character wraps');
+});
+
+test('with wrapping, smooth scrolling and the gliding caret still glide by rows', async () => {
+    const dir = tempDir('smoothwrap');
+    const file = path.join(dir, 'long.txt');
+    fs.writeFileSync(file, Array.from({ length: 200 }, (_, i) => `line ${i} ${'z'.repeat(150)}`).join('\n'));
+    const cwd = process.cwd();
+    try {
+        const rows = (cmds: DrawCmd[]): number[] =>
+            cmds.filter((c): c is Extract<DrawCmd, ['text', ...unknown[]]> => c[0] === 'text' && /^(line \d+ )?z+$/.test(c[3])).map((c) => c[2]);
+        const caret = (cmds: DrawCmd[]): number[] => {
+            const r = cmds.find((c) => c[0] === 'rect' && c[5] === theme.CURSOR);
+            return r ? [r[1] as number, r[2] as number] : [];
+        };
+        const settle = (): Promise<void> => new Promise((resolve) => setTimeout(resolve, 400));
+        const config = { ...defaultConfig(), editor: { smoothCaret: true, smoothScroll: true, wrap: true } };
+        const h = harness(file, [], { config });
+        const ed = h.app.editor;
+        const last = (): DrawCmd[] => h.frames[h.frames.length - 1];
+        assert.ok(ed.options.wrap);
+        h.type('<C-f>');
+        assert.ok(ed.scrollTop > 0);
+        const during = rows(last());
+        assert.ok(during.some((y) => y % 20 !== 0), 'the text is on its way');
+        assert.ok(during.some((y) => y >= 0 && y < 20), 'with no gap above it');
+        const target = ed.wrapPos(ed.cursor).row * 20;
+        assert.notEqual(caret(last())[1], target, 'the caret too');
+        await settle();
+        assert.ok(rows(last()).every((y) => y % 20 === 0), 'the text has arrived');
+        assert.equal(Math.min(...rows(last())), 0, 'the top line is at the top');
+        assert.match(h.text(), new RegExp(`^line ${ed.scrollTop} `, 'm'));
+        assert.equal(caret(last())[1], ed.wrapPos(ed.cursor).row * 20);
+        // Down a line moves the caret down the rows it takes.
+        const y = caret(last())[1];
+        h.type('j');
+        await settle();
+        assert.ok(caret(last())[1] > y);
+        assert.equal(caret(last())[1], ed.wrapPos(ed.cursor).row * 20);
+        // And back: scrolling up fills from above.
+        h.type('<C-b>');
+        assert.ok(rows(last()).some((y) => y >= 0 && y < 20), 'no gap above going up');
+        await settle();
+        assert.ok(rows(last()).every((y) => y % 20 === 0));
     } finally {
         process.chdir(cwd);
         fs.rmSync(dir, { recursive: true });

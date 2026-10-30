@@ -119,3 +119,46 @@ test('keys are sent as xterm sends them', () => {
     assert.equal(paletteColor(196), '#ff0000');
     assert.equal(paletteColor(232), '#080808');
 });
+
+test('dragging selects terminal text, and the right-click menu copies and pastes it', { skip: !posix }, async () => {
+    const clipboard = new MemoryClipboard();
+    const frames: DrawCmd[][] = [];
+    const config = defaultConfig();
+    config.terminal.shell = 'sh';
+    const app = new WimApp({ icons: false, clipboard, servers: [], config, onFrame: (_t, _d, c) => frames.push(c), onQuit: () => {} });
+    const resize = (): void => app.handleMessage({ t: 'resize', width: 1400, height: 800, charW: 10, lineH: 20 });
+    resize();
+    const texts = (): TextCmd[] => frames[frames.length - 1].filter((c): c is TextCmd => c[0] === 'text');
+    const find = (re: RegExp): TextCmd | undefined => texts().find((c) => re.test(String(c[3])));
+    app.handleMessage({ t: 'command', name: 'terminal' });
+    try {
+    for (const k of parseKeys('echo selectme<CR>')) app.handleMessage({ t: 'key', key: k.key, ctrl: k.ctrl, alt: k.alt });
+    let out: TextCmd | undefined;
+    for (let i = 0; i < 200 && !(out = texts().find((c) => c[3] === 'selectme')); i++) {
+        await new Promise((r) => setTimeout(r, 25));
+        resize();
+    }
+    assert.ok(out, 'the output is on the screen');
+    const [x, y] = [Number(out[1]), Number(out[2])];
+    app.handleMessage({ t: 'mouse', kind: 'down', x: x + 1, y: y + 5 });
+    app.handleMessage({ t: 'mouse', kind: 'move', x: x + 10 * 8 - 1, y: y + 5 });
+    app.handleMessage({ t: 'mouse', kind: 'up', x: x + 10 * 8 - 1, y: y + 5 });
+
+    app.handleMessage({ t: 'context', x: x + 20, y: y + 5 });
+    const copy = find(/^Copy$/)!;
+    assert.ok(copy && find(/^Paste$/), 'the menu has Copy and Paste');
+    app.handleMessage({ t: 'mouse', kind: 'down', x: Number(copy[1]) + 5, y: Number(copy[2]) + 5 });
+    assert.equal(clipboard.text, 'selectme');
+
+    app.handleMessage({ t: 'context', x: x + 20, y: y + 5 });
+    const paste = find(/^Paste$/)!;
+    app.handleMessage({ t: 'mouse', kind: 'down', x: Number(paste[1]) + 5, y: Number(paste[2]) + 5 });
+    for (let i = 0; i < 200 && !texts().some((c) => /\$ selectme|> selectme|selectme$/.test(String(c[3])) && c !== out); i++) {
+        await new Promise((r) => setTimeout(r, 25));
+        resize();
+    }
+    assert.ok(texts().filter((c) => /selectme/.test(String(c[3]))).length >= 2, 'the pasted text is at the prompt');
+    } finally {
+        app.dispose();
+    }
+});

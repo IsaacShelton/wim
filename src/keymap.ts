@@ -28,6 +28,8 @@ export type Command =
     | 'ToggleTheme'
     /** A Markdown file between editing it and reading it rendered. */
     | 'ToggleMarkdownView'
+    /** Long lines wrapping onto several rows, or scrolling sideways. */
+    | 'ToggleWrap'
     /** `gf`: follow the Markdown link under the cursor, or else open the
      * file whose name is under it, as in Vim. */
     | 'FollowLink'
@@ -156,6 +158,7 @@ export class Keymap {
             [N, '<leader>tt', command('ToggleTerminal')],
             [N, '<leader>th', command('ToggleTheme')],
             [N, '<leader>m', command('ToggleMarkdownView')],
+            [N, '<leader>tw', command('ToggleWrap')],
             // Following links in Markdown, as obsidian.nvim maps them.
             [N, 'gf', command('FollowLink')],
             [N, '<CR>', command('EnterOrFollowLink')],

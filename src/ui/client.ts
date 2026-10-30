@@ -572,7 +572,7 @@ canvas.addEventListener('mousedown', (e) => {
 });
 
 window.addEventListener('mousemove', (e) => {
-    if (pressed) send({ t: 'mouse', kind: 'move', x: e.clientX, y: e.clientY });
+    if (pressed || frame?.tracking) send({ t: 'mouse', kind: 'move', x: e.clientX, y: e.clientY });
 });
 
 window.addEventListener('mouseup', (e) => {
@@ -592,7 +592,10 @@ canvas.addEventListener(
     { passive: false },
 );
 
-canvas.addEventListener('contextmenu', (e) => e.preventDefault());
+canvas.addEventListener('contextmenu', (e) => {
+    e.preventDefault();
+    send({ t: 'context', x: e.clientX, y: e.clientY });
+});
 
 // ----- Dropping files ------------------------------------------------------------------------
 
