@@ -229,12 +229,12 @@ export class WimApp {
     /** Hover documentation or diagnostics next to the cursor. */
     private float: Float | undefined;
     private refreshQueued = false;
-    /** The active window's view and caret on their way to where they are
-     * (with smooth scrolling or caret), for that window and buffer. */
     /** Watches the tree's root for files coming and going. */
     private treeWatcher: fs.FSWatcher | undefined;
     private treeWatchTimer: NodeJS.Timeout | undefined;
     private treeWatchRoot: string | undefined;
+    /** The active window's view and caret on their way to where they are
+     * (with smooth scrolling or caret), for that window and buffer. */
     private readonly topGlide = new Glide(SCROLL_GLIDE);
     private readonly lineGlide = new Glide(CARET_GLIDE);
     private readonly colGlide = new Glide(CARET_GLIDE);
