@@ -18,19 +18,54 @@ export class TextInput {
     private historyAt: number | undefined;
     /** What was being typed before going back through the history. */
     private draft = '';
+    /** The other end of the selection (Cmd+A), from the cursor. */
+    private anchor: number | undefined;
 
     get text(): string {
         return this.chars.join('');
     }
 
+    /** The selected text, if any. */
+    get selected(): string | undefined {
+        const range = this.selectedRange();
+        return range && this.chars.slice(range[0], range[1]).join('');
+    }
+
     set(text: string): void {
         this.chars = Array.from(text);
         this.cursor = this.chars.length;
+        this.anchor = undefined;
     }
 
     clear(): void {
         this.set('');
         this.historyAt = undefined;
+    }
+
+    /** Select all the text (Cmd+A). */
+    selectAll(): void {
+        this.anchor = 0;
+        this.cursor = this.chars.length;
+    }
+
+    /** Drop the selection, keeping the text. */
+    deselect(): void {
+        this.anchor = undefined;
+    }
+
+    /** The selected characters, from the first to just past the last. */
+    selectedRange(): [number, number] | undefined {
+        if (this.anchor === undefined || this.anchor === this.cursor) return undefined;
+        return [Math.min(this.anchor, this.cursor), Math.max(this.anchor, this.cursor)];
+    }
+
+    /** Remove the selected text, if any: typing and deleting replace it. */
+    private takeSelection(): void {
+        const range = this.selectedRange();
+        this.anchor = undefined;
+        if (!range) return;
+        this.chars.splice(range[0], range[1] - range[0]);
+        this.cursor = range[0];
     }
 
     /** Remember a sent prompt for Up. */
@@ -40,6 +75,7 @@ export class TextInput {
     }
 
     insert(s: string): void {
+        this.takeSelection();
         const add = Array.from(s.replace(/\r\n?/g, '\n'));
         this.chars.splice(this.cursor, 0, ...add);
         this.cursor += add.length;
@@ -136,6 +172,16 @@ export class TextInput {
      * new line instead. */
     key(key: KeyInput): 'Send' | boolean {
         const c = key.ctrl ? key.key : undefined;
+        // Typing and deleting replace the selection; any other key ends it.
+        const edits =
+            key.key === 'Backspace' ||
+            key.key === 'Delete' ||
+            (key.key === 'Enter' && key.alt) ||
+            c === 'w' ||
+            c === 'u' ||
+            (!key.ctrl && !key.alt && isCharKey(key));
+        if (edits) this.takeSelection();
+        else this.anchor = undefined;
         switch (key.key) {
             case 'Enter':
                 if (key.alt) {

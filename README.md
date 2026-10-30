@@ -147,7 +147,8 @@ word in Normal mode, and Option+Delete deletes a word on the command line.
 
 **Scrolling:** `<C-d> <C-u> <C-f> <C-b> <C-e> <C-y>`, `zz zt zb`, mouse wheel. Unlike Vim,
 `<C-d>` and `<C-u>` move only the cursor (half a page); the view scrolls only as far as the
-cursor needs (`scrolloff`).
+cursor needs (`scrolloff`). The mouse wheel scrolls the view and leaves the caret where it is,
+out of view if the view has moved past it; the view follows the cursor again once it moves.
 
 **Search:** incremental, highlights matches, wraps around. Vim regex syntax: `\<word\>`,
 `\(group\)`, `\|`, `\+`, `\{n,m}`, `\v`, `\c`.

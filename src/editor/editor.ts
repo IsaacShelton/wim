@@ -10,7 +10,7 @@ import { AudioInfo } from '../audio';
 import { ImageInfo } from '../image';
 import { displayName, expandTilde } from '../paths';
 import * as autopairs from './autopairs';
-import { Buffer, Line, Pos, isWhitespace, order, pos } from './buffer';
+import { Buffer, Line, Pos, isWhitespace, order, pos, posEq } from './buffer';
 import * as buffers from './buffers';
 import { BufferSlot } from './buffers';
 import { Action, Command, FindKind, parse } from './command';
@@ -120,6 +120,9 @@ export class Editor {
 
     scrollTop = 0;
     scrollLeft = 0;
+    /** Where the cursor was when the mouse wheel last scrolled the view away
+     * from it. The view stays there until the cursor moves. */
+    private wheeledFrom: { buffer: Buffer; cursor: Pos } | undefined;
     viewRows = 40;
     viewCols = 120;
     /** The column vertical motions try to keep (`WANT_EOL` after `$`). */
@@ -429,6 +432,8 @@ export class Editor {
     }
 
     scrollToCursor(): void {
+        if (this.wheeledFrom?.buffer === this.buffer && posEq(this.wheeledFrom.cursor, this.cursor)) return;
+        this.wheeledFrom = undefined;
         const rows = this.viewRows;
         const so = this.scrolloff();
         const line = this.cursor.line;
@@ -455,8 +460,28 @@ export class Editor {
         if (dcol >= this.scrollLeft + this.viewCols) this.scrollLeft = dcol + 1 - this.viewCols;
     }
 
-    /** Scroll the view (mouse wheel, `<C-e>`, `<C-y>`) and keep the cursor
-     * inside it. */
+    /** Scroll the view with the mouse wheel, leaving the cursor where it is:
+     * the caret stays on its line, out of view if the view has moved past it. */
+    wheelScroll(delta: number): void {
+        const last = this.buffer.lastLine();
+        this.scrollTop = Math.min(Math.max(this.scrollTop + delta, 0), last);
+        this.wheeledFrom = { buffer: this.buffer, cursor: this.cursor };
+    }
+
+    /** Scroll the view with the mouse wheel sideways, leaving the cursor where
+     * it is. Lines that wrap have nothing to scroll to. */
+    wheelScrollSideways(delta: number): void {
+        if (this.options.wrap) return;
+        let widest = 0;
+        const first = Math.floor(this.scrollTop);
+        const end = Math.min(first + this.viewRows, this.buffer.lastLine() + 1);
+        for (let i = first; i < end; i++) widest = Math.max(widest, this.displayCol(i, this.buffer.lineLen(i)));
+        this.scrollLeft = Math.min(Math.max(this.scrollLeft + delta, 0), Math.max(widest - 1, 0));
+        this.wheeledFrom = { buffer: this.buffer, cursor: this.cursor };
+    }
+
+    /** Scroll the view (`<C-e>`, `<C-y>`, and the paging keys) and keep the
+     * cursor inside it. */
     scrollBy(delta: number): void {
         const last = this.buffer.lastLine();
         this.scrollTop = Math.min(Math.max(this.scrollTop + delta, 0), last);
@@ -497,6 +522,19 @@ export class Editor {
         this.cursor = p;
         this.clampCursor();
         this.updateWantCol();
+    }
+
+    /** Select the whole buffer (Cmd+A). */
+    selectAll(): void {
+        if (isCmdLine(this.mode)) return;
+        this.pending = [];
+        if (isInsert(this.mode)) this.mode = 'Normal';
+        this.visualAnchor = pos(0, 0);
+        this.mode = 'Visual';
+        const last = this.buffer.lastLine();
+        this.cursor = pos(last, Math.max(this.buffer.lineLen(last) - 1, 0));
+        this.updateWantCol();
+        this.scrollToCursor();
     }
 
     dragTo(p: Pos): void {
@@ -544,6 +582,8 @@ export class Editor {
     // ----- Key handling ----------------------------------------------------------
 
     handleKey(key: KeyInput): void {
+        // A key brings the view back to the cursor, even if it doesn't move.
+        this.wheeledFrom = undefined;
         if (this.question && this.answer(key)) {
             this.scrollToCursor();
             return;

@@ -543,6 +543,28 @@ test('global marks and closing buffers', () => {
     fs.rmSync(dir, { recursive: true });
 });
 
+test('the mouse wheel scrolls the view and leaves the cursor where it is', () => {
+    const ed = Editor.fromText(Array.from({ length: 200 }, (_, i) => `line ${i}`).join('\n'), new MemoryClipboard());
+    ed.viewRows = 10;
+    ed.viewCols = 40;
+    ed.handleKeys(parseKeys('5j'));
+    ed.wheelScroll(30);
+    assert.equal(ed.cursor.line, 5);
+    assert.equal(ed.scrollTop, 30);
+    ed.scrollToCursor();
+    assert.equal(ed.scrollTop, 30, 'the view isn\'t pulled back to the cursor');
+    ed.handleKeys(parseKeys('j'));
+    assert.ok(ed.cursor.line >= ed.scrollTop && ed.cursor.line < ed.scrollTop + ed.viewRows, 'a key brings the view back');
+
+    const wide = Editor.fromText('x'.repeat(300), new MemoryClipboard());
+    wide.viewRows = 10;
+    wide.viewCols = 40;
+    wide.wheelScrollSideways(100);
+    wide.scrollToCursor();
+    assert.equal(wide.scrollLeft, 100);
+    assert.equal(wide.cursor.col, 0);
+});
+
 test('clipboard registers use the system clipboard', () => {
     const clipboard = new MemoryClipboard();
     const ed = Editor.fromText('foo bar', clipboard);

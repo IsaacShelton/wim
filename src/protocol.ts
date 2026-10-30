@@ -9,7 +9,7 @@ export type ClientMessage =
     | { t: 'key'; key: string; ctrl: boolean; alt: boolean }
     /** Cmd shortcuts (Ctrl+Shift on Windows and Linux). `agents` (Cmd+L)
      * shows or hides the Claude Code panel, and `terminal` (Cmd+J) the shell. */
-    | { t: 'command'; name: 'save' | 'copy' | 'cut' | 'paste' | 'agents' | 'terminal' }
+    | { t: 'command'; name: 'save' | 'selectAll' | 'copy' | 'cut' | 'paste' | 'agents' | 'terminal' }
     /** The right button went down at a point (the window's context menu
      * event). */
     | { t: 'context'; x: number; y: number }

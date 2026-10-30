@@ -219,6 +219,7 @@ export class WimApp {
     /** Highlighter states, by buffer. */
     private readonly highlightCaches = new Map<number, highlight.Cache>();
     private scrollRemainder = 0;
+    private sideRemainder = 0;
     private closeWarned = false;
     private metrics: Metrics = { width: 1000, height: 720, charW: 9, lineH: 23 };
     /** A press that may become a drag: in the text area, or on the sound
@@ -415,9 +416,14 @@ export class WimApp {
         this.render();
     }
 
-    private command(name: 'save' | 'copy' | 'cut' | 'paste' | 'agents' | 'terminal'): void {
+    private command(name: 'save' | 'selectAll' | 'copy' | 'cut' | 'paste' | 'agents' | 'terminal'): void {
         this.closeWarned = false;
         switch (name) {
+            case 'selectAll':
+                if (this.picker || this.float?.focused) break;
+                if (this.focus === 'Editor') this.editor.selectAll();
+                else if (this.focus === 'Agents') this.agents.selectAll();
+                break;
             case 'agents':
                 this.picker?.dispose();
                 this.picker = undefined;
@@ -478,6 +484,14 @@ export class WimApp {
             return;
         }
         if (msg.zoom) return;
+        if (msg.dx !== 0) {
+            const cols = msg.mode === 1 ? msg.dx : msg.mode === 2 ? msg.dx * this.editor.viewCols : msg.dx / layout.charW;
+            this.sideRemainder += cols;
+            const across = Math.trunc(this.sideRemainder);
+            this.sideRemainder -= across;
+            if (across !== 0 && contains(layout.textArea, msg.x, msg.y)) this.scrollSideways(layout, msg, across);
+        }
+        if (msg.delta === 0) return;
         const lines = msg.mode === 1 ? msg.delta : msg.mode === 2 ? msg.delta * layout.rows : msg.delta / layout.lineH;
         this.scrollRemainder += lines;
         const whole = Math.trunc(this.scrollRemainder);
@@ -497,7 +511,18 @@ export class WimApp {
             const { rows, height } = this.markdownRows(view, layout);
             view.scrollBy(rows, height, whole);
         } else {
-            this.editor.scrollBy(whole);
+            this.editor.wheelScroll(whole);
+        }
+    }
+
+    private scrollSideways(layout: Layout, msg: { x: number; y: number }, cols: number): void {
+        const under = layout.windows.find((w) => contains(w.area, msg.x, msg.y));
+        if (under && under.win !== this.windows.active) {
+            const st = bufferState(this.editor, under.win.bufferId);
+            if (!st || st.image || st.audio || this.markdownViews.has(under.win.bufferId)) return;
+            under.win.scrollLeft = Math.max(under.win.scrollLeft + cols, 0);
+        } else if (!this.markdownView()) {
+            this.editor.wheelScrollSideways(cols);
         }
     }
 

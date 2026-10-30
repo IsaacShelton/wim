@@ -491,6 +491,9 @@ function shortcut(e: KeyboardEvent): boolean {
         case 's':
             send({ t: 'command', name: 'save' });
             break;
+        case 'a':
+            send({ t: 'command', name: 'selectAll' });
+            break;
         case 'c':
             send({ t: 'command', name: 'copy' });
             break;

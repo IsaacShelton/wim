@@ -28,6 +28,7 @@ import { MemoryClipboard } from '../src/clipboard';
 import { defaultConfig } from '../src/config';
 import { parseKeys, plain } from '../src/editor/keys';
 import { ClientMessage, DrawCmd } from '../src/protocol';
+import { theme } from '../src/theme';
 
 /** A Claude Code session that the test drives. */
 class FakeQuery implements AgentQuery {
@@ -694,6 +695,45 @@ test('the prompt edits like a text field, with earlier messages on Up', () => {
     assert.equal(input.text, 'Xhello there\n\nend');
     keys('<Down><Down><Down>');
     assert.equal(input.text, 'draft');
+});
+
+test('Cmd+A selects all of the prompt, and typing or deleting replaces it', () => {
+    const input = new TextInput();
+    input.set('hello\nworld');
+    input.selectAll();
+    assert.equal(input.selected, 'hello\nworld');
+    input.insert('bye');
+    assert.equal(input.text, 'bye');
+    assert.equal(input.selected, undefined);
+    input.selectAll();
+    input.key({ key: 'Backspace', ctrl: false, alt: false });
+    assert.equal(input.text, '');
+    input.set('abc');
+    input.selectAll();
+    input.key(plain('x'));
+    assert.equal(input.text, 'x');
+    input.set('abc');
+    input.selectAll();
+    assert.equal(input.key(plain('Enter')), 'Send', 'Enter sends the whole prompt');
+    assert.equal(input.text, 'abc');
+    input.selectAll();
+    input.key(plain('Left'));
+    assert.equal(input.selected, undefined, 'a movement ends the selection');
+});
+
+test('Cmd+A selects the prompt\'s text, which Cmd+C copies and typing replaces', () => {
+    const h = harness();
+    h.send({ t: 'command', name: 'agents' });
+    h.type('hello world');
+    h.send({ t: 'command', name: 'selectAll' });
+    assert.equal(h.app.editor.buffer.text(), '', 'Cmd+A goes to the prompt, not the buffer');
+    const highlighted = (): boolean => h.last().some((c) => c[0] === 'rect' && c[5] === theme.SELECTION);
+    assert.ok(highlighted(), 'the selected text is highlighted');
+    h.send({ t: 'command', name: 'copy' });
+    assert.equal(h.clipboard.text, 'hello world');
+    h.type('!');
+    assert.ok(h.text().split('\n').includes('!'), 'typing replaces the selection');
+    assert.doesNotMatch(h.text(), /hello world/);
 });
 
 test('/ in Normal mode starts the prompt with a slash typed', () => {

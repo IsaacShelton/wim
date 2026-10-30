@@ -796,9 +796,25 @@ export class AgentPanel {
         return text.trim() === '' ? undefined : text;
     }
 
-    /** Cmd+C: copy the selection. Returns whether there was one. */
+    /** The text being edited: the answer to a prompt, or the message. */
+    private activeInput(): TextInput {
+        return this.session?.prompt && this.promptView.typing ? this.answer : this.input;
+    }
+
+    /** Cmd+A: select all of the prompt's text, when it has focus. */
+    selectAll(): void {
+        const s = this.session;
+        const answering = s?.prompt !== undefined && this.promptView.typing;
+        if (!answering && (this.focus !== 'Input' || s?.prompt)) return;
+        this.selection = undefined;
+        this.activeInput().selectAll();
+    }
+
+    /** Cmd+C: copy the selection, the prompt's if it has one. Returns whether
+     * there was one. */
     copySelection(): boolean {
-        const text = this.selectedText();
+        const typed = this.focus === 'Input' ? this.activeInput().selected : undefined;
+        const text = typed ?? this.selectedText();
         if (text === undefined) return false;
         this.opts.clipboard.setText(text);
         this.message = 'Copied the selection';
@@ -1035,6 +1051,8 @@ export class AgentPanel {
         this.message = undefined;
         this.selection = undefined;
         this.selecting = false;
+        this.input.deselect();
+        this.answer.deselect();
         if (!s || !hit) return NONE;
         switch (hit.t) {
             case 'Session':
@@ -1321,22 +1339,33 @@ export class AgentPanel {
         const { cw, lh } = cv;
         const p = s.prompt;
         const typing = p !== undefined && this.promptView.typing;
-        const input = typing ? this.answer : this.input;
+        const input = this.activeInput();
         const active = focused && (typing || (this.focus === 'Input' && !p));
         const textCols = Math.max(cols - 2, 1);
-        // Wrap the lines, and find the cursor's row and column among them.
+        // Wrap the lines, and find the cursor's row and column among them,
+        // and each row's first character in the text, for the selection.
         const { lines, line: cursorLine, col: cursorCol } = input.lines();
         const rows: string[][] = [];
+        const starts: number[] = [];
         let cursorRow = 0;
         let cursorX = 0;
+        let lineStart = 0;
         lines.forEach((chars, i) => {
             const start = rows.length;
-            for (let at = 0; at === 0 || at < chars.length; at += textCols) rows.push(chars.slice(at, at + textCols));
+            for (let at = 0; at === 0 || at < chars.length; at += textCols) {
+                rows.push(chars.slice(at, at + textCols));
+                starts.push(lineStart + at);
+            }
             if (i === cursorLine) {
                 cursorRow = start + Math.floor(cursorCol / textCols);
                 cursorX = cursorCol % textCols;
-                if (cursorRow >= rows.length) rows.push([]);
+                if (cursorRow >= rows.length) {
+                    rows.push([]);
+                    starts.push(lineStart + chars.length);
+                }
             }
+            // The newline between lines counts too.
+            lineStart += chars.length + 1;
         });
         const shownRows = Math.min(rows.length, INPUT_ROWS);
         const first = Math.min(Math.max(cursorRow - shownRows + 1, 0), rows.length - shownRows);
@@ -1356,6 +1385,14 @@ export class AgentPanel {
             else if (active) placeholder = 'Ask the agent…  (Enter sends, \\ or ⌥ Enter for a new line)';
             else placeholder = 'Press i to type a message';
             cv.text(x + 2 * cw, ty, cut(placeholder, textCols), theme.COMMENT);
+        }
+        const range = input.selectedRange();
+        if (range && active) {
+            for (let i = 0; i < shownRows; i++) {
+                const from = Math.max(range[0] - starts[first + i], 0);
+                const to = Math.min(range[1] - starts[first + i], rows[first + i].length);
+                if (to > from) cv.rect({ left: x + (2 + from) * cw, top: ty + i * lh, right: x + (2 + to) * cw, bottom: ty + (i + 1) * lh }, theme.SELECTION);
+            }
         }
         for (let i = 0; i < shownRows; i++) cv.text(x + 2 * cw, ty + i * lh, rows[first + i].join(''), theme.FG);
         if (active) {
