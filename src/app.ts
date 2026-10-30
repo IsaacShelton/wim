@@ -211,7 +211,6 @@ export class WimApp {
     private scrollRemainder = 0;
     private closeWarned = false;
     private metrics: Metrics = { width: 1000, height: 720, charW: 9, lineH: 23 };
-    /** The press that may become a drag in the text area. */
     /** A press that may become a drag: in the text area, or on the sound
      * player's scrubber or volume bar (`control`). */
     private press: { x: number; y: number; dragging: boolean; control?: 'Scrub' | 'Volume'; agents?: true } | undefined;
