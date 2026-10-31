@@ -92,7 +92,9 @@ function run(argv) {
     win.releasedWhenClosed = false;
 
     const requestClose = () => {
-        view.evaluateJavaScriptCompletionHandler($('window.wimRequestClose && window.wimRequestClose()'), null);
+        // WebKit calls the handler even when we don't care about the result;
+        // a null one makes JXA throw inside the run loop and crash the process.
+        view.evaluateJavaScriptCompletionHandler($('window.wimRequestClose && window.wimRequestClose()'), () => {});
     };
     ObjC.registerSubclass({
         name: 'WimWindowDelegate',

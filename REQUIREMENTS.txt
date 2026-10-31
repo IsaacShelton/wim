@@ -139,7 +139,8 @@ made where a request was open to interpretation.
 
 7. Language servers
 -------------------
-7.1  LSP support for Rust, TypeScript (and JavaScript) and Python.
+7.1  LSP support for Rust, TypeScript (and JavaScript), Python, HTML and
+     CSS.
      Decided: rust-analyzer, typescript-language-server and pylsp (with
      the Neovim config's pycodestyle settings), found in Neovim's Mason
      directory first, then on the PATH, since that is how the user's
@@ -149,7 +150,15 @@ made where a request was open to interpretation.
      Decided: a project's virtual environment is preferred for pylsp, so
      it sees the project's packages: its pylsp, else its Python with
      `-m pylsp`, before Mason's; a pylsp from elsewhere gets Jedi's
-     `environment` set to the virtual environment's Python. A command that fails to start (such as a rustup
+     `environment` set to the virtual environment's Python.
+     Decided: HTML and CSS (with SCSS and Less) use vscode-html-language-
+     server and vscode-css-language-server (Mason's html-lsp and css-lsp,
+     as the Neovim config installs), with nvim-lspconfig's options: the
+     formatter on, and CSS and JavaScript inside HTML. A project's
+     node_modules/.bin comes first, and the root is the nearest
+     package.json or .git. The HTML server is given (empty) css, html,
+     javascript and js/ts settings, since without them its validation
+     throws and it reports no diagnostics. A command that fails to start (such as a rustup
      proxy with no rust-analyzer installed, or a Mason install built for
      another CPU) falls through to the next one found; when none start,
      the message says why each one failed.

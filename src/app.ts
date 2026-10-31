@@ -4,7 +4,7 @@
 
 import * as fs from 'node:fs';
 import * as path from 'node:path';
-import { spawnSync } from 'node:child_process';
+import { execFile } from 'node:child_process';
 
 import { AgentBackend, SdkBackend } from './agent/backend';
 import { AgentPanel, PanelAction } from './agent/panel';
@@ -161,8 +161,9 @@ export interface AppOptions {
     /** Whether a Nerd Font is available, so file icons can be drawn. */
     icons: boolean;
     clipboard?: Clipboard;
-    /** Language servers to use (by default rust-analyzer and
-     * typescript-language-server). */
+    /** Language servers to use (by default rust-analyzer,
+     * typescript-language-server, pylsp and the vscode HTML and CSS
+     * servers). */
     servers?: ServerSpec[];
     /** How the Claude Code panel reaches Claude Code (by default, the Claude
      * Agent SDK). */
@@ -340,7 +341,7 @@ export class WimApp {
         };
         if (dirError !== undefined) this.editor.setError(dirError);
         const root = currentDir();
-        this.tree = new FileTree(root);
+        this.tree = new FileTree(root, !openedDir);
         this.treeCwd = root;
         // `wim .` starts with the tree open and focused.
         if (openedDir) {
@@ -1738,6 +1739,7 @@ export class WimApp {
         if (this.focus !== this.lastFocus && (this.lastFocus === 'Terminal' || this.lastFocus === 'Agents')) this.gitChanged();
         this.lastFocus = this.focus;
         if (!this.treeVisible) return;
+        this.tree.ensureGit();
         const cwd = currentDir();
         if (cwd !== this.treeCwd) {
             this.tree.setRoot(cwd);
@@ -2107,6 +2109,7 @@ export class WimApp {
             pressedButton: this.pressedButton,
             menu: this.menu,
             player: this.player,
+            refresh: () => this.refresh(),
             focus: this.focus,
             icons: this.icons,
             tree: this.tree,
@@ -2377,21 +2380,33 @@ function toKeyInput(msg: { key: string; ctrl: boolean; alt: boolean }): KeyInput
 }
 
 const BRANCH_REFRESH_MS = 2000;
+let branchAsking: string | undefined;
 let branchCache: { dir: string; at: number; name: string } | undefined;
 
 /** The git branch checked out in `dir` (a short commit when detached), or an
  * empty string outside a repository. Asked of git at most every couple of
  * seconds, as the status bar paints often. */
-function gitBranch(dir: string): string {
+function gitBranch(dir: string, changed: () => void): string {
     const now = Date.now();
     if (branchCache && branchCache.dir === dir && now - branchCache.at < BRANCH_REFRESH_MS) return branchCache.name;
-    const git = (args: string[]): string => {
-        const out = spawnSync('git', ['-C', dir, ...args], { encoding: 'utf8', windowsHide: true, stdio: ['ignore', 'pipe', 'ignore'] });
-        return out.status === 0 && typeof out.stdout === 'string' ? out.stdout.trim() : '';
-    };
-    const name = git(['branch', '--show-current']) || git(['rev-parse', '--short', 'HEAD']);
-    branchCache = { dir, at: now, name };
-    return name;
+    const stale = branchCache?.dir === dir ? branchCache.name : '';
+    // Answer from the last look and ask git in the background, so painting
+    // never waits on it.
+    if (branchAsking !== dir) {
+        branchAsking = dir;
+        const git = (args: string[]): Promise<string> =>
+            new Promise((resolve) => {
+                execFile('git', ['-C', dir, ...args], { encoding: 'utf8', windowsHide: true }, (err, out) => resolve(err ? '' : out.trim()));
+            });
+        void (async () => {
+            const name = (await git(['branch', '--show-current'])) || (await git(['rev-parse', '--short', 'HEAD']));
+            branchAsking = undefined;
+            const old = branchCache?.dir === dir ? branchCache.name : '';
+            branchCache = { dir, at: Date.now(), name };
+            if (name !== old) changed();
+        })();
+    }
+    return stale;
 }
 
 /** The color of a name in the tree with a git status. */
@@ -2507,6 +2522,8 @@ interface PaintState {
     /** The right-click menu, when it is open. */
     menu: ContextMenu | undefined;
     player: AudioPlayer;
+    /** Repaint soon, when something arrives later than the frame. */
+    refresh: () => void;
 }
 
 /** Paints one frame. */
@@ -3189,7 +3206,7 @@ class Painter {
         this.rect(rect(r.left, r.top, pillRight, r.bottom), modeColor);
         this.text(r.left, r.top, label, theme.BG);
 
-        const branch = gitBranch(currentDir());
+        const branch = gitBranch(currentDir(), this.st.refresh);
         const branchLabel = branch === '' ? '' : ` ${this.st.icons ? '\ue0a0 ' : ''}${branch} `;
         const branchRight = pillRight + Array.from(branchLabel).length * cw;
 

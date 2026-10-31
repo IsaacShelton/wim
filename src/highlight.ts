@@ -86,7 +86,13 @@ export type State =
     | { t: 'TripleStr'; q: string }
     /** Markdown: in a code block opened by `marker` (three or more
      * backticks or tildes), with the state of its language's highlighter. */
-    | { t: 'Fence'; marker: string; lang: Language | undefined; inner: State };
+    | { t: 'Fence'; marker: string; lang: Language | undefined; inner: State }
+    /** HTML: inside a tag's `<name ...>`, maybe in an attribute's quotes `q`. */
+    | { t: 'Tag'; name: string; closing: boolean; q: string }
+    /** HTML: in a `<style>` or `<script>`, with the state of its language. */
+    | { t: 'Embed'; name: string; inner: State }
+    /** CSS: `depth` blocks deep, in a declaration's value, or in a comment. */
+    | { t: 'Css'; depth: number; value: boolean; comment: boolean };
 
 export const NORMAL: State = { t: 'Normal' };
 
@@ -234,6 +240,20 @@ export const LUA: Language = {
     quotes: ['"', "'"],
 };
 
+export const HTML: Language = {
+    ...BASE,
+    name: 'html',
+    keywords: [],
+    quotes: [],
+};
+
+export const CSS: Language = {
+    ...BASE,
+    name: 'css',
+    keywords: [],
+    quotes: [],
+};
+
 export const MARKDOWN: Language = {
     ...BASE,
     name: 'markdown',
@@ -255,6 +275,8 @@ for (const [lang, exts] of [
     [JSON_LANG, 'json'],
     [LUA, 'lua'],
     [MARKDOWN, 'md markdown mdx'],
+    [HTML, 'html htm xhtml'],
+    [CSS, 'css'],
 ] as const) {
     for (const ext of words(exts)) BY_EXTENSION.set(ext, lang);
 }
@@ -346,6 +368,8 @@ const DEFINERS = ['fn', 'function', 'def', 'func'];
  * `[start, end, token]` in char columns and the state at the line's end. */
 export function highlightLine(lang: Language, line: readonly string[], state: State): [Span[], State] {
     if (lang.name === 'markdown') return highlightMarkdown(line, state);
+    if (lang.name === 'html') return highlightHtml(line, state);
+    if (lang.name === 'css') return highlightCss(line, state);
     const n = line.length;
     const spans: Span[] = [];
     let i = 0;
@@ -524,6 +548,201 @@ export function highlightLine(lang: Language, line: readonly string[], state: St
         }
     }
     return [spans, state];
+}
+
+const isNameChar = (c: string | undefined): boolean => c !== undefined && /^[\p{L}\p{N}_-]$/u.test(c);
+
+function highlightHtml(line: readonly string[], state: State): [Span[], State] {
+    const n = line.length;
+    const spans: Span[] = [];
+    let i = 0;
+    while (i < n) {
+        if (state.t === 'BlockComment') {
+            const j = find(line, i, '-->');
+            const e = j === undefined ? n : j + 3;
+            spans.push([i, e, 'Comment']);
+            i = e;
+            if (j !== undefined) state = NORMAL;
+        } else if (state.t === 'Embed') {
+            const close = /<\/(style|script)/i.exec(line.slice(i).join(''));
+            const at = close && close[1].toLowerCase() === state.name ? i + charLen(line.slice(i).join('').slice(0, close.index)) : n;
+            if (at > i) {
+                const lang = state.name === 'style' ? CSS : JS;
+                const [inner, next] = highlightLine(lang, line.slice(i, at), state.inner);
+                for (const [s, e, t] of inner) spans.push([s + i, e + i, t]);
+                state = { ...state, inner: next };
+            }
+            i = at;
+            if (at < n) state = NORMAL;
+        } else if (state.t === 'Tag') {
+            const c = line[i];
+            if (state.q !== '') {
+                let j = i;
+                while (j < n && line[j] !== state.q) j++;
+                const e = j < n ? j + 1 : n;
+                spans.push([i, e, 'String']);
+                i = e;
+                if (j < n) state = { ...state, q: '' };
+            } else if (c === '"' || c === "'") {
+                state = { ...state, q: c };
+                spans.push([i, i + 1, 'String']);
+                i++;
+            } else if (c === '>' || (c === '/' && line[i + 1] === '>')) {
+                const e = c === '>' ? i + 1 : i + 2;
+                spans.push([i, e, 'Bracket']);
+                i = e;
+                const embed = !state.closing && c === '>' && (state.name === 'style' || state.name === 'script');
+                state = embed ? { t: 'Embed', name: state.name, inner: NORMAL } : NORMAL;
+            } else if (c === '=') {
+                spans.push([i, i + 1, 'Operator']);
+                i++;
+            } else if (/^\s$/u.test(c) || c === '/') {
+                i++;
+            } else {
+                let j = i + 1;
+                while (j < n && !/^[\s=>"'/]$/u.test(line[j])) j++;
+                spans.push([i, j, 'Attribute']);
+                i = j;
+            }
+        } else {
+            const c = line[i];
+            if (startsWith(line, i, '<!--')) {
+                state = { t: 'BlockComment' };
+                spans.push([i, i + 4, 'Comment']);
+                i += 4;
+            } else if (c === '<' && line[i + 1] === '!') {
+                // `<!doctype html>`
+                const j = find(line, i, '>');
+                const e = j === undefined ? n : j + 1;
+                spans.push([i, e, 'Keyword']);
+                i = e;
+            } else if (c === '<' && (isIdent(line[i + 1] ?? ' ') || (line[i + 1] === '/' && isIdent(line[i + 2] ?? ' ')))) {
+                const closing = line[i + 1] === '/';
+                const start = i + (closing ? 2 : 1);
+                let j = start;
+                while (j < n && (isNameChar(line[j]) || line[j] === ':')) j++;
+                spans.push([i, start, 'Bracket']);
+                spans.push([start, j, 'Keyword']);
+                state = { t: 'Tag', name: line.slice(start, j).join('').toLowerCase(), closing, q: '' };
+                i = j;
+            } else if (c === '&') {
+                const m = /^&(#\d+|#x[\da-fA-F]+|[A-Za-z][A-Za-z\d]*);/.exec(line.slice(i, i + 12).join(''));
+                if (m) {
+                    spans.push([i, i + m[0].length, 'BuiltinConstant']);
+                    i += m[0].length;
+                } else {
+                    i++;
+                }
+            } else {
+                i++;
+            }
+        }
+    }
+    return [spans, state];
+}
+
+function highlightCss(line: readonly string[], state: State): [Span[], State] {
+    const n = line.length;
+    const spans: Span[] = [];
+    let { depth, value, comment } = state.t === 'Css' ? state : { depth: 0, value: false, comment: false };
+    let i = 0;
+    while (i < n) {
+        const c = line[i];
+        if (comment) {
+            const j = find(line, i, '*/');
+            const e = j === undefined ? n : j + 2;
+            spans.push([i, e, 'Comment']);
+            i = e;
+            if (j !== undefined) comment = false;
+        } else if (startsWith(line, i, '/*')) {
+            comment = true;
+            spans.push([i, i + 2, 'Comment']);
+            i += 2;
+        } else if (c === '"' || c === "'") {
+            let j = i + 1;
+            while (j < n && line[j] !== c) j += line[j] === '\\' ? 2 : 1;
+            const e = Math.min(j + 1, n);
+            spans.push([i, e, 'String']);
+            i = e;
+        } else if (c === '@' && isNameChar(line[i + 1])) {
+            let j = i + 1;
+            while (j < n && isNameChar(line[j])) j++;
+            spans.push([i, j, 'Keyword']);
+            i = j;
+        } else if (c === '!' && /^!\s*important/.test(line.slice(i).join(''))) {
+            const e = i + charLen(/^!\s*important/.exec(line.slice(i).join(''))![0]);
+            spans.push([i, e, 'Keyword']);
+            i = e;
+        } else if (c === '{') {
+            spans.push([i, i + 1, 'Bracket']);
+            depth++;
+            value = false;
+            i++;
+        } else if (c === '}') {
+            spans.push([i, i + 1, 'Bracket']);
+            depth = Math.max(depth - 1, 0);
+            value = false;
+            i++;
+        } else if (c === ';') {
+            spans.push([i, i + 1, 'Delimiter']);
+            value = false;
+            i++;
+        } else if (c === '#' && value) {
+            const m = /^#[\da-fA-F]*/.exec(line.slice(i).join(''))![0];
+            const hex = [4, 5, 7, 9].includes(m.length) && !isNameChar(line[i + m.length]);
+            const e = hex ? i + m.length : i + 1;
+            spans.push([i, e, hex ? 'Number' : 'Operator']);
+            i = e;
+        } else if (isAsciiDigit(c) || (value && (c === '.' || c === '-' || c === '+') && isAsciiDigit(line[i + 1]))) {
+            const m = /^[-+]?(\d+\.?\d*|\.\d+)([eE][-+]?\d+)?(%|[A-Za-z]+)?/.exec(line.slice(i).join(''));
+            const e = i + (m ? charLen(m[0]) : 1);
+            spans.push([i, e, 'Number']);
+            i = e;
+        } else if (isNameChar(c) || (c === '-' && line[i + 1] === '-')) {
+            let j = i + 1;
+            while (j < n && isNameChar(line[j])) j++;
+            const next = line.slice(j).find((x) => !/^\s$/u.test(x));
+            let token: Token = 'Normal';
+            if (next === '(') {
+                token = 'Function';
+            } else if (!value && depth > 0 && next === ':') {
+                // A property, unless it's a nested rule's selector (`a:hover {`).
+                const rest = line.slice(j).join('');
+                const brace = rest.indexOf('{');
+                const end = rest.search(/[;}]/);
+                token = brace === -1 || (end !== -1 && end < brace) ? 'Property' : 'Keyword';
+            } else if (!value) {
+                token = 'Keyword';
+            }
+            spans.push([i, j, token]);
+            i = j;
+        } else if (!value && (c === '.' || c === '#') && isNameChar(line[i + 1])) {
+            let j = i + 1;
+            while (j < n && isNameChar(line[j])) j++;
+            spans.push([i, j, 'Type']);
+            i = j;
+        } else if (c === ':') {
+            if (depth > 0 && !value && !/\{/.test(line.slice(i).join(''))) {
+                value = true;
+                spans.push([i, i + 1, 'Delimiter']);
+                i++;
+            } else {
+                // A pseudo-class or -element: `:hover`, `::before`.
+                let j = i + (line[i + 1] === ':' ? 2 : 1);
+                const start = j;
+                while (j < n && isNameChar(line[j])) j++;
+                spans.push([i, j, j > start ? 'Function' : 'Delimiter']);
+                i = Math.max(j, i + 1);
+            }
+        } else {
+            if ('()[]'.includes(c)) spans.push([i, i + 1, 'Bracket']);
+            else if (',.'.includes(c)) spans.push([i, i + 1, 'Delimiter']);
+            else if ('=+-*/>~|^$%&<'.includes(c)) spans.push([i, i + 1, 'Operator']);
+            i++;
+        }
+    }
+    const next: State = depth === 0 && !value && !comment ? NORMAL : { t: 'Css', depth, value, comment };
+    return [spans, next];
 }
 
 /** A line's length in characters. */

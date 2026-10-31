@@ -126,6 +126,46 @@ const TYPESCRIPT: ServerSpec = {
     initializationOptions: { hostInfo: 'wim' },
 };
 
+/** How to start one of vscode-langservers-extracted's servers: a project's
+ * own copy first. */
+function vscodeServer(name: string): (root: string) => ServerCommand[] {
+    return (root) =>
+        findExecutables(name, [path.join(root, 'node_modules', '.bin')]).map((command) => ({
+            command,
+            args: ['--stdio'],
+        }));
+}
+
+const webRoot = (file: string): string => findUp(file, ['package.json', '.git']) ?? path.dirname(file);
+
+const HTML_SERVER: ServerSpec = {
+    name: 'vscode-html-language-server',
+    languageId: (file) => (['html', 'htm', 'xhtml'].includes(extension(file)) ? 'html' : undefined),
+    commands: vscodeServer('vscode-html-language-server'),
+    root: webRoot,
+    // As nvim-lspconfig's: the formatter (it isn't offered otherwise), and
+    // completion, hover and diagnostics in `<style>` and `<script>`.
+    initializationOptions: {
+        provideFormatter: true,
+        embeddedLanguages: { css: true, javascript: true },
+        configurationSection: ['html', 'css', 'javascript'],
+    },
+    // Validating a file reads these sections, and throws (so reports
+    // nothing) if `css` or `js/ts.implicitProjectConfig` is missing.
+    settings: () => ({ html: {}, css: {}, javascript: {}, 'js/ts': { implicitProjectConfig: {} } }),
+};
+
+const CSS_LANGUAGES: Record<string, string> = { css: 'css', scss: 'scss', less: 'less' };
+
+const CSS_SERVER: ServerSpec = {
+    name: 'vscode-css-language-server',
+    languageId: (file) => CSS_LANGUAGES[extension(file)],
+    commands: vscodeServer('vscode-css-language-server'),
+    root: webRoot,
+    settings: () => ({ css: { validate: true }, scss: { validate: true }, less: { validate: true } }),
+    initializationOptions: { provideFormatter: true },
+};
+
 const PYTHON = process.platform === 'win32' ? 'python' : 'python3';
 
 /** The executables directories of a project's virtual environment (`.venv`
@@ -193,5 +233,5 @@ const PYLSP: ServerSpec = {
 };
 
 export function defaultServers(): ServerSpec[] {
-    return [RUST_ANALYZER, TYPESCRIPT, PYLSP];
+    return [RUST_ANALYZER, TYPESCRIPT, PYLSP, HTML_SERVER, CSS_SERVER];
 }

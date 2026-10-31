@@ -74,14 +74,30 @@ export class FileTree {
     private viewRows = 20;
     private pendingG = false;
 
-    constructor(private root: string) {
-        this.ignored = gitIgnored(root);
+    /** Whether git's ignored paths and status are still to be read. */
+    private gitPending: boolean;
+
+    /** With `deferGit`, git is asked on the first `ensureGit` (when the tree
+     * is first shown) instead of here, as it takes a while to answer. */
+    constructor(private root: string, deferGit = false) {
+        this.gitPending = deferGit;
+        this.ignored = deferGit ? new Set() : gitIgnored(root);
+        if (!deferGit) this.readGitStatus();
+        this.rebuild();
+    }
+
+    /** Read what git was not asked at construction. */
+    ensureGit(): void {
+        if (!this.gitPending) return;
+        this.gitPending = false;
+        this.ignored = gitIgnored(this.root);
         this.readGitStatus();
         this.rebuild();
     }
 
     setRoot(root: string): void {
         if (root === this.root) return;
+        this.gitPending = false;
         this.ignored = gitIgnored(root);
         this.root = root;
         this.readGitStatus();
@@ -100,6 +116,7 @@ export class FileTree {
 
     /** Re-read directories from disk. */
     refresh(): void {
+        this.gitPending = false;
         this.listings.clear();
         this.ignored = gitIgnored(this.root);
         this.readGitStatus();
@@ -109,6 +126,7 @@ export class FileTree {
     /** Read git's status again (after a file is written, say), without
      * re-reading directories. */
     refreshGitStatus(): void {
+        if (this.gitPending) return;
         this.readGitStatus();
         for (const row of this.rows) row.git = this.gitStatus(row.path);
     }

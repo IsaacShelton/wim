@@ -183,9 +183,13 @@ changes files, and on leaving the terminal or the agents panel; `R` reads it too
 Rust files use [rust-analyzer](https://rust-analyzer.github.io/); TypeScript and JavaScript
 files use [typescript-language-server](https://github.com/typescript-language-server/typescript-language-server);
 Python files use [pylsp](https://github.com/python-lsp/python-lsp-server), with the Neovim
-config's pycodestyle settings.
+config's pycodestyle settings. HTML and CSS (also SCSS and Less) files use
+`vscode-html-language-server` and `vscode-css-language-server` from
+[vscode-langservers-extracted](https://github.com/hrsh7th/vscode-langservers-extracted) (Mason's
+`html-lsp` and `css-lsp`), with their formatters on and, for HTML, `<style>` and `<script>`
+understood too.
 Wim looks for each in the project's own copy, then Neovim's Mason directory
-(`~/.local/share/nvim/mason/bin`), then the `PATH`. For TypeScript the project's copy is in
+(`~/.local/share/nvim/mason/bin`), then the `PATH`. For TypeScript, HTML and CSS the project's copy is in
 `node_modules/.bin`. For Python it is the virtual environment's (`.venv` or `venv` in the
 project, or an activated `$VIRTUAL_ENV`): its `pylsp`, or else its Python running `-m pylsp`,
 so the server sees the project's packages; when a virtual environment exists, a pylsp from
@@ -193,7 +197,8 @@ elsewhere is pointed at its Python too. Last, the first `python3` on the `PATH` 
 `-m pylsp`. If none start, the message says why each one failed. A server
 starts when the first file it handles is opened, rooted at the nearest Cargo workspace or crate
 (`Cargo.toml`); `tsconfig.json`, `jsconfig.json`, `package.json` or `.git`; or
-`pyproject.toml`, `setup.py`, `setup.cfg`, `requirements.txt`, `Pipfile` or `.git`. Files in
+`pyproject.toml`, `setup.py`, `setup.cfg`, `requirements.txt`, `Pipfile` or `.git`; or, for
+HTML and CSS, `package.json` or `.git`. Files in
 the same project share one server.
 
 - **Diagnostics:** underlined, with the message after the line, a sign in the sign column

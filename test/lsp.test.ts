@@ -138,6 +138,35 @@ test('pylsp prefers the project\'s virtual environment', { skip: process.platfor
     }
 });
 
+test('HTML and CSS files go to the vscode servers, a project\'s copy first', { skip: process.platform === 'win32' }, () => {
+    const handler = (file: string): [string, string] | undefined => {
+        for (const s of defaultServers()) {
+            const id = s.languageId(file);
+            if (id !== undefined) return [s.name, id];
+        }
+        return undefined;
+    };
+    assert.deepEqual(handler('/p/index.html'), ['vscode-html-language-server', 'html']);
+    assert.deepEqual(handler('/p/INDEX.HTM'), ['vscode-html-language-server', 'html']);
+    assert.deepEqual(handler('/p/site.css'), ['vscode-css-language-server', 'css']);
+    assert.deepEqual(handler('/p/site.scss'), ['vscode-css-language-server', 'scss']);
+    assert.deepEqual(handler('/p/site.less'), ['vscode-css-language-server', 'less']);
+
+    const dir = tempDir('web');
+    const bin = path.join(dir, 'node_modules', '.bin');
+    fs.mkdirSync(bin, { recursive: true });
+    fs.writeFileSync(path.join(bin, 'vscode-css-language-server'), '', { mode: 0o755 });
+    fs.writeFileSync(path.join(dir, 'package.json'), '{}');
+    fs.mkdirSync(path.join(dir, 'styles'));
+    try {
+        const css = defaultServers().find((s) => s.name === 'vscode-css-language-server')!;
+        assert.equal(css.root(path.join(dir, 'styles', 'site.css')), dir);
+        assert.deepEqual(css.commands(dir)[0], { command: path.join(bin, 'vscode-css-language-server'), args: ['--stdio'] });
+    } finally {
+        fs.rmSync(dir, { recursive: true, force: true });
+    }
+});
+
 // ----- Against a fake server --------------------------------------------------------------
 
 /** A language server for `.rs` files: every `bad` is an error, the hover
