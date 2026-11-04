@@ -14,7 +14,8 @@ const USAGE = `Usage: wim [options] [file or directory]
 Options:
   --window=KIND  How to show Wim: auto (default), webkit (macOS), chromium
                  (an Edge/Chrome app window), browser (the default browser),
-                 or none (print the address to open yourself)
+                 none (print the address to open yourself), or host (for
+                 Wim's native app, which shows the window itself)
   -h, --help     Show this help
 `;
 
@@ -34,7 +35,7 @@ function parseArgs(argv: string[]): { path?: string; window: WindowKind } {
             process.exit(0);
         } else if (options && arg.startsWith('--window=')) {
             const kind = arg.slice('--window='.length);
-            if (!['auto', 'webkit', 'chromium', 'browser', 'none'].includes(kind)) usageError(`unknown window kind: ${kind}`);
+            if (!['auto', 'webkit', 'chromium', 'browser', 'host', 'none'].includes(kind)) usageError(`unknown window kind: ${kind}`);
             window = kind as WindowKind;
         } else if (options && arg.startsWith('-') && arg !== '-') {
             usageError(`unknown option: ${arg}`);
@@ -82,10 +83,25 @@ export async function main(argv: string[]): Promise<void> {
         icons: fontPath !== undefined,
         config,
         configWarnings: warnings,
-        onFrame: (title, dirty, cmds, animating, tracking) => send(client, { t: 'frame', title, dirty, cmds, animating, tracking }),
+        onFrame: (title, dirty, cmds, animating, tracking) => {
+            window?.setTitle(title);
+            send(client, { t: 'frame', title, dirty, cmds, animating, tracking });
+        },
         onAudio: (cmd) => send(client, { t: 'audio', cmd }),
         onQuit: shutdown,
     });
+
+    /** Handle a message from the window, keeping the editor (and any
+     * unsaved work) alive if it fails. */
+    const handle = (msg: ClientMessage): void => {
+        try {
+            app.handleMessage(msg);
+        } catch (e) {
+            process.stderr.write(`wim: internal error: ${(e as Error).stack ?? String(e)}\n`);
+            app.editor.setError(`Internal error: ${(e as Error).message}`);
+            app.render();
+        }
+    };
 
     const server = await startServer({
         fontPath,
@@ -100,14 +116,9 @@ export async function main(argv: string[]): Promise<void> {
                 } catch {
                     return;
                 }
-                try {
-                    app.handleMessage(msg);
-                } catch (e) {
-                    // Keep the editor (and any unsaved work) alive.
-                    process.stderr.write(`wim: internal error: ${(e as Error).stack ?? String(e)}\n`);
-                    app.editor.setError(`Internal error: ${(e as Error).message}`);
-                    app.render();
-                }
+                // A file dropped from another app leaves that app in front.
+                if (msg.t === 'drop') window?.activate();
+                handle(msg);
             });
             conn.on('close', () => {
                 if (client !== conn) return;
@@ -123,6 +134,7 @@ export async function main(argv: string[]): Promise<void> {
     });
 
     window = openWindow(server.url, args.window);
+    window.onCloseRequest(() => handle({ t: 'close' }));
     window.onExit(() => {
         app.dispose();
         server.close();

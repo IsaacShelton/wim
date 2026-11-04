@@ -447,3 +447,29 @@ made where a request was open to interpretation.
      Labels are SVG text rather than HTML, as HTML inside an SVG drawn as
      an image doesn't show in every engine. A diagram Mermaid can't read
      shows its error and source.
+
+
+19. Native app
+--------------
+19.1 A build of Wim that runs as a native application, with Rust and
+     Tauri, so it starts faster than through `osascript`.
+     Decided: a Tauri app in `native/` that shows the window and runs the
+     editor (Node, `wim.js --window=host`) as its child, rather than
+     porting the editor to Rust. The `osascript` and Edge windows stay the
+     default for `node wim.js`, which still needs no native code (1.1,
+     1.2). The app opens its window at once and starts Node alongside;
+     they talk in lines of JSON on Node's stdin and stdout (the page's
+     address, the window's title, bringing the window to the front, and
+     close requests), and each exits when the other does.
+     Decided: the window fills the screen apart from the menu bar and
+     Dock, as the `osascript` one does, set directly rather than by
+     zooming, which animates and held up the first frame by about 0.3 s.
+     It has no menu, so Cmd shortcuts reach Wim. The close button and Quit
+     from the Dock ask Wim, which warns about unsaved changes. Files
+     dropped on it reach Wim, as in the other windows.
+     Decided: the app uses this checkout and an installed Node rather than
+     bundling them (`WIM_HOME` and `WIM_NODE` point elsewhere). Opened from
+     the Finder or Dock, it takes the environment from the user's shell, as
+     a terminal has it, and starts in the home directory rather than `/`.
+     Built with `npm run native` (the Tauri CLI is a dev dependency); only
+     the macOS app has been tried.

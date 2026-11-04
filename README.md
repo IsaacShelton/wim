@@ -13,6 +13,7 @@ A Vim-like, personalized code editor created on a wim. It's a Windowed Vim-esque
 Despite being Vim-like, Wim runs as a native window and not as a terminal app.
 
 Wim uses Node.js and opens a native window, without any native code of its own.
+A native app built with Tauri is optional (see [The native app](#the-native-app)).
 
 ```sh
 npm install            # installs the TypeScript compiler (development only)
@@ -43,6 +44,34 @@ Chromium-based browser.
 
 File icons use the FiraMono Nerd Font that comes with Wim in `fonts/` (with its license), so
 nothing needs installing. If `fonts/` has no Nerd Font, an installed one is used instead.
+
+## The native app
+
+`native/` builds Wim as a native app with [Tauri](https://tauri.app), in place of the
+`osascript` window. The app opens its window straight away and runs the editor
+(`wim.js --window=host`) behind it, so Wim is on screen sooner (about 0.6 s to a working
+editor on macOS, against about 0.95 s through `osascript`).
+
+```sh
+npm install            # includes the Tauri CLI; Rust comes from https://rustup.rs
+npm run native         # builds native/target/release/bundle/macos/Wim.app
+```
+
+Open `Wim.app` from the Finder or the Dock, or run it with a file or directory as `wim.js` is
+run: `native/target/release/bundle/macos/Wim.app/Contents/MacOS/wim path/to/file.rs` (or link
+that into your `PATH` as `wim`). `cargo build --release` in `native/` builds just the program,
+as `native/target/release/wim`.
+
+The app still uses Node and this checkout: it runs the `wim.js` beside `native/`
+(`WIM_HOME` picks another Wim directory) with the `node` on the `PATH` (`WIM_NODE` picks
+another). Opened from the Finder or Dock, it first takes the environment (`PATH` and the
+like) from your shell (`$SHELL -i -l`), as a terminal would have it, which adds the time
+your shell takes to start. Started in `/`, Wim works in your home directory.
+
+The window's close button and Quit (from the Dock, or logging out) ask Wim, which warns
+about unsaved changes, as in the `osascript` window. If Wim can't start, the window says why.
+The app is only tried on macOS; Tauri also builds it for Windows and Linux
+(`npm run native -- --bundles nsis` or `appimage`).
 
 ## Settings
 
@@ -96,6 +125,7 @@ default, and a mistake in it is reported at startup and ignored.
 | `src/icons.ts` | File icons, generated from nvim-web-devicons plus `~/.config/nvim/lua/dev_icons.lua` |
 | `src/app.ts` | Window logic: routes input (mappings, focus, mouse) and paints the tree, buffer tabs, text, gutter, cursor, status line and command line as drawing commands |
 | `src/window.ts` | Opens the window on each platform |
+| `native/` | The native app (Rust, Tauri): `src/main.rs` opens the window and runs Wim behind it; `src/macos.rs` makes Quit ask Wim first |
 | `src/server.ts`, `src/protocol.ts` | The local page and WebSocket, and the messages they carry |
 | `src/ui/client.ts` | The window's side: draws frames on a canvas and sends input back |
 | `src/clipboard.ts` | System clipboard through `pbcopy`/`pbpaste`, PowerShell, or `wl-clipboard`/`xclip`/`xsel` |

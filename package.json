@@ -14,9 +14,11 @@
     "build": "tsc -p . && tsc -p src/ui",
     "prepare": "npm run build",
     "test": "npm run build && node --test",
-    "start": "node wim.js"
+    "start": "node wim.js",
+    "native": "tauri build"
   },
   "devDependencies": {
+    "@tauri-apps/cli": "~2.12.3",
     "@types/node": "^20.19.0",
     "typescript": "~5.9.3"
   },

@@ -1,0 +1,21 @@
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>Wim</title>
+<!-- Shown while Wim starts, until the window goes to Wim's own page; and
+     where the app says why, if Wim can't start. -->
+<style>
+html, body { margin: 0; height: 100%; overflow: hidden; background: #282c34; }
+pre { margin: 20px; color: #e06c75; font: 13px ui-monospace, Menlo, Consolas, monospace; white-space: pre-wrap; }
+</style>
+</head>
+<body>
+<pre id="error"></pre>
+<script>
+function showError(message) {
+    document.getElementById('error').textContent = message;
+}
+</script>
+</body>
+</html>

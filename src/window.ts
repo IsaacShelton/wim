@@ -6,13 +6,16 @@
 //   another Chromium browser, opens the page as a standalone app window with
 //   its own temporary profile, so the window is its own process.
 // - Otherwise the page opens in the default browser.
+// - Wim's native app (`native/`, through Tauri) starts Wim itself, with
+//   `--window=host`, and shows the page in its own window.
 
 import { ChildProcess, spawn, spawnSync } from 'node:child_process';
 import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
+import * as readline from 'node:readline';
 
-export type WindowKind = 'auto' | 'webkit' | 'chromium' | 'browser' | 'none';
+export type WindowKind = 'auto' | 'webkit' | 'chromium' | 'browser' | 'host' | 'none';
 
 export interface WindowHandle {
     /** What actually opened. */
@@ -22,6 +25,13 @@ export interface WindowHandle {
     tracksExit: boolean;
 
     onExit(callback: () => void): void;
+    /** Called when the window's close button or Quit asks Node, rather than
+     * the page, whether to close. */
+    onCloseRequest(callback: () => void): void;
+    /** Show the page's title on the window, where the window doesn't itself. */
+    setTitle(title: string): void;
+    /** Bring the window to the front, as after a file is dropped on it. */
+    activate(): void;
     close(): void;
 }
 
@@ -30,6 +40,7 @@ const HEIGHT = 720;
 
 export function openWindow(url: string, kind: WindowKind): WindowHandle {
     if (kind === 'none') return untracked('none');
+    if (kind === 'host') return openHost(url);
     if ((kind === 'auto' && process.platform === 'darwin') || kind === 'webkit') return openWebKit(url);
     if (kind === 'auto' || kind === 'chromium') {
         const browser = findChromium();
@@ -43,7 +54,15 @@ export function openWindow(url: string, kind: WindowKind): WindowHandle {
 }
 
 function untracked(kind: 'browser' | 'none'): WindowHandle {
-    return { kind, tracksExit: false, onExit: () => { }, close: () => { } };
+    return {
+        kind,
+        tracksExit: false,
+        onExit: () => { },
+        onCloseRequest: () => { },
+        setTitle: () => { },
+        activate: () => { },
+        close: () => { },
+    };
 }
 
 function childHandle(kind: 'webkit' | 'chromium', child: ChildProcess, cleanup = (): void => { }): WindowHandle {
@@ -64,9 +83,58 @@ function childHandle(kind: 'webkit' | 'chromium', child: ChildProcess, cleanup =
         kind,
         tracksExit: true,
         onExit: (cb) => callbacks.push(cb),
+        onCloseRequest: () => { },
+        setTitle: () => { },
+        activate: () => { },
         close: () => {
             if (!exited) child.kill();
         },
+    };
+}
+
+// ----- The native app's window -------------------------------------------------------
+
+/** The native app started Wim and shows the page itself. They talk in lines
+ * of JSON: Wim's stdout tells the app the page's address (`url`), the
+ * window's `title` and when to `activate`; the app's `close` comes back on
+ * stdin, from the window's close button or Quit. When stdin ends, the app,
+ * and its window, are gone. */
+function openHost(url: string): WindowHandle {
+    const exitCallbacks: (() => void)[] = [];
+    const closeCallbacks: (() => void)[] = [];
+    let title = '';
+    const tell = (msg: object): void => {
+        process.stdout.write(JSON.stringify(msg) + '\n');
+    };
+    // Writing after the app has gone fails; stdin ending says so instead.
+    process.stdout.on('error', () => { });
+    const input = readline.createInterface({ input: process.stdin });
+    input.on('line', (line) => {
+        let msg: { t?: unknown };
+        try {
+            msg = JSON.parse(line) as { t?: unknown };
+        } catch {
+            return;
+        }
+        if (msg.t === 'close') for (const cb of closeCallbacks) cb();
+    });
+    input.on('close', () => {
+        for (const cb of exitCallbacks) cb();
+    });
+    tell({ t: 'url', url });
+    return {
+        kind: 'host',
+        tracksExit: true,
+        onExit: (cb) => exitCallbacks.push(cb),
+        onCloseRequest: (cb) => closeCallbacks.push(cb),
+        setTitle: (t) => {
+            if (t === title) return;
+            title = t;
+            tell({ t: 'title', title });
+        },
+        activate: () => tell({ t: 'activate' }),
+        // Wim exits right after, which ends stdout and tells the app to quit.
+        close: () => { },
     };
 }
 
