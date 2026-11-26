@@ -93,7 +93,7 @@ default, and a mistake in it is reported at startup and ignored.
     },
     "opencode": { "enabled": false },
     "terminal": { "shell": "zsh" },
-    "editor": { "smoothCaret": false, "smoothScroll": false, "wrap": false }
+    "editor": { "smoothCaret": false, "smoothScroll": false, "wrap": false, "yankClipboard": true }
 }
 ```
 
@@ -109,6 +109,7 @@ default, and a mistake in it is reported at startup and ignored.
 | `editor.smoothCaret` | Whether the caret glides quickly to where it moves instead of jumping (default `false`) |
 | `editor.wrap` | Whether long lines wrap onto several rows instead of scrolling sideways (default `false`) |
 | `editor.smoothScroll` | Whether the text glides when it scrolls (`<C-d>`, `<C-u>`, `<C-f>`, `<C-b>`, `zz`, the mouse wheel, ...) instead of jumping, in rendered Markdown too (default `false`) |
+| `editor.yankClipboard` | Whether a yank copies to the system clipboard (default `true`); `"+y` still copies when off |
 
 ## Layout
 
@@ -163,7 +164,8 @@ forms for whole lines (`dd`, `cc`, `yy`, `>>`, `gUU`).
 with counts (`3ix<Esc>`, `3.`, `5x`). Yanked text flashes briefly.
 
 **Registers:** unnamed, `"a`–`"z` (uppercase appends), `"0`, `"1`–`"9`, `"-`, black hole `"_`,
-and the system clipboard as `"+` / `"*`.
+and the system clipboard as `"+` / `"*`. Yanks also copy to the system clipboard by default;
+set `editor.yankClipboard` to `false` to turn that off.
 
 **Insert mode:** auto-indent, extra indent after `{ ( [`, a closing `}` dedents,
 `<Tab>` inserts spaces, `<BS>` removes one indent level, `<C-w> <C-u> <C-t> <C-d>`.

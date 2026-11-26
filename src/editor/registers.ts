@@ -20,6 +20,8 @@ export class Registers {
     private clipboardImpl: Clipboard | undefined;
     /** Mirror the unnamed register to the system clipboard (`clipboard=unnamed`). */
     useSystemClipboard = false;
+    /** Copy yanks to the system clipboard (`editor.yankClipboard`). */
+    yankToClipboard = true;
 
     constructor(clipboard?: Clipboard) {
         this.clipboardImpl = clipboard;
@@ -69,7 +71,7 @@ export class Registers {
             } else {
                 this.map.set('-', { ...reg });
             }
-            if (this.useSystemClipboard) this.writeClipboard(reg);
+            if (this.useSystemClipboard || (op === 'Yank' && this.yankToClipboard)) this.writeClipboard(reg);
         }
         this.map.set('"', { ...reg });
     }

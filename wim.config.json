@@ -16,6 +16,7 @@
     "terminal": {},
     "editor": {
         "smoothCaret": true,
-        "smoothScroll": true
+        "smoothScroll": true,
+        "yankClipboard": true
     }
 }

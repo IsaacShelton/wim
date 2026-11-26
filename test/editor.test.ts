@@ -574,3 +574,18 @@ test('clipboard registers use the system clipboard', () => {
     ed.handleKeys(parseKeys('"+p'));
     assert.equal(ed.buffer.text(), 'foo bar\nline');
 });
+
+test('yanks copy to the clipboard unless yankClipboard is off', () => {
+    const clipboard = new MemoryClipboard();
+    const ed = Editor.fromText('foo bar', clipboard);
+    ed.handleKeys(parseKeys('yiw'));
+    assert.equal(clipboard.text, 'foo', 'yank copies by default');
+    clipboard.text = 'keep';
+    ed.handleKeys(parseKeys('dw'));
+    assert.equal(clipboard.text, 'keep', 'delete leaves the clipboard alone');
+    ed.registers.yankToClipboard = false;
+    ed.handleKeys(parseKeys('yiw'));
+    assert.equal(clipboard.text, 'keep', 'no copy with the setting off');
+    ed.handleKeys(parseKeys('"+yiw'));
+    assert.equal(clipboard.text, 'bar', 'the clipboard register still copies');
+});

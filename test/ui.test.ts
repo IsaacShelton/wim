@@ -1411,7 +1411,7 @@ test('with smooth scrolling and caret, the text and the caret glide to their pla
         await settle();
         assert.equal(plain.frames.length, count, 'no frames after');
 
-        const config = { ...defaultConfig(), editor: { smoothCaret: true, smoothScroll: true, wrap: false } };
+        const config = { ...defaultConfig(), editor: { smoothCaret: true, smoothScroll: true, wrap: false, yankClipboard: true } };
         const h = harness(file, [], { config });
         const ed = h.app.editor;
         h.type('<C-f>');
@@ -1578,7 +1578,7 @@ test('with wrapping, smooth scrolling and the gliding caret still glide by rows'
             return r ? [r[1] as number, r[2] as number] : [];
         };
         const settle = (): Promise<void> => new Promise((resolve) => setTimeout(resolve, 400));
-        const config = { ...defaultConfig(), editor: { smoothCaret: true, smoothScroll: true, wrap: true } };
+        const config = { ...defaultConfig(), editor: { smoothCaret: true, smoothScroll: true, wrap: true, yankClipboard: true } };
         const h = harness(file, [], { config });
         const ed = h.app.editor;
         const last = (): DrawCmd[] => h.frames[h.frames.length - 1];

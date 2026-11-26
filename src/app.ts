@@ -317,6 +317,7 @@ export class WimApp {
         }
         this.editor = new Editor(this.clipboard);
         this.editor.options.wrap = this.config.editor.wrap;
+        this.editor.registers.yankToClipboard = this.config.editor.yankClipboard;
         const refresh = (): void => this.refresh();
         this.lsp = new LspManager(this.editor, opts.servers ?? defaultServers(), { refresh });
         this.features = new LspFeatures(this.editor, this.lsp, {
