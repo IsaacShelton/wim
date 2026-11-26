@@ -33,6 +33,10 @@ export interface Config {
         /** How long the prompt cache lives after a request, in minutes. */
         cacheMinutes: number;
     };
+    opencode: {
+        /** Whether Wim connects to OpenCode at all. */
+        enabled: boolean;
+    };
     terminal: {
         /** The shell to run (by default zsh, or PowerShell on Windows). */
         shell?: string;
@@ -60,6 +64,9 @@ export const DEFAULT_CONFIG: Config = {
         },
         defaultPreset: 'high',
         cacheMinutes: 60,
+    },
+    opencode: {
+        enabled: false,
     },
     terminal: {},
     editor: {
@@ -143,6 +150,16 @@ export function parseConfig(text: string): { config: Config; warnings: string[] 
                 else if (p.effort !== undefined) warn(`claude.presets.${name}.effort`, EFFORTS.map((e) => `"${e}"`).join(', '));
                 config.claude.presets[name] = preset;
             }
+        }
+    }
+
+    const opencode = root.opencode;
+    if (opencode !== undefined && !isObject(opencode)) {
+        warn('opencode', 'an object');
+    } else if (opencode) {
+        if (opencode.enabled !== undefined) {
+            if (typeof opencode.enabled === 'boolean') config.opencode.enabled = opencode.enabled;
+            else warn('opencode.enabled', 'true or false');
         }
     }
 

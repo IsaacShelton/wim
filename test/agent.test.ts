@@ -30,6 +30,12 @@ import { parseKeys, plain } from '../src/editor/keys';
 import { ClientMessage, DrawCmd } from '../src/protocol';
 import { theme } from '../src/theme';
 
+const CLAUDE_MODELS: ModelInfo[] = [
+    { value: 'default', displayName: 'Default (recommended)', description: 'The best model for you' },
+    { value: 'opus', displayName: 'Opus 5.5', description: 'The most capable' },
+    { value: 'haiku', displayName: 'Haiku 5.5', description: 'The fastest' },
+];
+
 /** A Claude Code session that the test drives. */
 class FakeQuery implements AgentQuery {
     readonly sent: string[] = [];
@@ -105,11 +111,7 @@ class FakeQuery implements AgentQuery {
     }
 
     supportedModels(): Promise<ModelInfo[]> {
-        return Promise.resolve([
-            { value: 'default', displayName: 'Default (recommended)', description: 'The best model for you' },
-            { value: 'opus', displayName: 'Opus 5.5', description: 'The most capable' },
-            { value: 'haiku', displayName: 'Haiku 5.5', description: 'The fastest' },
-        ]);
+        return Promise.resolve(CLAUDE_MODELS);
     }
 
     getContextUsage(): Promise<ContextUsage> {
@@ -146,6 +148,8 @@ class FakeQuery implements AgentQuery {
 }
 
 class FakeBackend implements AgentBackend {
+    readonly id: string = 'claude';
+    readonly label: string = 'Claude Code';
     readonly queries: FakeQuery[] = [];
     past: PastSession[] = [];
     histories: Record<string, HistoryMessage[]> = {};
@@ -168,8 +172,25 @@ class FakeBackend implements AgentBackend {
         return Promise.resolve('Named by Claude');
     }
 
+    models(): Promise<ModelInfo[]> {
+        return Promise.resolve(CLAUDE_MODELS);
+    }
+
     get last(): FakeQuery {
         return this.queries[this.queries.length - 1];
+    }
+}
+
+/** OpenCode's fake: the same messages, with models of its own. */
+class FakeOpenCodeBackend extends FakeBackend {
+    override readonly id = 'opencode';
+    override readonly label = 'OpenCode';
+
+    override models(): Promise<ModelInfo[]> {
+        return Promise.resolve([
+            { value: 'anthropic/claude-opus-5-5', resolvedModel: 'claude-opus-5-5', displayName: 'Opus 5.5', description: 'anthropic' },
+            { value: 'openai/gpt-6', resolvedModel: 'gpt-6', displayName: 'GPT-6', description: 'openai' },
+        ]);
     }
 }
 
@@ -202,6 +223,7 @@ function tempDir(name: string): string {
 interface Harness {
     app: WimApp;
     backend: FakeBackend;
+    backends: AgentBackend[];
     clipboard: MemoryClipboard;
     send: (msg: ClientMessage) => void;
     type: (keys: string) => void;
@@ -210,17 +232,22 @@ interface Harness {
     last: () => DrawCmd[];
 }
 
-function harness(file?: string): Harness {
+function harness(file?: string, extra: AgentBackend[] = []): Harness {
     const frames: DrawCmd[][] = [];
     const backend = new FakeBackend();
+    const backends = [backend, ...extra];
     const clipboard = new MemoryClipboard();
     const app = new WimApp({
         path: file,
         icons: false,
         clipboard,
         servers: [],
-        agents: backend,
-        config: { ...defaultConfig(), claude: { ...defaultConfig().claude, enabled: true } },
+        agents: backends.length === 1 ? backend : backends,
+        config: {
+            ...defaultConfig(),
+            claude: { ...defaultConfig().claude, enabled: true },
+            opencode: { ...defaultConfig().opencode, enabled: extra.length > 0 },
+        },
         onFrame: (_title, _dirty, cmds) => frames.push(cmds),
         onQuit: () => {},
     });
@@ -230,6 +257,7 @@ function harness(file?: string): Harness {
     return {
         app,
         backend,
+        backends,
         clipboard,
         send,
         type: (keys) => {
@@ -768,7 +796,7 @@ test('Claude Code is off unless the settings turn it on', () => {
     app.handleMessage({ t: 'resize', width: 1400, height: 800, charW: 10, lineH: 20 });
     app.handleMessage({ t: 'command', name: 'agents' });
     const drawn = frames[frames.length - 1].map((c) => (c[0] === 'text' ? c[3] : '')).join('\n');
-    assert.match(drawn, /Claude Code is turned off/);
+    assert.match(drawn, /Agents are turned off/);
     assert.doesNotMatch(drawn, / AGENT /);
     assert.doesNotMatch(drawn, /✻ Agents/, 'no badge on the status line');
 });
@@ -907,4 +935,31 @@ test('f picks an image file to attach; Backspace in an empty prompt removes it, 
         process.chdir(cwd);
         fs.rmSync(dir, { recursive: true });
     }
+});
+
+test('the model picker offers Claude Code and OpenCode, and picking one chooses the agent', async () => {
+    const opencode = new FakeOpenCodeBackend();
+    const h = harness(undefined, [opencode]);
+    h.send({ t: 'command', name: 'agents' });
+    h.type('<Esc>m');
+    await settle();
+    assert.match(h.text(), /Opus 5\.5 \(Claude Code\)/);
+    assert.match(h.text(), /Opus 5\.5 \(OpenCode\)/);
+    assert.match(h.text(), /GPT-6/);
+    // A Claude model is a choice of agent as well as a model.
+    h.type('OpenCode<CR>');
+    await settle();
+    assert.equal(h.app.agents.session?.backend.id, 'opencode');
+    h.type('ihello<CR>');
+    await settle();
+    assert.deepEqual(opencode.last.sent, ['hello']);
+    assert.equal(h.backend.queries.length, 0, 'Claude Code was not started');
+    // Switching back to a Claude Code model starts a new conversation.
+    h.type('<Esc>mClaude Code<CR>');
+    await settle();
+    assert.equal(h.app.agents.session?.backend.id, 'claude');
+    assert.match(h.text(), /Switched to Claude Code/);
+    h.type('ihello again<CR>');
+    await settle();
+    assert.deepEqual(h.backend.last.sent, ['hello again']);
 });

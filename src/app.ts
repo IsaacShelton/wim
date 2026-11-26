@@ -7,6 +7,7 @@ import * as path from 'node:path';
 import { execFile } from 'node:child_process';
 
 import { AgentBackend, SdkBackend } from './agent/backend';
+import { OpenCodeBackend } from './agent/opencode';
 import { AgentPanel, PanelAction } from './agent/panel';
 import { Config, defaultConfig } from './config';
 import { AudioInfo, AudioPlayer, SEEK_STEP, VOLUME_STEP, formatTime } from './audio';
@@ -165,9 +166,9 @@ export interface AppOptions {
      * typescript-language-server, pylsp and the vscode HTML and CSS
      * servers). */
     servers?: ServerSpec[];
-    /** How the Claude Code panel reaches Claude Code (by default, the Claude
-     * Agent SDK). */
-    agents?: AgentBackend;
+    /** How the agents panel reaches its agents (by default, the Claude
+     * Agent SDK and/or the OpenCode SDK, as configured). */
+    agents?: AgentBackend | AgentBackend[];
     /** Wim's settings (by default, the built-in ones). */
     config?: Config;
     /** Problems found in the settings file, shown at startup. */
@@ -275,14 +276,16 @@ export class WimApp {
     /** The working directory's files, for finding a wikilink's note, kept
      * for a few seconds. */
     private vault: { root: string; files: string[]; at: number } | undefined;
-    /** Claude Code sessions, in the panel on the right. */
+    /** Agent sessions, in the panel on the right. */
     readonly agents: AgentPanel;
+    /** Whether any agent backend is enabled (Claude Code or OpenCode). */
+    private agentsAvailable: boolean;
     private agentsVisible = false;
     readonly config: Config;
     /** The shell under the editor. */
     readonly terminal: TerminalPane;
     private terminalVisible = false;
-    /** The status line's Claude badge in the last frame, for clicks. */
+    /** The status line's agents badge in the last frame, for clicks. */
     private badgeHit: Rect | undefined;
 
     constructor(private readonly opts: AppOptions) {
@@ -348,8 +351,14 @@ export class WimApp {
             this.treeVisible = true;
             this.focus = 'Tree';
         }
+        const backends: AgentBackend[] = opts.agents === undefined ? [] : Array.isArray(opts.agents) ? [...opts.agents] : [opts.agents];
+        if (opts.agents === undefined) {
+            if (this.config.claude.enabled) backends.push(new SdkBackend());
+            if (this.config.opencode.enabled) backends.push(new OpenCodeBackend());
+        }
+        this.agentsAvailable = this.config.claude.enabled || this.config.opencode.enabled;
         this.agents = new AgentPanel({
-            backend: opts.agents ?? new SdkBackend(),
+            backends,
             clipboard: this.clipboard,
             cwd: currentDir,
             refresh,
@@ -1471,7 +1480,7 @@ export class WimApp {
     }
 
     /** `<C-w>w`/`W`: the next or previous window, with the tree (if shown)
-     * before the first and the Claude panel (if shown) after the last. */
+     * before the first and the agents panel (if shown) after the last. */
     private cycleFocus(delta: number): void {
         const wins = this.windows.list();
         const stops: (Win | 'Tree' | 'Agents' | 'Terminal')[] = [
@@ -1490,7 +1499,7 @@ export class WimApp {
         }
     }
 
-    /** Cmd+L, `,cc`: show the Claude panel and move to it; from the panel,
+    /** Cmd+L, `,cc`: show the agents panel and move to it; from the panel,
      * hide it. */
     private toggleAgents(): void {
         this.windowCmdPending = false;
@@ -1503,8 +1512,8 @@ export class WimApp {
     }
 
     private showAgents(): void {
-        if (!this.config.claude.enabled) {
-            this.editor.setError('Claude Code is turned off: set claude.enabled to true in wim.config.json');
+        if (!this.agentsAvailable) {
+            this.editor.setError('Agents are turned off: set claude.enabled or opencode.enabled to true in wim.config.json');
             return;
         }
         this.editorToNormal();
@@ -2115,7 +2124,7 @@ export class WimApp {
             tree: this.tree,
             agents: this.agentsVisible ? this.agents : undefined,
             terminal: this.terminalVisible ? this.terminal : undefined,
-            badge: this.config.claude.enabled ? this.agents.badge(Date.now()) : undefined,
+            badge: this.agentsAvailable ? this.agents.badge(Date.now()) : undefined,
             mapPending: this.mapPending,
             highlightCache: (id) => {
                 let cache = this.highlightCaches.get(id);
@@ -2491,11 +2500,11 @@ interface PaintState {
     focus: Focus;
     icons: boolean;
     tree: FileTree;
-    /** The Claude panel, when it is shown. */
+    /** The agents panel, when it is shown. */
     agents: AgentPanel | undefined;
     /** The terminal, when it is shown. */
     terminal: TerminalPane | undefined;
-    /** The Claude badge at the end of the status line (not with Claude Code
+    /** The agents badge at the end of the status line (not with the agents
      * turned off). */
     badge: { text: string; color: string; bg: string } | undefined;
     mapPending: KeyInput[];
@@ -2531,7 +2540,7 @@ class Painter {
     private readonly cmds: DrawCmd[] = [];
     /** Where each buffer tab was drawn, for mouse clicks. */
     readonly tabHits: [Rect, number][] = [];
-    /** Where the Claude badge was drawn. */
+    /** Where the agents badge was drawn. */
     badgeHit: Rect | undefined;
 
     constructor(
@@ -3038,7 +3047,7 @@ class Painter {
     private paintCaret(cell: Rect, c: string): void {
         const mode = this.ed.mode;
         if (this.st.focus !== 'Editor') {
-            // Hollow cursor while the file tree or the Claude panel has focus.
+            // Hollow cursor while the file tree or the agents panel has focus.
             this.cmds.push(['stroke', cell.left, cell.top, cell.right - cell.left, cell.bottom - cell.top, theme.CURSOR]);
             return;
         }
@@ -3154,7 +3163,7 @@ class Painter {
         const cw = layout.charW;
         this.rect(full, theme.STATUS_BG);
 
-        // At the end, the Claude badge, which shows and hides the panel.
+        // At the end, the agents badge, which shows and hides the panel.
         const badge = this.st.badge;
         let badgeHit: Rect | undefined;
         if (badge) {

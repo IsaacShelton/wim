@@ -91,6 +91,7 @@ default, and a mistake in it is reported at startup and ignored.
         "defaultPreset": "high",
         "cacheMinutes": 60
     },
+    "opencode": { "enabled": false },
     "terminal": { "shell": "zsh" },
     "editor": { "smoothCaret": false, "smoothScroll": false, "wrap": false }
 }
@@ -103,6 +104,7 @@ default, and a mistake in it is reported at startup and ignored.
 | `claude.presets` | The model (an alias such as `haiku`, or an id) and effort (`low`, `medium`, `high`, `xhigh`, `max`) for low, medium and high complexity tasks |
 | `claude.defaultPreset` | The preset new sessions start with (default `high`; `null` keeps Claude Code's own settings) |
 | `claude.cacheMinutes` | How long the prompt cache lasts after a request, for the cache indicator (default 60) |
+| `opencode.enabled` | Whether Wim connects to OpenCode too (default `false`). With it on, the model picker lists OpenCode's models alongside Claude Code's; a Claude model appears under both agents, and picking one chooses which runs it |
 | `terminal.shell` | The shell the terminal runs (default `zsh`, or `powershell.exe` on Windows) |
 | `editor.smoothCaret` | Whether the caret glides quickly to where it moves instead of jumping (default `false`) |
 | `editor.wrap` | Whether long lines wrap onto several rows instead of scrolling sideways (default `false`) |
@@ -140,7 +142,7 @@ default, and a mistake in it is reported at startup and ignored.
 | `src/glide.ts` | Smooth motion for the caret and scrolling |
 | `src/terminal.ts` | The integrated terminal: a shell on a pseudo-terminal (made by `script`), its screen kept by @xterm/headless |
 | `src/lineterminal.ts` | The line-based terminal used where there is no `script` (Windows) |
-| `src/agent/` | The agents panel: `backend.ts` (Claude Code through the Claude Agent SDK), `session.ts` (one session: its conversation, prompts and settings), `transcript.ts` (the conversation laid out as rows), `input.ts` (the prompt), `panel.ts` (sessions, keys, mouse and painting) |
+| `src/agent/` | The agents panel: `backend.ts` (Claude Code through the Claude Agent SDK), `opencode.ts` (OpenCode through the OpenCode SDK), `session.ts` (one session: its conversation, prompts and settings), `transcript.ts` (the conversation laid out as rows), `input.ts` (the prompt), `panel.ts` (sessions, keys, mouse and painting) |
 
 Run the tests with `npm test`.
 
@@ -339,37 +341,48 @@ window's browser engine; if one can't, the player says so.
 
 ## Agents
 
-The agents panel is off until `claude.enabled` is `true` in `wim.config.json` (see
-[Settings](#settings)); until then Cmd+L, `,cc` and `:Agents` say so, and the badge is not shown.
+The agents panel is off until `claude.enabled` or `opencode.enabled` is `true` in
+`wim.config.json` (see [Settings](#settings)); until then Cmd+L, `,cc` and `:Agents` say so, and
+the badge is not shown. Each SDK is optional: the Claude Agent SDK is only imported when Claude
+Code is enabled and used, and the OpenCode SDK only when OpenCode is enabled and used. Install
+the one(s) whose `enabled` is `true` (`npm install @anthropic-ai/claude-agent-sdk`, or
+`npm install @opencode/client` and the `opencode` command on your `PATH`).
 
 Cmd+L (Ctrl+Shift+L on Windows and Linux), `,cc` or `:Agents` shows the agents panel on the
-right for chatting with Claude Code, and moves to it; Cmd+L from the panel hides it again.
+right for chatting with an agent, and moves to it; Cmd+L from the panel hides it again.
 `:Agents message` also sends the message. The `✻ Agents` badge at the end of the status line shows and
 hides the panel too when clicked; it turns orange when a session is waiting for an answer, and
-spins while Claude works.
+spins while the agent works.
 
 Each session is a Claude Code session (through the
 [Claude Agent SDK](https://www.npmjs.com/package/@anthropic-ai/claude-agent-sdk), which brings
-its own copy of Claude Code), working in Wim's working directory with Claude Code's own
-settings, tools, `CLAUDE.md` and sign-in. Its process starts with the first message. Several
-can be open at once, as tabs along the top of the panel; sessions are saved by Claude Code as
-usual, so any of them (from Wim or the terminal) can be resumed with its history.
+its own copy of Claude Code) or an OpenCode session (through the
+[OpenCode SDK](https://www.npmjs.com/package/@opencode/client)), working in Wim's working directory
+with that agent's own settings, tools, instructions and sign-in. Which one runs a session follows
+from its model: `m` lists every model both agents offer, and a Claude model appears once for each
+agent. Picking one switches the session to that agent automatically (starting a new conversation
+when the agent changes). Its process starts with the first message. Several can be open at once,
+as tabs along the top of the panel; sessions are saved by their agent as usual, so any of them
+(from Wim or the terminal) can be resumed with its history.
 
 The conversation shows messages, replies (Markdown, with highlighted code), thinking, and
 tool calls with a line or two of their results (a diff for edits); replies stream in, with a
-spinner, the time and the tokens while Claude works. Under the tabs are two rows. The first has
+spinner, the time and the tokens while the agent works. Under the tabs are two rows. The first has
 the session's preset, model, permission mode and effort, each clickable. The second has its
 context use (a meter and a percentage), the plan limit closest to running out (5 hours or the
 week), the prompt cache and the cost. The cache shows the time left (`cache 3m`; yellow in its
 last minute) and turns red as `cache cold` once it has run out, when the next message has to
 send the whole conversation again; it is counted from the last reply, so it is an estimate
 (`claude.cacheMinutes` sets its length). The meters go from green to yellow at 50% and red at 80%.
+OpenCode sessions show their own model name and usage instead; the context meter is about the
+session's model window.
 
 **Presets** are the model and effort for a low, medium or high complexity task, set in
-`wim.config.json` (see [Settings](#settings)). `L`, `M` and `H` switch the session to one
+`wim.config.json` (see [Settings](#settings)), for Claude Code sessions. `L`, `M` and `H` switch the session to one
 (even while it works: it applies to the next request), `P` or a click on the preset picks one,
 and `u` (or a click on the plan limit) shows the plan's usage limits, as `/usage` does: the
-5-hour and weekly windows with when they reset. Plan limits only exist for Claude subscriptions.
+5-hour and weekly windows with when they reset. Plan limits only exist for Claude subscriptions;
+OpenCode reports its Go limits when there are any.
 
 The panel has two modes, like Vim. In the prompt at the bottom, Enter sends (a `\` before it,
 or Option/Alt with it, makes a new line instead), Up/Down go through earlier messages, Esc

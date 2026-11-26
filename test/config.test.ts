@@ -10,6 +10,7 @@ import { findNerdFont } from '../src/fonts';
 test('the defaults keep Claude Code off and have a preset for each level', () => {
     const c = defaultConfig();
     assert.equal(c.claude.enabled, false);
+    assert.equal(c.opencode.enabled, false);
     assert.deepEqual(c.claude.presets.low, { model: 'claude-haiku-5-5', effort: 'low' });
     assert.deepEqual(c.claude.presets.medium, { model: 'claude-sonnet-5-5', effort: 'medium' });
     assert.deepEqual(c.claude.presets.high, { model: 'claude-opus-5-5', effort: 'high' });
@@ -21,11 +22,12 @@ test('the defaults keep Claude Code off and have a preset for each level', () =>
 
 test('settings override the defaults, and the rest stays', () => {
     const { config, warnings } = parseConfig(
-        JSON.stringify({ theme: 'nord', claude: { enabled: true, defaultPreset: 'low', presets: { low: { model: 'haiku', effort: 'medium' } } }, terminal: { shell: 'bash' }, editor: { smoothScroll: true } }),
+        JSON.stringify({ theme: 'nord', claude: { enabled: true, defaultPreset: 'low', presets: { low: { model: 'haiku', effort: 'medium' } } }, opencode: { enabled: true }, terminal: { shell: 'bash' }, editor: { smoothScroll: true } }),
     );
     assert.deepEqual(warnings, []);
     assert.equal(config.theme, 'nord');
     assert.equal(config.claude.enabled, true);
+    assert.equal(config.opencode.enabled, true);
     assert.equal(config.claude.defaultPreset, 'low');
     assert.deepEqual(config.claude.presets.low, { model: 'haiku', effort: 'medium' });
     assert.equal(config.claude.presets.high.model, 'claude-opus-5-5');

@@ -52,6 +52,8 @@ export interface PastSession {
     title: string;
     modified: number;
     branch?: string;
+    /** Which agent backend saved it (`claude` or `opencode`). */
+    backend?: string;
 }
 
 /** A message from a saved session's transcript, as the Messages API shapes
@@ -64,6 +66,10 @@ export interface HistoryMessage {
 }
 
 export interface AgentBackend {
+    /** Stable id, used to tell Claude Code from OpenCode (`claude`). */
+    readonly id: string;
+    /** The name shown in the panel's menus (`Claude Code`). */
+    readonly label: string;
     start(opts: StartOptions): Promise<AgentQuery>;
     /** Sessions for the project in `dir`, most recent first. */
     listSessions(dir: string): Promise<PastSession[]>;
@@ -71,6 +77,8 @@ export interface AgentBackend {
     /** The session's title (Claude Code names sessions after their first
      * messages). */
     title(id: string, dir: string): Promise<string | undefined>;
+    /** The models this backend can use, without starting a session. */
+    models?(dir: string): Promise<sdk.ModelInfo[]>;
 }
 
 /** How many past sessions the session picker lists. */
@@ -93,6 +101,9 @@ function sessionTitle(s: sdk.SDKSessionInfo): string {
 
 /** Claude Code, through the Claude Agent SDK. */
 export class SdkBackend implements AgentBackend {
+    readonly id = 'claude';
+    readonly label = 'Claude Code';
+
     async start(opts: StartOptions): Promise<AgentQuery> {
         const { query } = await load();
         const q = query({
@@ -133,5 +144,21 @@ export class SdkBackend implements AgentBackend {
         const { getSessionInfo } = await load();
         const info = await getSessionInfo(id, { dir });
         return info && sessionTitle(info);
+    }
+
+    /** Claude Code's models, asked of a short-lived process (the SDK only
+     * offers them from a session). */
+    async models(dir: string): Promise<sdk.ModelInfo[]> {
+        const { query } = await load();
+        // Keep the query alive until its models arrive, then close it.
+        const prompt = (async function* (): AsyncGenerator<sdk.SDKUserMessage> {
+            await new Promise<never>(() => {});
+        })();
+        const q = query({ prompt, options: { cwd: dir } });
+        try {
+            return await q.supportedModels();
+        } finally {
+            q.close();
+        }
     }
 }

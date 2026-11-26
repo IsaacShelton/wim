@@ -1,6 +1,6 @@
-// The agent panel, on the right of the window: Claude Code sessions, each a
-// conversation to read and continue, with its model, permission mode,
-// effort and context use. Like the file tree, it has its own keys: Normal
+// The agent panel, on the right of the window: Claude Code or OpenCode
+// sessions, each a conversation to read and continue, with its model,
+// permission mode, effort and context use. Like the file tree, it has its own keys: Normal
 // mode reads the conversation (`j`/`k`, `G`, Ctrl+d...) and switches
 // sessions and settings; `i` moves to the prompt at the bottom to type.
 
@@ -15,7 +15,7 @@ import { Box, Picker, PickerItem, Run } from '../popup';
 import { DrawCmd } from '../protocol';
 import { theme } from '../theme';
 import { Attachment, imageAttachment, readAttachment } from './attachment';
-import { AgentBackend, ContextUsage, ModelInfo, PermissionMode, UsageInfo } from './backend';
+import { AgentBackend, ContextUsage, PermissionMode, UsageInfo } from './backend';
 import { TextInput } from './input';
 import { AgentSession, EFFORTS, MODES, Prompt, modeLabel } from './session';
 import { PromptView, Row, transcriptRows } from './transcript';
@@ -48,7 +48,16 @@ type Hit =
     | { t: 'Detach'; index: number }
     | { t: 'Transcript' };
 
-type SessionChoice = { t: 'New' } | { t: 'Open'; index: number } | { t: 'Resume'; id: string; title: string };
+type SessionChoice = { t: 'New' } | { t: 'Open'; index: number } | { t: 'Resume'; id: string; title: string; backend: string };
+
+/** A model, and the agent that would run it. */
+export interface ModelChoice {
+    backend: string;
+    value: string;
+    resolvedModel?: string;
+    displayName: string;
+    description: string;
+}
 
 const NONE: PanelAction = { t: 'None' };
 /** Rows the prompt grows to before it scrolls. */
@@ -227,7 +236,8 @@ class Canvas {
 }
 
 export interface PanelOptions {
-    backend: AgentBackend;
+    /** The agent backends to offer (Claude Code, OpenCode, ...). */
+    backends: AgentBackend[];
     clipboard: Clipboard;
     /** The working directory, where new sessions start. */
     cwd: () => string;
@@ -275,8 +285,8 @@ export class AgentPanel {
     showUsage = false;
     showHelp = false;
     private cacheTimer: NodeJS.Timeout | undefined;
-    /** The models Claude Code offers, once asked. */
-    private models: ModelInfo[] | undefined;
+    /** The models the backends offer, once asked. */
+    private models: ModelChoice[] | undefined;
     /** `g` was typed, for `gg`, `gt` and `gT`. */
     private pendingG = false;
     private closeWarned = false;
@@ -314,21 +324,34 @@ export class AgentPanel {
 
     /** The panel is being shown: have a session to type into. */
     open(): void {
+        if (!this.available) return;
         if (this.sessions.length === 0) this.newSession();
         this.focus = 'Input';
     }
 
-    newSession(resume?: { id: string; title: string }): AgentSession {
-        const s = this.createSession(resume);
+    /** Some agent backend is configured. */
+    get available(): boolean {
+        return this.opts.backends.length > 0;
+    }
+
+    private backendById(id: string | undefined): AgentBackend | undefined {
+        return id === undefined ? undefined : this.opts.backends.find((b) => b.id === id);
+    }
+
+    newSession(resume?: { id: string; title: string; backend?: string }): AgentSession {
+        const backend = this.backendById(resume?.backend) ?? this.opts.backends[0];
+        if (!backend) throw new Error('No agent backend is enabled');
+        const s = this.createSession(backend, resume);
         this.sessions.push(s);
         this.current = this.sessions.length - 1;
-        if (!resume && this.opts.defaultPreset) this.usePreset(s, this.opts.defaultPreset);
+        // Presets name Claude Code models, so they only apply there.
+        if (!resume && this.opts.defaultPreset && backend.id === 'claude') this.usePreset(s, this.opts.defaultPreset);
         return s;
     }
 
-    private createSession(resume?: { id: string; title: string }): AgentSession {
+    private createSession(backend: AgentBackend, resume?: { id: string; title: string }): AgentSession {
         return new AgentSession({
-            backend: this.opts.backend,
+            backend,
             cwd: this.opts.cwd(),
             resume,
             onChange: () => this.changed(),
@@ -337,9 +360,9 @@ export class AgentPanel {
     }
 
     /** `/clear`: close the session and start a new one in its tab, with the
-     * same model, permission mode and effort. */
+     * same backend, model, permission mode and effort. */
     private clearSession(s: AgentSession): void {
-        const fresh = this.createSession();
+        const fresh = this.createSession(s.backend);
         fresh.model = s.model;
         fresh.activeModel = s.activeModel;
         fresh.mode = s.mode;
@@ -924,34 +947,41 @@ export class AgentPanel {
     private sessionPicker(): PanelAction {
         const items: PickerItem<SessionChoice>[] = [{ label: '+ New session', value: { t: 'New' } }];
         this.sessions.forEach((s, index) => {
-            items.push({ label: s.title, detail: s.running ? 'open · working' : 'open', value: { t: 'Open', index } });
+            const backend = this.opts.backends.length > 1 ? ` · ${s.backend.label}` : '';
+            items.push({ label: s.title, detail: `${s.running ? 'open · working' : 'open'}${backend}`, value: { t: 'Open', index } });
         });
         const picker = new Picker<SessionChoice>(
             'Agent Sessions',
             (choice) => {
                 if (choice.t === 'New') this.newSession();
                 else if (choice.t === 'Open') this.current = choice.index;
-                else this.resume(choice.id, choice.title);
+                else this.resume(choice.id, choice.title, choice.backend);
                 this.focus = 'Input';
             },
             { items, message: 'No sessions' },
         );
         picker.busy = true;
-        const open = new Set(this.sessions.map((s) => s.id));
-        this.opts.backend.listSessions(this.opts.cwd()).then(
-            (past) => {
-                for (const p of past) {
-                    if (open.has(p.id)) continue;
-                    const detail = `${ago(p.modified)}${p.branch ? ` · ${p.branch}` : ''}`;
-                    items.push({ label: p.title, detail, value: { t: 'Resume', id: p.id, title: p.title } });
+        const open = new Set(this.sessions.map((s) => `${s.backend.id}:${s.id}`));
+        Promise.allSettled(
+            this.opts.backends.map(async (backend) => {
+                const past = await backend.listSessions(this.opts.cwd());
+                return past.map((p) => ({ ...p, backend: backend.id }));
+            }),
+        ).then(
+            (results) => {
+                const failed = results.filter((r): r is PromiseRejectedResult => r.status === 'rejected');
+                for (const result of results) {
+                    if (result.status !== 'fulfilled') continue;
+                    for (const past of result.value) {
+                        if (open.has(`${past.backend}:${past.id}`)) continue;
+                        const who = this.opts.backends.length > 1 ? ` · ${this.backendById(past.backend)?.label ?? past.backend}` : '';
+                        const detail = `${ago(past.modified)}${past.branch ? ` · ${past.branch}` : ''}${who}`;
+                        items.push({ label: past.title, detail, value: { t: 'Resume', id: past.id, title: past.title, backend: past.backend! } });
+                    }
                 }
                 picker.busy = false;
-                picker.setItems(items, 'No sessions', true);
-                this.opts.refresh();
-            },
-            (e: Error) => {
-                picker.busy = false;
-                picker.setItems(items, `Can't list sessions: ${e.message}`, true);
+                const error = failed.length === results.length ? `Can't list sessions: ${(failed[0] as PromiseRejectedResult).reason?.message ?? failed[0]}` : undefined;
+                picker.setItems(items, error ?? 'No sessions', true);
                 this.opts.refresh();
             },
         );
@@ -959,19 +989,19 @@ export class AgentPanel {
     }
 
     /** Continue a saved session (or switch to it, if it is open). */
-    resume(id: string, title: string): void {
-        const open = this.sessions.findIndex((s) => s.id === id);
+    resume(id: string, title: string, backend?: string): void {
+        const open = this.sessions.findIndex((s) => s.id === id && (backend === undefined || s.backend.id === backend));
         if (open >= 0) this.current = open;
-        else this.newSession({ id, title });
+        else this.newSession({ id, title, backend });
     }
 
-    private modelName(id: string): string {
-        return this.models?.find((m) => m.value === id || m.resolvedModel === id)?.displayName ?? prettyModel(id);
+    private modelName(id: string, backend = this.session?.backend.id): string {
+        return this.models?.find((m) => m.backend === backend && (m.value === id || m.resolvedModel === id))?.displayName ?? prettyModel(id);
     }
 
     private modelLabel(s: AgentSession): string {
-        if (s.model !== undefined) return this.modelName(s.model);
-        if (s.activeModel !== undefined) return this.modelName(s.activeModel);
+        if (s.model !== undefined) return this.modelName(s.model, s.backend.id);
+        if (s.activeModel !== undefined) return this.modelName(s.activeModel, s.backend.id);
         return 'Default model';
     }
 
@@ -989,16 +1019,53 @@ export class AgentPanel {
         return { t: 'Picker', picker: new Picker<PresetName>('Preset', (name) => this.usePreset(s, name), { items }) as unknown as Picker<never> };
     }
 
-    private modelPicker(s: AgentSession): PanelAction {
-        const picker = new Picker<ModelInfo>(
-            'Model',
-            (m) => s.setModel(m.value === 'default' ? undefined : m.value, m.displayName),
-            { message: 'Loading models…' },
+    /** Every enabled backend's models, with the backend that would run each. */
+    private async loadModels(): Promise<ModelChoice[]> {
+        const dir = this.opts.cwd();
+        const errors: string[] = [];
+        const lists = await Promise.all(
+            this.opts.backends.map(async (backend): Promise<ModelChoice[]> => {
+                try {
+                    const models = backend.models ? await backend.models(dir) : [];
+                    return models.map((m) => ({
+                        backend: backend.id,
+                        value: m.value,
+                        resolvedModel: m.resolvedModel,
+                        displayName: m.displayName,
+                        description: m.description,
+                    }));
+                } catch (e) {
+                    errors.push(`${backend.label}: ${(e as Error).message}`);
+                    return [];
+                }
+            }),
         );
-        const fill = (models: ModelInfo[]): void => {
-            const current = s.model ?? 'default';
+        const merged = lists.flat();
+        if (merged.length === 0 && errors.length > 0) throw new Error(errors.join('; '));
+        return merged;
+    }
+
+    private chooseModel(s: AgentSession, choice: ModelChoice): void {
+        if (choice.backend !== s.backend.id) {
+            const backend = this.backendById(choice.backend);
+            if (!backend) return;
+            s.switchBackend(backend);
+        }
+        s.setModel(choice.value === 'default' ? undefined : choice.value, choice.displayName);
+    }
+
+    private modelPicker(s: AgentSession): PanelAction {
+        const picker = new Picker<ModelChoice>('Model', (choice) => this.chooseModel(s, choice), { message: 'Loading models…' });
+        const fill = (models: ModelChoice[]): void => {
+            const current = (m: ModelChoice): boolean =>
+                m.backend === s.backend.id &&
+                (m.value === s.model || m.resolvedModel === s.model || m.resolvedModel === s.activeModel || m.value === s.activeModel || (s.model === undefined && m.value === 'default'));
             picker.setItems(
-                models.map((m) => ({ label: m.displayName, detail: `${m.value === current ? '(current) ' : ''}${m.description}`, value: m })),
+                models.map((m) => ({
+                    label: this.opts.backends.length > 1 ? `${m.displayName} (${this.backendById(m.backend)?.label ?? m.backend})` : m.displayName,
+                    detail: `${current(m) ? '(current) ' : ''}${m.description}`,
+                    value: m,
+                })),
                 'No models',
             );
         };
@@ -1006,9 +1073,9 @@ export class AgentPanel {
             fill(this.models);
         } else {
             picker.busy = true;
-            s.models().then(
+            this.loadModels().then(
                 (models) => {
-                    this.models = models;
+                    if (models.length > 0) this.models = models;
                     picker.busy = false;
                     fill(models);
                     this.opts.refresh();

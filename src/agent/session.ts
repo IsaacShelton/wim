@@ -90,7 +90,7 @@ export function modeLabel(mode: PermissionMode | undefined): string {
 }
 
 /** Tools that change the files they name, and Bash, which may change any. */
-const FILE_TOOLS = ['Write', 'Edit', 'MultiEdit', 'NotebookEdit'];
+const FILE_TOOLS = ['Write', 'Edit', 'MultiEdit', 'NotebookEdit', 'write', 'edit', 'multiedit', 'notebookedit', 'apply_patch'];
 
 /** How much of Claude Code's error output to keep for messages. */
 const STDERR_KEEP = 2000;
@@ -159,6 +159,8 @@ export interface SessionOptions {
 
 export class AgentSession {
     readonly cwd: string;
+    /** The agent this session talks to: Claude Code or OpenCode. */
+    backend: AgentBackend;
     /** Claude Code's id for the session, once known. */
     id: string | undefined;
     title: string;
@@ -207,9 +209,13 @@ export class AgentSession {
     private interrupting = false;
     private interruptNoted = false;
     private closed = false;
+    /** Counts backend switches, so a history read from an old agent doesn't
+     * land in the new conversation. */
+    private epoch = 0;
 
     constructor(private readonly opts: SessionOptions) {
         this.cwd = opts.cwd;
+        this.backend = opts.backend;
         this.id = opts.resume?.id;
         this.title = opts.resume?.title ?? 'New session';
         if (opts.resume) void this.loadHistory(opts.resume.id);
@@ -235,10 +241,12 @@ export class AgentSession {
     }
 
     private async loadHistory(id: string): Promise<void> {
+        const epoch = this.epoch;
         this.loading = true;
         this.changed();
         try {
-            const messages = await this.opts.backend.history(id, this.cwd);
+            const messages = await this.backend.history(id, this.cwd);
+            if (epoch !== this.epoch) return;
             const entries = this.entries;
             this.entries = [];
             for (const m of messages) {
@@ -249,6 +257,7 @@ export class AgentSession {
             // Anything sent while it was loading comes after.
             this.entries.push(...entries);
         } catch (e) {
+            if (epoch !== this.epoch) return;
             this.entries.unshift({ t: 'Notice', text: `Can't read the session: ${(e as Error).message}`, error: true });
         }
         this.loading = false;
@@ -268,7 +277,9 @@ export class AgentSession {
         }
         this.running = true;
         this.changed();
+        const epoch = this.epoch;
         void this.ensureStarted().then((q) => {
+            if (epoch !== this.epoch) return;
             if (!q) {
                 this.running = false;
                 this.changed();
@@ -298,9 +309,11 @@ export class AgentSession {
     private async start(): Promise<AgentQuery | undefined> {
         const input = new Channel<SDKUserMessage>();
         this.stderr = '';
+        const epoch = this.epoch;
+        const backend = this.backend;
         let query: AgentQuery;
         try {
-            query = await this.opts.backend.start({
+            query = await backend.start({
                 cwd: this.cwd,
                 prompt: input,
                 resume: this.id,
@@ -316,7 +329,7 @@ export class AgentSession {
             this.notice(`Can't start the agent: ${(e as Error).message}`, true);
             return undefined;
         }
-        if (this.closed) {
+        if (this.closed || epoch !== this.epoch) {
             query.close();
             return undefined;
         }
@@ -340,10 +353,11 @@ export class AgentSession {
             }
         }
         input.end();
-        if (this.query === query) {
-            this.query = undefined;
-            this.input = undefined;
-        }
+        // A backend switch (or close) may have replaced this query; then its
+        // state belongs to the session now.
+        if (this.query !== query) return;
+        this.query = undefined;
+        this.input = undefined;
         this.running = false;
         this.live = undefined;
         this.status = undefined;
@@ -384,7 +398,7 @@ export class AgentSession {
         switch (m.subtype) {
             case 'init':
                 this.id = m.session_id;
-                this.activeModel = m.model;
+                if (m.model) this.activeModel = m.model;
                 this.mode = m.permissionMode;
                 void this.refreshContext();
                 void this.refreshUsage();
@@ -453,7 +467,7 @@ export class AgentSession {
         void this.refreshUsage();
         const id = this.id;
         if (id !== undefined) {
-            this.opts.backend.title(id, this.cwd).then(
+            this.backend.title(id, this.cwd).then(
                 (title) => {
                     if (title && title !== this.title) {
                         this.title = title;
@@ -528,12 +542,12 @@ export class AgentSession {
     }
 
     private toolDone(tool: Extract<Entry, { t: 'Tool' }>): void {
-        if (tool.name === 'Bash') {
+        if (/^(?:bash|shell)$/i.test(tool.name)) {
             this.opts.onFiles(undefined);
             return;
         }
         if (!FILE_TOOLS.includes(tool.name)) return;
-        const file = tool.input.file_path ?? tool.input.notebook_path;
+        const file = tool.input.file_path ?? tool.input.notebook_path ?? tool.input.filePath ?? tool.input.path;
         if (typeof file === 'string') this.opts.onFiles([file]);
     }
 
@@ -714,20 +728,50 @@ export class AgentSession {
         );
     }
 
-    /** The models Claude Code offers (starting it, to ask). */
+    /** The models the session's backend offers (starting it, to ask, when
+     * the backend has no list of its own). */
     async models(): Promise<ModelInfo[]> {
+        if (this.backend.models) return this.backend.models(this.cwd);
         const q = await this.ensureStarted();
         return q ? q.supportedModels() : [];
+    }
+
+    /** Use another agent backend, starting a new conversation (the two keep
+     * their sessions separately). */
+    switchBackend(backend: AgentBackend): void {
+        if (backend.id === this.backend.id) return;
+        this.epoch++;
+        this.stopQuery();
+        this.backend = backend;
+        this.id = undefined;
+        this.title = 'New session';
+        this.entries = [];
+        this.loading = false;
+        this.live = undefined;
+        this.activeModel = undefined;
+        this.context = undefined;
+        this.usage = undefined;
+        this.lastReply = undefined;
+        this.cost = 0;
+        this.notice(`Switched to ${backend.label}; this is a new session`);
+    }
+
+    /** Stop the session's process, for a backend switch. */
+    private stopQuery(): void {
+        this.dropPrompts();
+        this.input?.end();
+        this.query?.close();
+        this.input = undefined;
+        this.query = undefined;
+        this.running = false;
+        this.live = undefined;
+        this.status = undefined;
     }
 
     /** Stop the session's process. It stays on disk, to resume later. */
     close(): void {
         this.closed = true;
-        this.dropPrompts();
-        this.input?.end();
-        this.query?.close();
-        this.query = undefined;
-        this.running = false;
+        this.stopQuery();
     }
 }
 
