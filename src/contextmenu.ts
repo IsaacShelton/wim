@@ -6,11 +6,14 @@ import { DrawCmd } from './protocol';
 import { textWidth } from './textwidth';
 import { theme } from './theme';
 
-export type MenuAction = 'cut' | 'copy' | 'paste' | 'selectAll' | 'wrap';
+export type MenuAction = 'cut' | 'copy' | 'paste' | 'selectAll' | 'wrap' | 'reveal';
 
 export interface MenuItem {
     action: MenuAction;
     label: string;
+    /** The file or folder an action applies to, when it isn't the editor's
+     * current selection (used by `reveal`). */
+    path?: string;
     /** Shown at the right, such as the shortcut. */
     hint?: string;
     /** Greyed out and not clickable. */

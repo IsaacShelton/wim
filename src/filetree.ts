@@ -109,6 +109,11 @@ export class FileTree {
         this.rebuild();
     }
 
+    /** The directory the tree is rooted at. */
+    get rootPath(): string {
+        return this.root;
+    }
+
     setViewRows(rows: number): void {
         this.viewRows = Math.max(rows, 1);
         this.keepSelectionVisible();

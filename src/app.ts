@@ -22,7 +22,7 @@ import { isCmdLine, isInsert } from './editor/mode';
 import { Range } from './editor/range';
 import { lineMatches } from './editor/search';
 import { lineRows } from './editor/wrap';
-import { ContextMenu, MenuAction, MenuItem } from './contextmenu';
+import { ContextMenu, MenuItem } from './contextmenu';
 import { FileTree, GitStatus } from './filetree';
 import { Glide } from './glide';
 import { GitDiff, LineChange } from './gitdiff';
@@ -45,7 +45,7 @@ import { AudioCommand, Caret, ClientMessage, DrawCmd, TextStyle } from './protoc
 import { charWidth, cutText, cutTextStart, textWidth } from './textwidth';
 import { TerminalAction, TerminalPane, createTerminal } from './terminal';
 import { isThemeName, setTheme, theme, themeName, tokenColor, tokenStyle } from './theme';
-import { openDefaultBrowser } from './window';
+import { openDefaultBrowser, revealInFolder } from './window';
 import { Direction, SplitDir, Win, WinRect, Windows } from './windows';
 
 const TEXT_PADDING = 6;
@@ -185,6 +185,9 @@ export interface AppOptions {
     /** Opens a web link from a Markdown file (by default, in the default
      * browser). */
     openUrl?: (url: string) => void;
+    /** Shows a file or folder in the system file manager (by default, in
+     * Finder or Explorer). */
+    revealPath?: (path: string) => void;
 }
 
 export class WimApp {
@@ -1925,8 +1928,14 @@ export class WimApp {
                 { action: 'paste', label: 'Paste', hint: hint('V') },
             );
         } else if (layout.sidebar && contains(layout.sidebar, x, y)) {
-            this.menu = undefined;
-            return;
+            this.editorToNormal();
+            this.focus = 'Tree';
+            // Right-clicking a row targets it; the empty space below the rows
+            // targets the folder the tree is showing.
+            const index = this.tree.scroll + Math.floor((y - layout.sidebar.top) / layout.lineH);
+            const row = this.tree.rows[index];
+            if (row) this.tree.select(index);
+            items.push({ action: 'reveal', label: 'Reveal in Folder', path: row?.path ?? this.tree.rootPath });
         } else if (contains(layout.textArea, x, y) || layout.windows.some((w) => contains(w.area, x, y))) {
             const hit = layout.windows.find((w) => contains(w.area, x, y));
             if (hit && (hit.win !== this.windows.active || this.focus !== 'Editor')) {
@@ -1958,18 +1967,21 @@ export class WimApp {
         this.menu = undefined;
     }
 
-    private runMenuAction(action: MenuAction): void {
-        switch (action) {
+    private runMenuAction(item: MenuItem): void {
+        switch (item.action) {
             case 'cut':
             case 'copy':
             case 'paste':
-                this.command(action);
+                this.command(item.action);
                 break;
             case 'selectAll':
                 this.editor.handleKeys(parseKeys('<Esc>ggVG'));
                 break;
             case 'wrap':
                 this.toggleWrap();
+                break;
+            case 'reveal':
+                if (item.path !== undefined) (this.opts.revealPath ?? revealInFolder)(item.path);
                 break;
         }
     }
@@ -1989,7 +2001,7 @@ export class WimApp {
         // a disabled item or a divider does nothing.
         if (i === undefined && menu.contains(x, y, charW, lineH, width, height)) return true;
         this.closeMenu();
-        if (i !== undefined) this.runMenuAction(menu.items[i].action);
+        if (i !== undefined) this.runMenuAction(menu.items[i]);
         return true;
     }
 
@@ -2001,7 +2013,7 @@ export class WimApp {
         else if (key.key === 'Enter') {
             const item = menu.hover !== undefined ? menu.items[menu.hover] : undefined;
             this.closeMenu();
-            if (item) this.runMenuAction(item.action);
+            if (item) this.runMenuAction(item);
         } else this.closeMenu();
     }
 

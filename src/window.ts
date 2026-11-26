@@ -306,3 +306,16 @@ export function openDefaultBrowser(url: string): void {
                 : ['xdg-open', [url]];
     spawn(cmd, args, { stdio: 'ignore', detached: true }).on('error', () => { }).unref();
 }
+
+/** Show `p` in the system file manager: Finder's "Reveal in Finder", or
+ * Explorer with the item selected. On Linux, where there is no common way to
+ * select an item, the containing folder is opened instead. */
+export function revealInFolder(p: string): void {
+    const [cmd, args] =
+        process.platform === 'darwin'
+            ? ['open', ['-R', p]]
+            : process.platform === 'win32'
+                ? ['explorer.exe', [`/select,${p}`]]
+                : ['xdg-open', [path.dirname(p)]];
+    spawn(cmd, args, { stdio: 'ignore', detached: true }).on('error', () => { }).unref();
+}

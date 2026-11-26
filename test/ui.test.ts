@@ -216,7 +216,8 @@ test('a directory argument becomes the working directory, with no file open', ()
         assert.equal(h.app.editor.filePath, undefined);
         assert.equal(h.app.editor.message, undefined, 'no error about the directory');
         assert.match(h.text(), /\[No Name\]/);
-        h.type('<C-n><CR>j<CR>');
+        // Opening a directory starts with the tree open and focused.
+        h.type('<CR>j<CR>');
         assert.equal(h.app.editor.filePath, path.join(dir, 'src', 'main.rs'));
         assert.equal(h.app.editor.buffer.text(), 'fn main() {}');
     } finally {
@@ -315,7 +316,7 @@ test(':q exits when nothing is modified', () => {
 test('Cmd+V pastes the clipboard in Insert mode', () => {
     const clipboard = new MemoryClipboard();
     clipboard.text = 'pasted';
-    const app = new WimApp({ icons: false, clipboard, onFrame: () => {}, onQuit: () => {} });
+    const app = new WimApp({ icons: false, clipboard, onFrame: () => { }, onQuit: () => { } });
     app.handleMessage({ t: 'key', key: 'i', ctrl: false, alt: false });
     app.handleMessage({ t: 'command', name: 'paste' });
     assert.equal(app.editor.buffer.text(), 'pasted');
@@ -687,7 +688,7 @@ test('Rust tokens as tree-sitter sorts them', () => {
     assert.equal(
         kinds('use std::f32::consts::{PI, TAU};'),
         'use:Keyword std:Module :::Delimiter f32:BuiltinType :::Delimiter consts:Module :::Delimiter {:Bracket ' +
-            'PI:Type ,:Delimiter TAU:Type }:Bracket ;:Delimiter',
+        'PI:Type ,:Delimiter TAU:Type }:Bracket ;:Delimiter',
     );
     assert.equal(
         kinds('#[derive(Copy, Debug)]'),
@@ -697,8 +698,8 @@ test('Rust tokens as tree-sitter sorts them', () => {
     assert.equal(
         kinds('pub fn up() -> Self { Rotation::from_radians(TAU * 0.5) }'),
         'pub:Keyword fn:Keyword up:Function (:Bracket ):Bracket ->:Delimiter Self:SelfType {:Bracket ' +
-            'Rotation:Type :::Delimiter from_radians:Function (:Bracket TAU:Constant *:Operator 0.5:Number ' +
-            '):Bracket }:Bracket',
+        'Rotation:Type :::Delimiter from_radians:Function (:Bracket TAU:Constant *:Operator 0.5:Number ' +
+        '):Bracket }:Bracket',
     );
     assert.equal(kinds('fn lerp<T>(&self) -> bool { self.0 == None }').includes('lerp:Function'), true);
     assert.match(kinds('fn lerp<T>(&self) -> bool { self.0 == None }'), /&:Operator self:Keyword .*0:Property .*None:BuiltinConstant/);
@@ -970,7 +971,7 @@ test('the server serves only images and sounds, only with the token, in ranges',
     fs.writeFileSync(png, pngHeader(1, 1));
     fs.writeFileSync(mp3, '0123456789');
     fs.writeFileSync(txt, 'secret');
-    const server = await startServer({ onConnection: () => {} });
+    const server = await startServer({ onConnection: () => { } });
     const get = (url: string, range?: string): Promise<[number, string, string, string]> =>
         new Promise((resolve) =>
             http.get(url, { headers: range ? { range } : {} }, (res) => {
@@ -1015,7 +1016,7 @@ test('a sound opens in a player', () => {
             servers: [],
             onFrame: (_t, _d, cmds) => frames.push(cmds),
             onAudio: (cmd) => sent.push(cmd),
-            onQuit: () => {},
+            onQuit: () => { },
         });
         const send = (msg: ClientMessage): void => app.handleMessage(msg);
         const type = (keys: string): void => {
@@ -1600,6 +1601,56 @@ test('a menu asks the window for the pointer while it is open', () => {
     assert.equal(tracking[tracking.length - 1], true);
     h.type('<Esc>');
     assert.equal(tracking[tracking.length - 1], false);
+});
+
+test('right-clicking a tree file reveals it in the folder', () => {
+    const dir = tempDir('app-tree-reveal');
+    const first = path.join(dir, 'a.txt');
+    const second = path.join(dir, 'b.txt');
+    fs.writeFileSync(first, 'alpha\n');
+    fs.writeFileSync(second, 'beta\n');
+    const revealed: string[] = [];
+    const cwd = process.cwd();
+    process.chdir(dir);
+    try {
+        const h = harness(undefined, [], { revealPath: (p) => revealed.push(p) });
+        h.type('<C-n>');
+        // The sidebar starts at y=0 and each row is 20px tall in the harness.
+        h.send({ t: 'context', x: 10, y: 25 });
+        assert.ok(drawn(h).includes('Reveal in Folder'), 'the tree has a context menu');
+        const at = h.frames[h.frames.length - 1].find((c) => c[0] === 'text' && c[3] === 'Reveal in Folder')!;
+        h.send({ t: 'mouse', kind: 'down', x: Number(at[1]) + 5, y: Number(at[2]) + 5 });
+        assert.deepEqual(revealed, [second], 'the clicked file is revealed');
+
+        // The menu also works from the keyboard.
+        h.send({ t: 'context', x: 10, y: 5 });
+        h.type('<Down><CR>');
+        assert.deepEqual(revealed, [second, first]);
+    } finally {
+        process.chdir(cwd);
+        fs.rmSync(dir, { recursive: true });
+    }
+});
+
+test('right-clicking empty tree space reveals the tree folder', () => {
+    const dir = tempDir('app-tree-empty-reveal');
+    fs.writeFileSync(path.join(dir, 'a.txt'), 'alpha\n');
+    const revealed: string[] = [];
+    const cwd = process.cwd();
+    process.chdir(dir);
+    try {
+        const h = harness(undefined, [], { revealPath: (p) => revealed.push(p) });
+        h.type('<C-n>');
+        // Below the only row, but still inside the sidebar.
+        h.send({ t: 'context', x: 10, y: 100 });
+        assert.ok(drawn(h).includes('Reveal in Folder'));
+        const at = h.frames[h.frames.length - 1].find((c) => c[0] === 'text' && c[3] === 'Reveal in Folder')!;
+        h.send({ t: 'mouse', kind: 'down', x: Number(at[1]) + 5, y: Number(at[2]) + 5 });
+        assert.deepEqual(revealed, [dir], 'the tree root is revealed');
+    } finally {
+        process.chdir(cwd);
+        fs.rmSync(dir, { recursive: true });
+    }
 });
 
 test('Wrap Lines is also on <leader>tw', () => {
