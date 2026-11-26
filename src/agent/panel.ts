@@ -185,6 +185,12 @@ function money(amount: number, currency: string): string {
     return currency === 'USD' ? `$${amount.toFixed(2)}` : `${amount.toFixed(2)} ${currency}`;
 }
 
+/** What a session has cost, with a third decimal while it is small enough
+ * that cents would all read as $0.00. */
+function costText(cost: number): string {
+    return `$${cost < 0.1 ? cost.toFixed(3) : cost.toFixed(2)}`;
+}
+
 const HELP: [string, string][] = [
     ['i  a  Enter', 'Type a message'],
     ['S', 'Clear the prompt and type a new message'],
@@ -1387,6 +1393,9 @@ export class AgentPanel {
         } else {
             bottom.part('context', theme.COMMENT, { t: 'Context' });
         }
+        // What the session has spent, before the less important parts, so it
+        // shows on narrow panels too.
+        if (s.cost > 0 && bottom.room() > 9) bottom.part(costText(s.cost), theme.COMMENT);
         const limit = this.worstLimit(s.usage);
         if (limit && bottom.room() > METER_COLS + 12) {
             const percent = Math.round(limit.utilization);
@@ -1401,7 +1410,6 @@ export class AgentPanel {
             if (left <= 0) bottom.part('cache cold', theme.ERROR);
             else bottom.part(`cache ${left < 60000 ? '<1m' : until(expiry, now)}`, left < 60000 ? theme.DIAGNOSTIC_WARN : theme.STRING);
         }
-        if (s.cost > 0 && bottom.room() > 9) bottom.part(`$${s.cost.toFixed(2)}`, theme.COMMENT);
         return y + 2 * lh;
     }
 
@@ -1431,6 +1439,10 @@ export class AgentPanel {
         const balance = s.balance;
         if (balance) {
             cv.text(x, y, cut(`Account balance: ${money(balance.available, balance.currency)} available`, cols), theme.FG);
+            y += lh;
+        }
+        if (s.cost > 0) {
+            cv.text(x, y, cut(`This session has cost ${costText(s.cost)}`, cols), theme.FG);
             y += lh;
         }
         const usage = s.usage;

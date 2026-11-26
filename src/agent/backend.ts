@@ -12,11 +12,16 @@ export type {
     PermissionMode,
     PermissionResult,
     PermissionUpdate,
-    SDKControlGetContextUsageResponse as ContextUsage,
     SDKControlGetUsageResponse as UsageInfo,
     SDKMessage,
     SDKUserMessage,
 } from '@anthropic-ai/claude-agent-sdk';
+
+/** Claude Code's context breakdown, and what the session has cost so far for
+ * backends that can say before a turn ends (OpenCode). */
+export type ContextUsage = sdk.SDKControlGetContextUsageResponse & {
+    cost?: number;
+};
 
 /** The part of the SDK's `Query` Wim uses: the session's messages, and
  * control requests while it runs. */
@@ -26,7 +31,7 @@ export interface AgentQuery extends AsyncIterable<sdk.SDKMessage> {
     setPermissionMode(mode: sdk.PermissionMode): Promise<void>;
     applyFlagSettings(settings: { effortLevel?: sdk.EffortLevel | null }): Promise<void>;
     supportedModels(): Promise<sdk.ModelInfo[]>;
-    getContextUsage(opts?: { detail?: 'summary' | 'full' }): Promise<sdk.SDKControlGetContextUsageResponse>;
+    getContextUsage(opts?: { detail?: 'summary' | 'full' }): Promise<ContextUsage>;
     /** The plan's usage limits (5-hour, weekly), when Claude Code can say. */
     getUsage?(): Promise<sdk.SDKControlGetUsageResponse>;
     close(): void;

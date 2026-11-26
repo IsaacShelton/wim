@@ -24,6 +24,7 @@ import {
     UsageInfo,
 } from '../src/agent/backend';
 import { TextInput } from '../src/agent/input';
+import { contextFromMessages } from '../src/agent/opencode';
 import { WimApp } from '../src/app';
 import { MemoryClipboard } from '../src/clipboard';
 import { Config, defaultConfig } from '../src/config';
@@ -47,6 +48,17 @@ class FakeQuery implements AgentQuery {
     effort: unknown = 'unset';
     interrupts = 0;
     closed = false;
+    /** What the context use (and cost) says, when a test changes it. */
+    context: ContextUsage = {
+        categories: [
+            { id: 'system_tools', name: 'System tools', tokens: 26000, color: '', kind: 'used' },
+            { id: 'messages', name: 'Messages', tokens: 8000, color: '', kind: 'used' },
+            { id: 'free_space', name: 'Free space', tokens: 966000, color: '', kind: 'free' },
+        ],
+        totalTokens: 34000,
+        maxTokens: 1000000,
+        percentage: 3.4,
+    } as unknown as ContextUsage;
     private readonly queue: SDKMessage[] = [];
     private waiting: ((r: IteratorResult<SDKMessage>) => void) | undefined;
     private failure: Error | undefined;
@@ -116,16 +128,7 @@ class FakeQuery implements AgentQuery {
     }
 
     getContextUsage(): Promise<ContextUsage> {
-        return Promise.resolve({
-            categories: [
-                { id: 'system_tools', name: 'System tools', tokens: 26000, color: '', kind: 'used' },
-                { id: 'messages', name: 'Messages', tokens: 8000, color: '', kind: 'used' },
-                { id: 'free_space', name: 'Free space', tokens: 966000, color: '', kind: 'free' },
-            ],
-            totalTokens: 34000,
-            maxTokens: 1000000,
-            percentage: 3.4,
-        } as unknown as ContextUsage);
+        return Promise.resolve(this.context);
     }
 
     getUsage(): Promise<UsageInfo> {
@@ -676,6 +679,48 @@ test('the context is broken down by kind, and help lists the keys', async () => 
     assert.match(h.text(), /Keys in the agents panel/);
     h.type('?');
     assert.doesNotMatch(h.text(), /Keys in the agents panel/);
+});
+
+test('OpenCode measures context from the last step, not the session totals', () => {
+    // What message.list returns, newest first: one still streaming, then
+    // the last steps. A session's totals add up every request it made.
+    const messages = [
+        { type: 'assistant', time: { created: 3 } },
+        { type: 'assistant', model: { providerID: 'opencode', id: 'deepseek' }, tokens: { input: 1181, output: 192, reasoning: 157, cache: { read: 55296, write: 0 } } },
+        { type: 'assistant', tokens: { input: 900, output: 50, reasoning: 0, cache: { read: 40000, write: 0 } } },
+    ];
+    assert.deepEqual(contextFromMessages(messages), {
+        tokens: 56826,
+        model: { providerID: 'opencode', id: 'deepseek' },
+    });
+});
+
+test('context use and cost update while a turn runs, not only when it ends', async () => {
+    const h = harness();
+    const q = await chat(h, 'hello');
+    assert.match(h.text(), /3% context/);
+    q.context = {
+        categories: [
+            { id: 'messages', name: 'Messages', tokens: 120000, color: '', kind: 'used' },
+            { id: 'free_space', name: 'Free space', tokens: 880000, color: '', kind: 'free' },
+        ],
+        totalTokens: 120000,
+        maxTokens: 1000000,
+        percentage: 12,
+        cost: 0.05,
+    } as unknown as ContextUsage;
+    // The agent is still working: the reply is not a result yet.
+    q.emit(text('Working on it'));
+    await settle();
+    assert.match(h.text(), /12% context/);
+    assert.match(h.text(), /\$0\.05/);
+    q.emit(result(0));
+    await settle();
+    assert.match(h.text(), /12% context/);
+    assert.match(h.text(), /\$0\.05/, 'the cost survives the turn ending');
+    h.type('<Esc>u');
+    await settle();
+    assert.match(h.text(), /This session has cost \$0\.05/);
 });
 
 test('the conversation scrolls, and follows the end until scrolled up', async () => {

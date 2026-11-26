@@ -96,6 +96,9 @@ const FILE_TOOLS = ['Write', 'Edit', 'MultiEdit', 'NotebookEdit', 'write', 'edit
 /** How much of Claude Code's error output to keep for messages. */
 const STDERR_KEEP = 2000;
 
+/** How often a running turn refreshes its context use and cost, in ms. */
+const CONTEXT_TICK = 2000;
+
 /** A content block from the Messages API, loosely. */
 interface Block {
     type: string;
@@ -222,6 +225,10 @@ export class AgentSession {
     /** Counts backend switches, so a history read from an old agent doesn't
      * land in the new conversation. */
     private epoch = 0;
+    /** When the context was last asked for, and the refresh waiting to run,
+     * so a busy turn doesn't ask on every message. */
+    private contextAsked = 0;
+    private contextTimer: ReturnType<typeof setTimeout> | undefined;
 
     constructor(private readonly opts: SessionOptions) {
         this.cwd = opts.cwd;
@@ -413,6 +420,9 @@ export class AgentSession {
             default:
                 return;
         }
+        // Context use and cost change during a turn, so keep them current
+        // instead of waiting for the turn's result.
+        if (this.running && (m.type === 'assistant' || m.type === 'user')) this.refreshContextSoon();
         this.changed();
     }
 
@@ -508,11 +518,33 @@ export class AgentSession {
         const q = this.query;
         if (!q) return;
         try {
-            this.context = await q.getContextUsage({ detail: 'summary' });
+            const usage = await q.getContextUsage({ detail: 'summary' });
+            this.context = usage;
+            // OpenCode's usage route also says what the session has cost so
+            // far; Claude Code puts that on the turn's result instead.
+            if (typeof usage.cost === 'number') this.cost = usage.cost;
             this.changed();
         } catch {
             // Older versions of Claude Code can't say.
         }
+    }
+
+    /** Ask for the context use (and cost) during a turn, at most once every
+     * `CONTEXT_TICK`, so a stream of messages doesn't flood the agent. */
+    private refreshContextSoon(): void {
+        if (this.contextTimer) return;
+        const wait = Math.max(this.contextAsked + CONTEXT_TICK - Date.now(), 0);
+        if (wait === 0) {
+            this.contextAsked = Date.now();
+            void this.refreshContext();
+            return;
+        }
+        this.contextTimer = setTimeout(() => {
+            this.contextTimer = undefined;
+            this.contextAsked = Date.now();
+            void this.refreshContext();
+        }, wait);
+        this.contextTimer.unref();
     }
 
     /** Ask for the plan's usage limits. */
@@ -802,6 +834,10 @@ export class AgentSession {
     /** Stop the session's process, for a backend switch. */
     private stopQuery(): void {
         this.dropPrompts();
+        if (this.contextTimer) {
+            clearTimeout(this.contextTimer);
+            this.contextTimer = undefined;
+        }
         this.input?.end();
         this.query?.close();
         this.input = undefined;

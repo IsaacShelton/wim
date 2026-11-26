@@ -60,6 +60,24 @@ function modelValue(m: { providerID?: string; modelID?: string; id?: string }): 
     return m.providerID ? `${m.providerID}/${model}` : model;
 }
 
+/** How many tokens a step used: its prompt (cached or not) and whatever it
+ * added. OpenCode's session totals add up every request in the session, so
+ * they grow far past the model's window; a message's own usage is what is in
+ * context after that step. */
+function stepTokens(usage: any): number {
+    return (usage?.input ?? 0) + (usage?.output ?? 0) + (usage?.reasoning ?? 0) + (usage?.cache?.read ?? 0) + (usage?.cache?.write ?? 0);
+}
+
+/** The tokens in context now, from the newest assistant message that has
+ * usage (the newest one may still be streaming), and the model that ran it. */
+export function contextFromMessages(messages: any[]): { tokens: number; model?: ModelRef } {
+    for (const message of messages) {
+        if (!message?.tokens) continue;
+        return { tokens: stepTokens(message.tokens), model: message.model };
+    }
+    return { tokens: 0 };
+}
+
 function contentText(content: any): string {
     if (typeof content === 'string') return content;
     if (!Array.isArray(content)) return '';
@@ -598,11 +616,14 @@ class OpenCodeQuery implements AgentQuery {
 
     async getContextUsage(): Promise<ContextUsage> {
         const session = await this.host.session.get({ sessionID: this.sessionID });
-        const ref = session?.model;
+        // A session's own token totals are every request it ever made, which
+        // is far more than the window; the last completed step says how full
+        // the context is now.
+        const recent = await this.host.message.list({ sessionID: this.sessionID, type: 'assistant', limit: 20, order: 'desc' });
+        const { tokens, model: used } = contextFromMessages(recent?.data ?? []);
+        const ref = used ?? session?.model;
         const models = await this.host.model.list({ location: { directory: this.opts.cwd } });
-        const model = (models?.data ?? []).find((m: any) => (!ref || (m.providerID === ref.providerID && m.modelID === ref.id))) ?? models?.data?.[0];
-        const usage = session?.tokens ?? {};
-        const tokens = (usage.input ?? 0) + (usage.output ?? 0) + (usage.reasoning ?? 0) + (usage.cache?.read ?? 0) + (usage.cache?.write ?? 0);
+        const model = (models?.data ?? []).find((m: any) => ref && m.providerID === ref.providerID && (m.modelID === ref.id || m.id === ref.id));
         const maxTokens = model?.limit?.context ?? 200000;
         return {
             categories: [
@@ -612,6 +633,7 @@ class OpenCodeQuery implements AgentQuery {
             totalTokens: tokens,
             maxTokens,
             percentage: (tokens / Math.max(maxTokens, 1)) * 100,
+            cost: typeof session?.cost === 'number' ? session.cost : undefined,
         } as unknown as ContextUsage;
     }
 
