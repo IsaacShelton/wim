@@ -150,8 +150,9 @@ class Channel<T> implements AsyncIterable<T> {
 export interface SessionOptions {
     backend: AgentBackend;
     cwd: string;
-    /** A saved session to continue, with its title. */
-    resume?: { id: string; title: string };
+    /** A saved session to continue, with its title and when it was last
+     * active. */
+    resume?: { id: string; title: string; modified?: number };
     /** Called whenever anything shown changes. */
     onChange: () => void;
     /** A tool changed files: these, or (undefined) perhaps any. */
@@ -196,6 +197,9 @@ export class AgentSession {
     /** When the API last answered, which is when the prompt cache was last
      * refreshed (undefined before the first reply). */
     lastReply: number | undefined;
+    /** When the session last did anything (a message sent or a reply), for
+     * ordering the session picker. */
+    lastActive: number;
     /** What this session has cost since Wim started it, in US dollars. */
     cost = 0;
     /** Questions waiting for the user, the first one shown. */
@@ -224,6 +228,7 @@ export class AgentSession {
         this.backend = opts.backend;
         this.id = opts.resume?.id;
         this.title = opts.resume?.title ?? 'New session';
+        this.lastActive = opts.resume?.modified ?? Date.now();
         if (opts.resume) void this.loadHistory(opts.resume.id);
     }
 
@@ -277,6 +282,7 @@ export class AgentSession {
         const shown = images.map((i) => `[Image: ${i.name}]`).join(' ');
         this.entries.push({ t: 'User', text: shown === '' ? text : text.trim() === '' ? shown : `${shown}\n${text}` });
         if (this.title === 'New session') this.title = (text.trim() === '' ? shown : text).split('\n')[0].slice(0, 60);
+        this.lastActive = Date.now();
         if (!this.running) {
             this.turnStart = Date.now();
             this.turnTokens = 0;
@@ -394,6 +400,7 @@ export class AgentSession {
                 if (!this.interrupting) this.running = true;
                 this.live = undefined;
                 this.lastReply = Date.now();
+                this.lastActive = this.lastReply;
                 this.addContent('assistant', m.message.content, true);
                 if (m.error && m.error !== 'max_output_tokens') this.notice(`API error: ${m.error}`, true);
                 break;
@@ -442,6 +449,7 @@ export class AgentSession {
         switch (event.type) {
             case 'message_start':
                 this.lastReply = Date.now();
+                this.lastActive = this.lastReply;
                 this.live = undefined;
                 this.status = undefined;
                 break;

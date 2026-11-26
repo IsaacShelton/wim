@@ -646,6 +646,22 @@ test('sessions: n starts another, Tab and numbers switch, s resumes a saved one 
     assert.equal(h.app.agents.sessions.length, 2);
 });
 
+test('the session picker sorts sessions by when they were last active', async () => {
+    const h = harness();
+    const now = Date.now();
+    h.backend.past = [
+        { id: 'old', title: 'Old saved session', modified: now - 5 * 3600_000 },
+        { id: 'new', title: 'Newest saved session', modified: now - 60_000 },
+        { id: 'mid', title: 'Middle saved session', modified: now - 3600_000 },
+    ];
+    h.send({ t: 'command', name: 'agents' });
+    h.type('<Esc>s');
+    await settle();
+    const t = h.text();
+    assert.ok(t.indexOf('Newest saved session') < t.indexOf('Middle saved session'), 'newest saved first');
+    assert.ok(t.indexOf('Middle saved session') < t.indexOf('Old saved session'), 'oldest saved last');
+});
+
 test('the context is broken down by kind, and help lists the keys', async () => {
     const h = harness();
     const q = await chat(h, 'hi');

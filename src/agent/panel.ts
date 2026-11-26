@@ -48,7 +48,10 @@ type Hit =
     | { t: 'Detach'; index: number }
     | { t: 'Transcript' };
 
-type SessionChoice = { t: 'New' } | { t: 'Open'; index: number } | { t: 'Resume'; id: string; title: string; backend: string };
+type SessionChoice =
+    | { t: 'New' }
+    | { t: 'Open'; index: number }
+    | { t: 'Resume'; id: string; title: string; backend: string; modified: number };
 
 /** A model, and the agent that would run it. */
 export interface ModelChoice {
@@ -348,7 +351,7 @@ export class AgentPanel {
         return id === undefined ? undefined : this.opts.backends.find((b) => b.id === id);
     }
 
-    newSession(resume?: { id: string; title: string; backend?: string }): AgentSession {
+    newSession(resume?: { id: string; title: string; backend?: string; modified?: number }): AgentSession {
         const presetName = resume === undefined ? this.opts.defaultPreset : undefined;
         const preset = presetName === undefined ? undefined : this.opts.presets[presetName];
         const backend = this.backendById(resume?.backend) ?? this.backendForModel(preset?.model) ?? this.opts.backends[0];
@@ -369,7 +372,7 @@ export class AgentPanel {
         return this.backendById(this.resolveModel(model, preferred)?.backend);
     }
 
-    private createSession(backend: AgentBackend, resume?: { id: string; title: string }): AgentSession {
+    private createSession(backend: AgentBackend, resume?: { id: string; title: string; modified?: number }): AgentSession {
         return new AgentSession({
             backend,
             cwd: this.opts.cwd(),
@@ -1006,16 +1009,21 @@ export class AgentPanel {
 
     private sessionPicker(): PanelAction {
         const items: PickerItem<SessionChoice>[] = [{ label: '+ New session', value: { t: 'New' } }];
+        // When each session was last active, so open and saved ones sort
+        // together.
+        const active = new Map<SessionChoice, number>();
         this.sessions.forEach((s, index) => {
             const backend = this.opts.backends.length > 1 ? ` · ${s.backend.label}` : '';
-            items.push({ label: s.title, detail: `${s.running ? 'open · working' : 'open'}${backend}`, value: { t: 'Open', index } });
+            const value: SessionChoice = { t: 'Open', index };
+            items.push({ label: s.title, detail: `${s.running ? 'open · working' : 'open'}${backend}`, value });
+            active.set(value, s.lastActive);
         });
         const picker = new Picker<SessionChoice>(
             'Agent Sessions',
             (choice) => {
                 if (choice.t === 'New') this.newSession();
                 else if (choice.t === 'Open') this.current = choice.index;
-                else this.resume(choice.id, choice.title, choice.backend);
+                else this.resume(choice.id, choice.title, choice.backend, choice.modified);
                 this.focus = 'Input';
             },
             { items, message: 'No sessions' },
@@ -1036,12 +1044,18 @@ export class AgentPanel {
                         if (open.has(`${past.backend}:${past.id}`)) continue;
                         const who = this.opts.backends.length > 1 ? ` · ${this.backendById(past.backend)?.label ?? past.backend}` : '';
                         const detail = `${ago(past.modified)}${past.branch ? ` · ${past.branch}` : ''}${who}`;
-                        items.push({ label: past.title, detail, value: { t: 'Resume', id: past.id, title: past.title, backend: past.backend! } });
+                        const value: SessionChoice = { t: 'Resume', id: past.id, title: past.title, backend: past.backend!, modified: past.modified };
+                        items.push({ label: past.title, detail, value });
+                        active.set(value, past.modified);
                     }
                 }
+                // Most recently active first, whichever agent saved it.
+                const sorted = items.filter((item) => item.value.t === 'New').concat(
+                    items.filter((item) => item.value.t !== 'New').sort((a, b) => (active.get(b.value) ?? 0) - (active.get(a.value) ?? 0)),
+                );
                 picker.busy = false;
                 const error = failed.length === results.length ? `Can't list sessions: ${(failed[0] as PromiseRejectedResult).reason?.message ?? failed[0]}` : undefined;
-                picker.setItems(items, error ?? 'No sessions', true);
+                picker.setItems(sorted, error ?? 'No sessions');
                 this.opts.refresh();
             },
         );
@@ -1049,10 +1063,10 @@ export class AgentPanel {
     }
 
     /** Continue a saved session (or switch to it, if it is open). */
-    resume(id: string, title: string, backend?: string): void {
+    resume(id: string, title: string, backend?: string, modified?: number): void {
         const open = this.sessions.findIndex((s) => s.id === id && (backend === undefined || s.backend.id === backend));
         if (open >= 0) this.current = open;
-        else this.newSession({ id, title, backend });
+        else this.newSession({ id, title, backend, modified });
     }
 
     /** A model's name, in `backend` or (left out) any of them. */
