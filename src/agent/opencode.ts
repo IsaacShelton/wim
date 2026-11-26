@@ -4,7 +4,7 @@
 // are translated into the same messages the Claude Agent SDK sends, so the
 // panel draws both the same way.
 
-import { AgentBackend, AgentQuery, ContextUsage, HistoryMessage, ModelInfo, PastSession, PermissionResult, StartOptions, UsageInfo } from './backend';
+import { AccountBalance, AgentBackend, AgentQuery, ContextUsage, HistoryMessage, ModelInfo, PastSession, PermissionResult, StartOptions, UsageInfo } from './backend';
 
 /** The parts of the OpenCode client backend.ts uses. They are kept loose so
  * the SDK stays an optional dependency, imported only when OpenCode is on. */
@@ -13,6 +13,21 @@ type Client = any;
 // The SDK is an ES module and Wim is compiled to CommonJS, whose `import()`
 // TypeScript would turn into `require()`; this keeps a real `import()`.
 const importModule = new Function('specifier', 'return import(specifier)') as (specifier: string) => Promise<unknown>;
+
+/** The console's balance is in micro-cents: 100,000,000 of them make $1. */
+const MICRO_CENTS = 100_000_000;
+
+/** How long a balance is trusted before asking the console again. */
+const BALANCE_TTL = 30_000;
+
+/** The console refuses requests that don't look like a browser's. */
+const CONSOLE_USER_AGENT = 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/142.0.0.0 Safari/537.36';
+
+/** One of the console's account routes, from the URL its credential names. */
+function consoleUrl(server: unknown, route: string): string {
+    const base = typeof server === 'string' && server !== '' ? server : 'https://opencode.ai/console';
+    return `${base.replace(/\/+$/, '')}${route}`;
+}
 
 let loaded: Promise<{ client: Client; service: Client }> | undefined;
 
@@ -75,6 +90,7 @@ export class OpenCodeBackend implements AgentBackend {
     readonly label = 'OpenCode';
     private hostPromise: Promise<Client> | undefined;
     private readonly modelsByDir = new Map<string, ModelInfo[]>();
+    private balanceCache: { at: number; balance: AccountBalance } | undefined;
 
     private host(): Promise<Client> {
         this.hostPromise ??= load()
@@ -106,6 +122,53 @@ export class OpenCodeBackend implements AgentBackend {
             }));
         this.modelsByDir.set(dir, models);
         return models;
+    }
+
+    /** What is left of the signed-in Console workspace's balance. OpenCode's
+     * API has no balance route yet, so this asks the console's billing route
+     * with the credential OpenCode saved, as its billing page does. */
+    async balance(dir: string): Promise<AccountBalance | undefined> {
+        const now = Date.now();
+        if (this.balanceCache && now - this.balanceCache.at < BALANCE_TTL) return this.balanceCache.balance;
+        const balance = await this.consoleBalance(dir);
+        // A failed read isn't kept, so the next ask can try again.
+        if (balance) this.balanceCache = { at: now, balance };
+        return balance;
+    }
+
+    private async consoleBalance(dir: string): Promise<AccountBalance | undefined> {
+        try {
+            const host = await this.host();
+            const credentials = await host.credential.list();
+            const credential = (credentials ?? []).find(
+                (c: any) => c?.active !== false && c?.integrationID === 'opencode' && typeof c?.value?.access === 'string' && c.value.access !== '',
+            );
+            if (!credential) return undefined;
+            const value = credential.value;
+            const metadata = value.metadata ?? {};
+            let org = typeof metadata.orgID === 'string' ? metadata.orgID : undefined;
+            if (!org) {
+                const limits = await host.experimental.usage.limits({ location: { directory: dir } }).catch(() => undefined);
+                org = limits?.data?.workspace?.id;
+            }
+            if (!org) return undefined;
+            const response = await fetch(consoleUrl(metadata.server, '/api/billing/status'), {
+                headers: {
+                    authorization: `Bearer ${value.access}`,
+                    'x-org-id': org,
+                    accept: 'application/json',
+                    'user-agent': CONSOLE_USER_AGENT,
+                },
+            });
+            if (!response.ok) return undefined;
+            const info = (await response.json()) as { availableMicroCents?: string | number; balanceMicroCents?: string | number };
+            const micro = Number(info.availableMicroCents ?? info.balanceMicroCents);
+            if (!Number.isFinite(micro)) return undefined;
+            return { available: micro / MICRO_CENTS, currency: 'USD' };
+        } catch {
+            // No console sign-in (or no balance route): there is nothing to show.
+            return undefined;
+        }
     }
 
     private async ref(dir: string, value: string | undefined): Promise<ModelRef | undefined> {

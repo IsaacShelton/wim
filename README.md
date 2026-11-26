@@ -101,8 +101,8 @@ default, and a mistake in it is reported at startup and ignored.
 | --- | --- |
 | `theme` | `onedark` (default) or `nord`; `,th` still switches while running |
 | `claude.enabled` | Whether Wim connects to Claude Code at all (default `false`: the agents panel and its badge are off) |
-| `claude.presets` | The model (an alias such as `haiku`, or an id) and effort (`low`, `medium`, `high`, `xhigh`, `max`) for low, medium and high complexity tasks |
-| `claude.defaultPreset` | The preset new sessions start with (default `high`; `null` keeps Claude Code's own settings) |
+| `claude.presets` | The model (an alias such as `haiku`, an id, or an OpenCode model name such as `provider/model`) and effort (`low`, `medium`, `high`, `xhigh`, `max`) for low, medium and high complexity tasks; the preset's model chooses the agent that runs it |
+| `claude.defaultPreset` | The preset new sessions start with (default `high`; `null` keeps the agent's own settings). A preset naming an OpenCode model starts the session on OpenCode |
 | `claude.cacheMinutes` | How long the prompt cache lasts after a request, for the cache indicator (default 60) |
 | `opencode.enabled` | Whether Wim connects to OpenCode too (default `false`). With it on, the model picker lists OpenCode's models alongside Claude Code's; a Claude model appears under both agents, and picking one chooses which runs it |
 | `terminal.shell` | The shell the terminal runs (default `zsh`, or `powershell.exe` on Windows) |
@@ -361,7 +361,7 @@ its own copy of Claude Code) or an OpenCode session (through the
 with that agent's own settings, tools, instructions and sign-in. Which one runs a session follows
 from its model: `m` lists every model both agents offer, and a Claude model appears once for each
 agent. Picking one switches the session to that agent automatically (starting a new conversation
-when the agent changes). Its process starts with the first message. Several can be open at once,
+when the agent changes), as does a preset whose model belongs to another agent. Its process starts with the first message. Several can be open at once,
 as tabs along the top of the panel; sessions are saved by their agent as usual, so any of them
 (from Wim or the terminal) can be resumed with its history.
 
@@ -374,15 +374,16 @@ week), the prompt cache and the cost. The cache shows the time left (`cache 3m`;
 last minute) and turns red as `cache cold` once it has run out, when the next message has to
 send the whole conversation again; it is counted from the last reply, so it is an estimate
 (`claude.cacheMinutes` sets its length). The meters go from green to yellow at 50% and red at 80%.
-OpenCode sessions show their own model name and usage instead; the context meter is about the
-session's model window.
+OpenCode sessions show their own model name and usage instead, and the balance left in the signed-in
+OpenCode Console account (`balance $8.83`); the context meter is about the session's model window.
 
 **Presets** are the model and effort for a low, medium or high complexity task, set in
-`wim.config.json` (see [Settings](#settings)), for Claude Code sessions. `L`, `M` and `H` switch the session to one
+`wim.config.json` (see [Settings](#settings)), for either agent: the preset's model picks the agent
+that offers it, so a preset can name a Claude Code model or an OpenCode one. `L`, `M` and `H` switch the session to one
 (even while it works: it applies to the next request), `P` or a click on the preset picks one,
 and `u` (or a click on the plan limit) shows the plan's usage limits, as `/usage` does: the
 5-hour and weekly windows with when they reset. Plan limits only exist for Claude subscriptions;
-OpenCode reports its Go limits when there are any.
+OpenCode reports its Go limits when there are any, as well as the account balance left.
 
 The panel has two modes, like Vim. In the prompt at the bottom, Enter sends (a `\` before it,
 or Option/Alt with it, makes a new line instead), Up/Down go through earlier messages, Esc

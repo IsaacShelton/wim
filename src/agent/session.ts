@@ -4,6 +4,7 @@
 // starts again, resuming the session, if it has stopped.
 
 import {
+    AccountBalance,
     AgentBackend,
     AgentQuery,
     CanUseTool,
@@ -190,6 +191,8 @@ export class AgentSession {
     context: ContextUsage | undefined;
     /** The plan's usage limits, as last asked. */
     usage: UsageInfo | undefined;
+    /** The provider account's remaining balance, when it has one. */
+    balance: AccountBalance | undefined;
     /** When the API last answered, which is when the prompt cache was last
      * refreshed (undefined before the first reply). */
     lastReply: number | undefined;
@@ -202,6 +205,9 @@ export class AgentSession {
     private query: AgentQuery | undefined;
     private input: Channel<SDKUserMessage> | undefined;
     private starting: Promise<AgentQuery | undefined> | undefined;
+    /** Work to finish before the process starts (choosing a preset's agent,
+     * say). */
+    private ready: Promise<unknown> = Promise.resolve();
     private readonly tools = new Map<string, Extract<Entry, { t: 'Tool' }>>();
     private stderr = '';
     /** Interrupted, until the turn's result comes; and whether the
@@ -277,12 +283,13 @@ export class AgentSession {
         }
         this.running = true;
         this.changed();
-        const epoch = this.epoch;
         void this.ensureStarted().then((q) => {
-            if (epoch !== this.epoch) return;
-            if (!q) {
-                this.running = false;
-                this.changed();
+            // The session may have switched agents (or closed) while starting.
+            if (!q || this.query !== q) {
+                if (!q) {
+                    this.running = false;
+                    this.changed();
+                }
                 return;
             }
             const content: SDKUserMessage['message']['content'] =
@@ -296,10 +303,17 @@ export class AgentSession {
         });
     }
 
+    /** Do `work` before the process starts, so a message sent while the
+     * session's settings are still being worked out waits for them. */
+    waitFor(work: () => Promise<unknown>): void {
+        this.ready = this.ready.then(work).catch(() => {});
+    }
+
     /** Start Claude Code (resuming the session, if it has an id). */
-    ensureStarted(): Promise<AgentQuery | undefined> {
-        if (this.query) return Promise.resolve(this.query);
-        if (this.closed) return Promise.resolve(undefined);
+    async ensureStarted(): Promise<AgentQuery | undefined> {
+        await this.ready;
+        if (this.query) return this.query;
+        if (this.closed) return undefined;
         this.starting ??= this.start().finally(() => {
             this.starting = undefined;
         });
@@ -307,6 +321,7 @@ export class AgentSession {
     }
 
     private async start(): Promise<AgentQuery | undefined> {
+        await this.ready;
         const input = new Channel<SDKUserMessage>();
         this.stderr = '';
         const epoch = this.epoch;
@@ -402,6 +417,7 @@ export class AgentSession {
                 this.mode = m.permissionMode;
                 void this.refreshContext();
                 void this.refreshUsage();
+                void this.refreshBalance();
                 break;
             case 'status':
                 if (m.permissionMode) this.mode = m.permissionMode;
@@ -465,6 +481,7 @@ export class AgentSession {
         }
         void this.refreshContext();
         void this.refreshUsage();
+        void this.refreshBalance();
         const id = this.id;
         if (id !== undefined) {
             this.backend.title(id, this.cwd).then(
@@ -499,6 +516,18 @@ export class AgentSession {
             this.changed();
         } catch {
             // Not available (an API key has no plan limits).
+        }
+    }
+
+    /** Ask for the provider account's balance, when it has one. */
+    async refreshBalance(): Promise<void> {
+        try {
+            const balance = await this.backend.balance?.(this.cwd);
+            if (balance === undefined) return;
+            this.balance = balance;
+            this.changed();
+        } catch {
+            // Not available (no account balance behind this agent).
         }
     }
 
@@ -737,23 +766,29 @@ export class AgentSession {
     }
 
     /** Use another agent backend, starting a new conversation (the two keep
-     * their sessions separately). */
+     * their sessions separately). Before anything has been sent, the new
+     * agent takes the conversation that is already typed. */
     switchBackend(backend: AgentBackend): void {
         if (backend.id === this.backend.id) return;
+        const wasStarted = this.query !== undefined || this.id !== undefined;
         this.epoch++;
         this.stopQuery();
         this.backend = backend;
-        this.id = undefined;
-        this.title = 'New session';
-        this.entries = [];
-        this.loading = false;
+        if (wasStarted) {
+            this.id = undefined;
+            this.title = 'New session';
+            this.entries = [];
+            this.loading = false;
+            this.notice(`Switched to ${backend.label}; this is a new session`);
+        }
         this.live = undefined;
         this.activeModel = undefined;
         this.context = undefined;
         this.usage = undefined;
+        this.balance = undefined;
         this.lastReply = undefined;
         this.cost = 0;
-        this.notice(`Switched to ${backend.label}; this is a new session`);
+        void this.refreshBalance();
     }
 
     /** Stop the session's process, for a backend switch. */

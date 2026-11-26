@@ -177,6 +177,11 @@ function contextColor(percent: number): string {
     return percent >= 80 ? theme.ERROR : percent >= 50 ? theme.DIAGNOSTIC_WARN : theme.STRING;
 }
 
+/** Money in its currency, briefly. */
+function money(amount: number, currency: string): string {
+    return currency === 'USD' ? `$${amount.toFixed(2)}` : `${amount.toFixed(2)} ${currency}`;
+}
+
 const HELP: [string, string][] = [
     ['i  a  Enter', 'Type a message'],
     ['S', 'Clear the prompt and type a new message'],
@@ -287,6 +292,11 @@ export class AgentPanel {
     private cacheTimer: NodeJS.Timeout | undefined;
     /** The models the backends offer, once asked. */
     private models: ModelChoice[] | undefined;
+    /** The question for the models, while the backends are being asked. */
+    private loadingModels: Promise<ModelChoice[]> | undefined;
+    /** Counts preset changes per session, so a slow model lookup doesn't
+     * undo a later choice. */
+    private readonly presetRuns = new WeakMap<AgentSession, number>();
     /** `g` was typed, for `gg`, `gt` and `gT`. */
     private pendingG = false;
     private closeWarned = false;
@@ -339,14 +349,24 @@ export class AgentPanel {
     }
 
     newSession(resume?: { id: string; title: string; backend?: string }): AgentSession {
-        const backend = this.backendById(resume?.backend) ?? this.opts.backends[0];
+        const presetName = resume === undefined ? this.opts.defaultPreset : undefined;
+        const preset = presetName === undefined ? undefined : this.opts.presets[presetName];
+        const backend = this.backendById(resume?.backend) ?? this.backendForModel(preset?.model) ?? this.opts.backends[0];
         if (!backend) throw new Error('No agent backend is enabled');
         const s = this.createSession(backend, resume);
         this.sessions.push(s);
         this.current = this.sessions.length - 1;
-        // Presets name Claude Code models, so they only apply there.
-        if (!resume && this.opts.defaultPreset && backend.id === 'claude') this.usePreset(s, this.opts.defaultPreset);
+        void s.refreshBalance();
+        // A preset names a model, whichever agent offers it.
+        if (presetName !== undefined && preset !== undefined) this.usePreset(s, presetName, true);
         return s;
+    }
+
+    /** The backend whose models include `model`, once their lists are known
+     * (the preferred backend, usually the session's, wins a tie). */
+    private backendForModel(model: string | undefined, preferred = this.opts.backends[0]?.id): AgentBackend | undefined {
+        if (model === undefined) return undefined;
+        return this.backendById(this.resolveModel(model, preferred)?.backend);
     }
 
     private createSession(backend: AgentBackend, resume?: { id: string; title: string }): AgentSession {
@@ -368,17 +388,57 @@ export class AgentPanel {
         fresh.mode = s.mode;
         fresh.effort = s.effort;
         fresh.preset = s.preset;
-        // The plan's limits are the same for every session.
+        // The plan's limits and the account's balance are the same for every session.
         fresh.usage = s.usage;
+        fresh.balance = s.balance;
         s.close();
         this.sessions[this.sessions.indexOf(s)] = fresh;
         this.message = s.id === undefined ? 'Cleared' : `Cleared "${cut(s.title, 30)}" (s to resume it)`;
     }
 
-    /** Switch a session to a preset's model and effort. */
-    usePreset(s: AgentSession, name: PresetName): void {
+    /** Switch a session to a preset's model and effort, choosing the agent
+     * that offers the model (starting a new conversation if it changes).
+     * `defer` waits for the model lists until the session starts, so opening
+     * the panel doesn't ask the agents anything. */
+    usePreset(s: AgentSession, name: PresetName, defer = false): void {
         const preset = this.opts.presets[name];
-        s.applyPreset(name, preset, this.presetLabel(preset));
+        // One agent needs no choosing (and no model list).
+        if (this.opts.backends.length < 2) {
+            s.applyPreset(name, preset, this.presetLabel(preset));
+            return;
+        }
+        const run = (this.presetRuns.get(s) ?? 0) + 1;
+        this.presetRuns.set(s, run);
+        const apply = (choice: ModelChoice | undefined, late = false): void => {
+            if (this.presetRuns.get(s) !== run || !this.sessions.includes(s)) return;
+            // A model (or another preset) picked while the lists loaded wins.
+            if (late && s.preset !== name) return;
+            if (!choice) {
+                s.applyPreset(name, preset, this.presetLabel(preset));
+                return;
+            }
+            const backend = this.backendById(choice.backend);
+            if (backend && backend.id !== s.backend.id) s.switchBackend(backend);
+            s.applyPreset(name, { model: choice.value === 'default' ? undefined : choice.value, effort: preset.effort }, choice.displayName);
+        };
+        // The model lists say which agent runs the model.
+        const known = this.resolveModel(preset.model, s.backend.id);
+        if (preset.model === undefined || known || this.models !== undefined) {
+            apply(known);
+            return;
+        }
+        // Until they arrive, show the configured preset; the model's own
+        // provider is chosen before the session starts.
+        s.model = preset.model;
+        s.effort = preset.effort;
+        s.preset = name;
+        const work = (): Promise<void> =>
+            this.knownModels().then(
+                () => apply(this.resolveModel(preset.model!, s.backend.id), true),
+                () => apply(undefined, true),
+            );
+        if (defer && !s.started) s.waitFor(work);
+        else void work();
     }
 
     private presetLabel(p: Preset): string {
@@ -995,8 +1055,12 @@ export class AgentPanel {
         else this.newSession({ id, title, backend });
     }
 
-    private modelName(id: string, backend = this.session?.backend.id): string {
-        return this.models?.find((m) => m.backend === backend && (m.value === id || m.resolvedModel === id))?.displayName ?? prettyModel(id);
+    /** A model's name, in `backend` or (left out) any of them. */
+    private modelName(id: string, backend?: string): string {
+        return (
+            this.models?.find((m) => (backend === undefined || m.backend === backend) && (m.value === id || m.resolvedModel === id))?.displayName ??
+            prettyModel(id)
+        );
     }
 
     private modelLabel(s: AgentSession): string {
@@ -1007,7 +1071,10 @@ export class AgentPanel {
 
     private toggleUsage(s: AgentSession): void {
         this.showUsage = !this.showUsage;
-        if (this.showUsage) void s.refreshUsage();
+        if (this.showUsage) {
+            void s.refreshUsage();
+            void s.refreshBalance();
+        }
     }
 
     private presetPicker(s: AgentSession): PanelAction {
@@ -1017,6 +1084,27 @@ export class AgentPanel {
             return { label: name, detail: `${name === s.preset ? '(current) ' : ''}${what}`, value: name };
         });
         return { t: 'Picker', picker: new Picker<PresetName>('Preset', (name) => this.usePreset(s, name), { items }) as unknown as Picker<never> };
+    }
+
+    /** The model a configured name means, from the lists already asked for:
+     * the preferred backend's, or else the one that offers it. */
+    private resolveModel(model: string | undefined, preferred: string | undefined): ModelChoice | undefined {
+        if (model === undefined || this.models === undefined) return undefined;
+        const exact = this.models.filter((m) => m.value === model);
+        const matches = exact.length > 0 ? exact : this.models.filter((m) => m.resolvedModel === model || m.value.endsWith(`/${model}`));
+        return matches.find((m) => m.backend === preferred) ?? matches[0];
+    }
+
+    /** Every enabled backend's models, asked only once. */
+    private knownModels(): Promise<ModelChoice[]> {
+        if (this.models) return Promise.resolve(this.models);
+        this.loadingModels ??= this.loadModels().finally(() => {
+            this.loadingModels = undefined;
+        });
+        return this.loadingModels.then((models) => {
+            this.models ??= models;
+            return this.models;
+        });
     }
 
     /** Every enabled backend's models, with the backend that would run each. */
@@ -1073,9 +1161,8 @@ export class AgentPanel {
             fill(this.models);
         } else {
             picker.busy = true;
-            this.loadModels().then(
+            this.knownModels().then(
                 (models) => {
-                    if (models.length > 0) this.models = models;
                     picker.busy = false;
                     fill(models);
                     this.opts.refresh();
@@ -1192,7 +1279,7 @@ export class AgentPanel {
         if (s) {
             y = this.paintSettings(cv, s, x, y, cols, now);
             if (this.showContext) y = this.paintContext(cv, s.context, x, y, cols);
-            if (this.showUsage) y = this.paintUsage(cv, s.usage, x, y, cols, now);
+            if (this.showUsage) y = this.paintUsage(cv, s, x, y, cols, now);
             cv.rect({ left: r.left + 1, top: y, right: r.right, bottom: y + 1 }, theme.TILDE);
             const inputTop = this.paintInput(cv, s, r, x, cols, focused);
             this.paintTranscript(cv, s, { left: r.left + 1, top: y + 4, right: r.right, bottom: inputTop - 4 }, x, cols, now);
@@ -1291,6 +1378,9 @@ export class AgentPanel {
             const percent = Math.round(limit.utilization);
             bottom.part(`${percent}% ${limit.label}`, contextColor(percent), { t: 'Usage' }, percent);
         }
+        if (s.balance && bottom.room() > 14) {
+            bottom.part(`balance ${money(s.balance.available, s.balance.currency)}`, theme.STRING, { t: 'Usage' });
+        }
         const expiry = this.cacheExpiry(s);
         if (expiry !== undefined && bottom.room() > 12) {
             const left = expiry - now;
@@ -1321,16 +1411,26 @@ export class AgentPanel {
         return found.sort((a, b) => b.utilization - a.utilization)[0];
     }
 
-    /** The plan's usage limits, as `/usage` shows them. */
-    private paintUsage(cv: Canvas, usage: UsageInfo | undefined, x: number, y: number, cols: number, now: number): number {
+    /** The account's balance and the plan's usage limits, as `/usage` shows them. */
+    private paintUsage(cv: Canvas, s: AgentSession, x: number, y: number, cols: number, now: number): number {
         const { cw, lh } = cv;
+        const balance = s.balance;
+        if (balance) {
+            cv.text(x, y, cut(`Account balance: ${money(balance.available, balance.currency)} available`, cols), theme.FG);
+            y += lh;
+        }
+        const usage = s.usage;
         if (!usage) {
-            cv.text(x, y, cut('Usage limits show once the agent has replied', cols), theme.COMMENT);
-            return y + lh;
+            if (!balance) {
+                cv.text(x, y, cut('Usage limits show once the agent has replied', cols), theme.COMMENT);
+                y += lh;
+            }
+            return y;
         }
         const limits = usage.rate_limits;
         if (!usage.rate_limits_available || !limits) {
-            cv.text(x, y, cut("Plan limits don't apply to this login (they are for Claude subscriptions)", cols), theme.COMMENT);
+            const why = s.backend.id === 'opencode' ? 'No plan usage limits reported' : "Plan limits don't apply to this login (they are for Claude subscriptions)";
+            cv.text(x, y, cut(why, cols), theme.COMMENT);
             return y + lh;
         }
         const windows: { label: string; utilization: number | null; resets: string | null }[] = [

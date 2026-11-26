@@ -11,8 +11,9 @@ import { ThemeName, isThemeName } from './theme';
 
 /** How hard an agent is asked to work: the model, and its effort. */
 export interface Preset {
-    /** A model alias (`haiku`, `sonnet`, `opus`) or id; unset for Claude
-     * Code's default. */
+    /** A model alias (`haiku`, `sonnet`, `opus`), an id, or an OpenCode
+     * model (`provider/model`); unset for the agent's default. The model
+     * decides which agent runs the preset. */
     model?: string;
     effort?: EffortLevel;
 }

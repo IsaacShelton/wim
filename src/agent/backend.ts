@@ -46,6 +46,14 @@ export interface StartOptions {
     stderr: (data: string) => void;
 }
 
+/** What is left of an agent provider's account balance. */
+export interface AccountBalance {
+    /** Money left to spend, in `currency`. */
+    available: number;
+    /** The currency it is in (`USD`). */
+    currency: string;
+}
+
 /** A session saved on disk, which can be resumed. */
 export interface PastSession {
     id: string;
@@ -79,6 +87,8 @@ export interface AgentBackend {
     title(id: string, dir: string): Promise<string | undefined>;
     /** The models this backend can use, without starting a session. */
     models?(dir: string): Promise<sdk.ModelInfo[]>;
+    /** The provider account's remaining balance, when it has one. */
+    balance?(dir: string): Promise<AccountBalance | undefined>;
 }
 
 /** How many past sessions the session picker lists. */

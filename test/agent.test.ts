@@ -9,6 +9,7 @@ import * as path from 'node:path';
 import { test } from 'node:test';
 
 import {
+    AccountBalance,
     AgentBackend,
     AgentQuery,
     ContextUsage,
@@ -25,7 +26,7 @@ import {
 import { TextInput } from '../src/agent/input';
 import { WimApp } from '../src/app';
 import { MemoryClipboard } from '../src/clipboard';
-import { defaultConfig } from '../src/config';
+import { Config, defaultConfig } from '../src/config';
 import { parseKeys, plain } from '../src/editor/keys';
 import { ClientMessage, DrawCmd } from '../src/protocol';
 import { theme } from '../src/theme';
@@ -153,6 +154,8 @@ class FakeBackend implements AgentBackend {
     readonly queries: FakeQuery[] = [];
     past: PastSession[] = [];
     histories: Record<string, HistoryMessage[]> = {};
+    /** What the provider account has left, when the test gives it one. */
+    balanceValue: AccountBalance | undefined;
 
     start(opts: StartOptions): Promise<AgentQuery> {
         const q = new FakeQuery(opts);
@@ -174,6 +177,10 @@ class FakeBackend implements AgentBackend {
 
     models(): Promise<ModelInfo[]> {
         return Promise.resolve(CLAUDE_MODELS);
+    }
+
+    balance(): Promise<AccountBalance | undefined> {
+        return Promise.resolve(this.balanceValue);
     }
 
     get last(): FakeQuery {
@@ -232,7 +239,7 @@ interface Harness {
     last: () => DrawCmd[];
 }
 
-function harness(file?: string, extra: AgentBackend[] = []): Harness {
+function harness(file?: string, extra: AgentBackend[] = [], claude: Partial<Config['claude']> = {}): Harness {
     const frames: DrawCmd[][] = [];
     const backend = new FakeBackend();
     const backends = [backend, ...extra];
@@ -245,7 +252,7 @@ function harness(file?: string, extra: AgentBackend[] = []): Harness {
         agents: backends.length === 1 ? backend : backends,
         config: {
             ...defaultConfig(),
-            claude: { ...defaultConfig().claude, enabled: true },
+            claude: { ...defaultConfig().claude, enabled: true, ...claude },
             opencode: { ...defaultConfig().opencode, enabled: extra.length > 0 },
         },
         onFrame: (_title, _dirty, cmds) => frames.push(cmds),
@@ -962,4 +969,91 @@ test('the model picker offers Claude Code and OpenCode, and picking one chooses 
     h.type('ihello again<CR>');
     await settle();
     assert.deepEqual(h.backend.last.sent, ['hello again']);
+});
+
+test('an OpenCode session shows the account balance left, on the header and with u', async () => {
+    const opencode = new FakeOpenCodeBackend();
+    opencode.balanceValue = { available: 8.83, currency: 'USD' };
+    const h = harness(undefined, [opencode]);
+    h.send({ t: 'command', name: 'agents' });
+    h.type('<Esc>m');
+    await settle();
+    h.type('OpenCode<CR>');
+    await settle();
+    assert.equal(h.app.agents.session?.backend.id, 'opencode');
+    assert.match(h.text(), /balance \$8\.83/);
+    h.type('u');
+    await settle();
+    assert.match(h.text(), /Account balance: \$8\.83 available/);
+    // A Claude Code session has no account balance to show.
+    h.type('mClaude Code<CR>');
+    await settle();
+    assert.equal(h.app.agents.session?.backend.id, 'claude');
+    assert.doesNotMatch(h.text(), /balance \$8\.83|Account balance/);
+});
+
+test('presets choose the agent that offers their model, the default preset too', async () => {
+    const opencode = new FakeOpenCodeBackend();
+    const h = harness(undefined, [opencode], {
+        presets: {
+            low: { model: 'haiku', effort: 'low' },
+            medium: { model: 'claude-opus-5-5', effort: 'medium' },
+            high: { model: 'gpt-6', effort: 'high' },
+        },
+        defaultPreset: 'high',
+    });
+    // The default preset names an OpenCode model: the session starts there,
+    // and asks for the models before its first message goes.
+    h.send({ t: 'command', name: 'agents' });
+    assert.equal(h.app.agents.session?.preset, 'high');
+    h.type('hello<CR>');
+    await settle();
+    assert.equal(h.app.agents.session?.backend.id, 'opencode');
+    assert.equal(opencode.last.opts.model, 'openai/gpt-6');
+    assert.deepEqual(opencode.last.sent, ['hello']);
+    assert.equal(h.backend.queries.length, 0, 'Claude Code was not started');
+    assert.match(h.text(), /hello/, 'the message stays in the conversation');
+
+    // `L` names a Claude Code model, so the session moves there.
+    h.type('<Esc>L');
+    await settle();
+    assert.equal(h.app.agents.session?.backend.id, 'claude');
+    assert.equal(h.app.agents.session?.model, 'haiku');
+    h.type('ihello again<CR>');
+    await settle();
+    assert.equal(h.backend.last.opts.model, 'haiku');
+    assert.deepEqual(h.backend.last.sent, ['hello again']);
+
+    // The preset picker takes the same route back.
+    h.type('<Esc>P');
+    await settle();
+    assert.match(h.text(), /GPT-6, high effort/);
+    h.type('high<CR>');
+    await settle();
+    assert.equal(h.app.agents.session?.backend.id, 'opencode');
+    assert.equal(h.app.agents.session?.model, 'openai/gpt-6');
+});
+
+test('a preset model offered by both agents stays with the session\'s agent', async () => {
+    const opencode = new FakeOpenCodeBackend();
+    const h = harness(undefined, [opencode], {
+        presets: {
+            low: { model: 'haiku', effort: 'low' },
+            medium: { model: 'claude-opus-5-5', effort: 'medium' },
+            high: { model: 'gpt-6', effort: 'high' },
+        },
+        defaultPreset: undefined,
+    });
+    h.send({ t: 'command', name: 'agents' });
+    h.type('<Esc>m');
+    await settle();
+    h.type('OpenCode<CR>');
+    await settle();
+    assert.equal(h.app.agents.session?.backend.id, 'opencode');
+    // `claude-opus-5-5` is OpenCode's `anthropic/claude-opus-5-5`; without a
+    // reason to switch, the session keeps its agent.
+    h.type('M');
+    await settle();
+    assert.equal(h.app.agents.session?.backend.id, 'opencode');
+    assert.equal(h.app.agents.session?.model, 'anthropic/claude-opus-5-5');
 });

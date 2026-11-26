@@ -3,11 +3,11 @@
     "claude": {
         "enabled": true,
         "presets": {
-            "low": { "model": "deepseek-v4.1-flash-free", "effort": "low" },
-            "medium": { "model": "deepseek-v4.1-flash-free", "effort": "medium" },
-            "high": { "model": "deepseek-v4.1-flash-free", "effort": "high" }
+            "low": { "model": "deepseek-v4.1-flash", "effort": "low" },
+            "medium": { "model": "deepseek-v4.1-flash", "effort": "medium" },
+            "high": { "model": "deepseek-v4.1-flash", "effort": "high" }
         },
-        "defaultPreset": "high",
+        "defaultPreset": "medium",
         "cacheMinutes": 60
     },
     "opencode": {
