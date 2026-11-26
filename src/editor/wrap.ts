@@ -1,6 +1,8 @@
 // Soft line wrapping: a long line shown over several screen rows, cut at the
 // window's width.
 
+import { charWidth } from '../textwidth';
+
 /** How many screen rows a line takes when wrapped to `cols` columns, with tabs
  * `tabstop` wide. `cursorCol` is the cursor's column when it is on this line:
  * after the last character (in Insert mode) it needs a cell, which takes
@@ -12,7 +14,7 @@ export function lineRows(chars: readonly string[], tabstop: number, cols: number
     let at = cursorCol === undefined || cursorCol <= 0 ? 0 : undefined;
     for (let i = 0; i < chars.length; i++) {
         if (i === cursorCol) at = d;
-        d = chars[i] === '\t' ? (Math.floor(d / ts) + 1) * ts : d + 1;
+        d = chars[i] === '\t' ? (Math.floor(d / ts) + 1) * ts : d + charWidth(chars[i]);
     }
     if (cursorCol !== undefined && at === undefined) at = d + (cursorCol - chars.length);
     const rows = Math.max(Math.ceil(d / width), 1);

@@ -7,6 +7,7 @@ import * as path from 'node:path';
 
 import { markdownLines } from '../lsp/markdown';
 import { Run, wrapRuns } from '../popup';
+import { cutText, textWidth } from '../textwidth';
 import { theme, themeName } from '../theme';
 import { AgentSession, Entry, Prompt } from './session';
 
@@ -27,14 +28,13 @@ const PREVIEW_LINES = 10;
 const SPINNER = ['·', '✢', '✳', '✶', '✻', '✽', '✻', '✶', '✳', '✢'];
 
 function cut(s: string, cols: number): string {
-    const chars = Array.from(s);
-    return chars.length <= cols ? s : chars.slice(0, Math.max(cols - 1, 0)).join('') + '…';
+    return cutText(s, cols);
 }
 
 /** Wrap `runs` to `cols`, with `first` before the first row and as many
  * spaces before the others. */
 function hanging(first: Run, runs: Run[], cols: number, bg?: string): Row[] {
-    const indent = Array.from(first[0]).length;
+    const indent = textWidth(first[0]);
     return wrapRuns(runs, Math.max(cols - indent, 1)).map((line, i) => ({
         runs: [i === 0 ? first : [' '.repeat(indent), theme.FG], ...line],
         bg,
@@ -125,7 +125,7 @@ function toolRows(e: Extract<Entry, { t: 'Tool' }>, cwd: string, cols: number): 
     const summary = toolSummary(e.name, e.input, cwd);
     const name = toolName(e.name);
     const header: Run[] = [[name, theme.FG]];
-    if (summary !== '') header.push([`(${cut(summary, Math.max(cols - Array.from(name).length - 4, 8))})`, theme.COMMENT]);
+    if (summary !== '') header.push([`(${cut(summary, Math.max(cols - textWidth(name) - 4, 8))})`, theme.COMMENT]);
     const rows: Row[] = [{ runs: [bullet, ...header] }];
     const under = (text: string, color: string = theme.COMMENT): Row => ({ runs: [['  └ ', theme.COMMENT], [cut(text, cols - 4), color]] });
     if (e.name === 'TodoWrite' && Array.isArray(e.input.todos)) {

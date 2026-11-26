@@ -9,6 +9,7 @@ import { fuzzyScore } from './fuzzy';
 import * as highlight from './highlight';
 import { baseName } from './paths';
 import { DrawCmd } from './protocol';
+import { charWidth, cutTextStart, textWidth } from './textwidth';
 import { theme, tokenColor } from './theme';
 
 /** A piece of text in one color. */
@@ -30,31 +31,41 @@ const PREVIEW_CUTOFF = 120;
 const PREVIEW_MAX_BYTES = 2 * 1024 * 1024;
 
 function width(s: string): number {
-    return Array.from(s).length;
+    return textWidth(s);
 }
 
 function runsWidth(runs: readonly Run[]): number {
     return runs.reduce((n, [s]) => n + width(s), 0);
 }
 
-/** Break a line of runs into lines at most `cols` wide, at spaces where
- * possible. */
+/** Break a line of runs into lines at most `cols` cells wide, at spaces
+ * where possible. */
 export function wrapRuns(line: readonly Run[], cols: number): Run[][] {
     const chars: [string, string][] = [];
     for (const [s, color] of line) for (const c of s) chars.push([c, color]);
     const out: Run[][] = [];
     let start = 0;
-    while (chars.length - start > cols) {
-        let end = start + cols;
+    let total = 0;
+    for (const [c] of chars) total += charWidth(c);
+    while (total > cols) {
+        let end = start;
+        let used = 0;
+        while (end < chars.length && used + charWidth(chars[end][0]) <= cols) {
+            used += charWidth(chars[end][0]);
+            end++;
+        }
+        if (end === start) end = start + 1;
         for (let i = end; i > start + cols / 2; i--) {
-            if (chars[i][0] === ' ') {
+            if (chars[i]?.[0] === ' ') {
                 end = i;
                 break;
             }
         }
         out.push(toRuns(chars.slice(start, end)));
+        const from = start;
         start = end;
         while (start < chars.length && chars[start][0] === ' ') start++;
+        for (let i = from; i < start; i++) total -= charWidth(chars[i][0]);
     }
     out.push(toRuns(chars.slice(start)));
     return out;
@@ -89,11 +100,18 @@ export class Overlay {
     private runs(x: number, y: number, runs: readonly Run[], maxCols: number): void {
         let col = 0;
         for (const [s, color] of runs) {
-            const chars = Array.from(s);
             const room = maxCols - col;
             if (room <= 0) break;
-            this.text(x + col * this.cw, y, chars.slice(0, room).join(''), color);
-            col += chars.length;
+            let shown = '';
+            let used = 0;
+            for (const c of s) {
+                const w = charWidth(c);
+                if (used + w > room) break;
+                shown += c;
+                used += w;
+            }
+            if (shown !== '') this.text(x + col * this.cw, y, shown, color);
+            col += used;
         }
     }
 
@@ -250,7 +268,7 @@ export class Overlay {
             const labelCols = room - (detailCols > 0 ? detailCols + 2 : 0);
             let label = item.label;
             // Long paths lose their start, as with Telescope's `truncate`.
-            if (item.truncateStart && width(label) > labelCols) label = '…' + Array.from(label).slice(-(labelCols - 1)).join('');
+            if (item.truncateStart && width(label) > labelCols) label = cutTextStart(label, labelCols);
             this.runs(ix, ry, [[label, item.color ?? theme.FG]], labelCols);
             if (detailCols > 0) this.runs(ix + (room - detailCols) * this.cw, ry, [[detail, theme.COMMENT]], detailCols);
         }

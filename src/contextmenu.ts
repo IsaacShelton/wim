@@ -3,6 +3,7 @@
 
 import { Box } from './popup';
 import { DrawCmd } from './protocol';
+import { textWidth } from './textwidth';
 import { theme } from './theme';
 
 export type MenuAction = 'cut' | 'copy' | 'paste' | 'selectAll' | 'wrap';
@@ -36,7 +37,7 @@ export class ContextMenu {
     /** Where the menu goes: at the click, moved in if it would leave the
      * window. */
     box(cw: number, lh: number, width: number, height: number): Box {
-        const cols = Math.max(...this.items.map((i) => 4 + Array.from(i.label).length + (i.hint ? 3 + Array.from(i.hint).length : 0)));
+        const cols = Math.max(...this.items.map((i) => 4 + textWidth(i.label) + (i.hint ? 3 + textWidth(i.hint) : 0)));
         const w = cols * cw;
         const h = this.items.length * lh + this.items.filter((i) => i.separator).length * 5 + 2 * PAD;
         const left = Math.max(Math.min(this.x, width - w), 0);
@@ -96,7 +97,7 @@ export class ContextMenu {
             if (item.checked) cmds.push(['text', box.left + cw, top, '✓', color]);
             cmds.push(['text', box.left + 2.5 * cw, top, item.label, color]);
             if (item.hint) {
-                const x = box.right - (Array.from(item.hint).length + 1) * cw;
+                const x = box.right - (textWidth(item.hint) + 1) * cw;
                 cmds.push(['text', x, top, item.hint, theme.COMMENT]);
             }
         });

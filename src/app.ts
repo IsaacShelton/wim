@@ -18,7 +18,7 @@ import { awaitingMotion } from './editor/command';
 import { Editor, Selection } from './editor/editor';
 import { fail } from './editor/errors';
 import { KeyInput, ch, charOf, ctrl, isNamedKey, keyEq, keyIs, keyNew, keyToString, parseKeys, plain } from './editor/keys';
-import { isCmdLine } from './editor/mode';
+import { isCmdLine, isInsert } from './editor/mode';
 import { Range } from './editor/range';
 import { lineMatches } from './editor/search';
 import { lineRows } from './editor/wrap';
@@ -41,7 +41,8 @@ import { ServerSpec, defaultServers } from './lsp/servers';
 import { SignatureHelp } from './lsp/signature';
 import { absolute, baseName, currentDir, displayName, expandTilde } from './paths';
 import { Float, Overlay, Picker, PickerItem, PreviewSource, readPreview } from './popup';
-import { AudioCommand, ClientMessage, DrawCmd, TextStyle } from './protocol';
+import { AudioCommand, Caret, ClientMessage, DrawCmd, TextStyle } from './protocol';
+import { charWidth, cutText, cutTextStart, textWidth } from './textwidth';
 import { TerminalAction, TerminalPane, createTerminal } from './terminal';
 import { isThemeName, setTheme, theme, themeName, tokenColor, tokenStyle } from './theme';
 import { openDefaultBrowser } from './window';
@@ -173,8 +174,10 @@ export interface AppOptions {
     config?: Config;
     /** Problems found in the settings file, shown at startup. */
     configWarnings?: string[];
-    /** Called whenever the window should be repainted. */
-    onFrame: (title: string, dirty: boolean, cmds: DrawCmd[], animating: boolean, tracking: boolean) => void;
+    /** Called whenever the window should be repainted. `caret` is where the
+     * text cursor is, for the system input method's window; `ime` says
+     * whether keys are text for the input method or commands for the editor. */
+    onFrame: (title: string, dirty: boolean, cmds: DrawCmd[], animating: boolean, tracking: boolean, caret: Caret | undefined, ime: boolean) => void;
     /** Called to control the window's sound player. */
     onAudio?: (cmd: AudioCommand) => void;
     /** Called once when Wim should exit. */
@@ -2139,7 +2142,30 @@ export class WimApp {
         const cmds = painter.paint();
         this.tabHits = painter.tabHits;
         this.badgeHit = painter.badgeHit;
-        this.opts.onFrame(title, dirty, cmds, animating, this.menu !== undefined);
+        // Where the input method's window goes: the caret of whatever is
+        // being typed into.
+        let caret = painter.caret;
+        if (this.focus === 'Agents' && this.agentsVisible) caret = this.agents.caret ?? caret;
+        else if (this.focus === 'Terminal' && this.terminalVisible) caret = this.terminal?.caret ?? caret;
+        this.opts.onFrame(title, dirty, cmds, animating, this.menu !== undefined, caret, this.imeTyping());
+    }
+
+    /** Whether keys typed now are text the system input method should compose,
+     * rather than Vim commands, which must reach the editor as they are. Only
+     * Insert and Replace modes, the agent prompt and the terminal take text;
+     * Normal, Visual and the command line are keys. */
+    private imeTyping(): boolean {
+        if (this.picker !== undefined) return true;
+        switch (this.focus) {
+            case 'Editor':
+                return isInsert(this.editor.mode);
+            case 'Agents':
+                return this.agentsVisible && this.agents.caret !== undefined;
+            case 'Terminal':
+                return this.terminalVisible;
+            default:
+                return false;
+        }
     }
 
     /** Where the active window's view and caret are shown: gliding toward
@@ -2491,7 +2517,7 @@ function displayColIn(buf: Buffer, tabstop: number, line: number, col: number): 
     const chars = buf.line(line);
     let d = 0;
     const n = Math.min(col, chars.length);
-    for (let i = 0; i < n; i++) d = chars[i] === '\t' ? (Math.floor(d / ts) + 1) * ts : d + 1;
+    for (let i = 0; i < n; i++) d = chars[i] === '\t' ? (Math.floor(d / ts) + 1) * ts : d + charWidth(chars[i]);
     return d + Math.max(col - chars.length, 0);
 }
 
@@ -2543,6 +2569,8 @@ class Painter {
     readonly tabHits: [Rect, number][] = [];
     /** Where the agents badge was drawn. */
     badgeHit: Rect | undefined;
+    /** Where the text caret is, for the system input method's window. */
+    caret: Caret | undefined;
 
     constructor(
         private readonly ed: Editor,
@@ -2563,7 +2591,7 @@ class Painter {
 
     /** Text whose right edge is at `x`. */
     private textRight(x: number, y: number, s: string, color: string): void {
-        this.text(x - Array.from(s).length * this.layout.charW, y, s, color);
+        this.text(x - textWidth(s) * this.layout.charW, y, s, color);
     }
 
     private clip(r: Rect): void {
@@ -2608,7 +2636,7 @@ class Painter {
             this.rect(bar, pane.active ? theme.SELECTION : theme.STATUS_BG);
             const name = ` ${pane.name}${pane.modified ? ' [+]' : ''}`;
             const cols = Math.floor((bar.right - bar.left) / cw);
-            const shown = Array.from(name).length <= cols ? name : ' …' + Array.from(name).slice(-Math.max(cols - 2, 0)).join('');
+            const shown = textWidth(name) <= cols ? name : ' ' + cutTextStart(name, Math.max(cols - 1, 0));
             this.text(bar.left, bar.top, shown, pane.active ? theme.FG : theme.COMMENT);
         }
         if (area.right < (this.layout.agents?.left ?? this.st.metrics.width)) {
@@ -2674,7 +2702,7 @@ class Painter {
             let x = x0 + (row.kind === 'code' ? cw : 0);
             for (const [s, color, style] of row.runs) {
                 this.text(x, y, s, color, style);
-                x += Array.from(s).length * cw;
+                x += textWidth(s) * cw;
             }
         }
     }
@@ -3006,17 +3034,30 @@ class Painter {
             const token = span < spans.length && spans[span][0] <= i ? spans[span][2] : 'Normal';
             const color = tokenColor(token);
             const style = tokenStyle(token);
-            const cells = c === '\t' ? ts - (dcol % ts) : 1;
-            for (let k = 0; k < cells; k++) {
-                const d = dcol + k;
-                if (d < left || d >= right) continue;
+            const cells = c === '\t' ? ts - (dcol % ts) : charWidth(c);
+            if (c === '\t') {
+                for (let k = 0; k < cells; k++) {
+                    const d = dcol + k;
+                    if (d < left || d >= right) continue;
+                    if (color !== runColor || style !== runStyle || run === '') {
+                        if (run !== '') flush();
+                        runColor = color;
+                        runStyle = style;
+                        runStart = d;
+                    }
+                    run += ' ';
+                }
+            } else if (dcol < left || dcol + cells > right) {
+                // A wide character cut by an edge can't be drawn in half.
+                if (run !== '') flush();
+            } else {
                 if (color !== runColor || style !== runStyle || run === '') {
                     if (run !== '') flush();
                     runColor = color;
                     runStyle = style;
-                    runStart = d;
+                    runStart = dcol;
                 }
-                run += c === '\t' ? ' ' : c;
+                run += c;
             }
             dcol += cells;
         }
@@ -3037,9 +3078,10 @@ class Painter {
         const dcol = ed.displayCol(cursor.line, cursor.col);
         if (dcol < ed.scrollLeft) return;
         const c = ed.buffer.charAt(cursor) ?? ' ';
-        const width = c === '\t' ? ed.displayCol(cursor.line, cursor.col + 1) - dcol : 1;
+        const width = c === '\t' ? ed.displayCol(cursor.line, cursor.col + 1) - dcol : charWidth(c);
         const x = layout.textLeft + (wrapped ? wrapped.col : shown.col - ed.scrollLeft) * layout.charW;
         const cell = rect(x, y, x + layout.charW * width, y + layout.lineH);
+        if (this.st.focus === 'Editor') this.caret = { x: cell.left, y: cell.top, w: cell.right - cell.left, h: cell.bottom - cell.top };
         this.clip(area);
         this.paintCaret(cell, c);
         this.cmds.push(['unclip']);
@@ -3074,7 +3116,7 @@ class Painter {
         for (const buffer of this.ed.bufferList()) {
             const short = baseName(buffer.name);
             const iconCols = this.st.icons ? 2 : 0;
-            const width = (Array.from(short).length + iconCols + 4) * cw;
+            const width = (textWidth(short) + iconCols + 4) * cw;
             const tab = rect(x, r.top, x + width, r.bottom);
             let textColor: string = theme.COMMENT;
             if (buffer.active) {
@@ -3143,7 +3185,7 @@ class Painter {
             this.text(x + cw * 2, y, row.name, color);
             if (row.special) {
                 const left = x + cw * 2;
-                this.rect(rect(left, y + lh - 2, left + Array.from(row.name).length * cw, y + lh - 1), color);
+                this.rect(rect(left, y + lh - 2, left + textWidth(row.name) * cw, y + lh - 1), color);
             }
         }
         this.cmds.push(['unclip']);
@@ -3168,7 +3210,7 @@ class Painter {
         const badge = this.st.badge;
         let badgeHit: Rect | undefined;
         if (badge) {
-            badgeHit = rect(full.right - Array.from(badge.text).length * cw, full.top, full.right, full.bottom);
+            badgeHit = rect(full.right - textWidth(badge.text) * cw, full.top, full.right, full.bottom);
             this.rect(badgeHit, badge.bg);
             this.text(badgeHit.left, full.top, badge.text, badge.color);
         }
@@ -3218,7 +3260,7 @@ class Painter {
 
         const branch = gitBranch(currentDir(), this.st.refresh);
         const branchLabel = branch === '' ? '' : ` ${this.st.icons ? '\ue0a0 ' : ''}${branch} `;
-        const branchRight = pillRight + Array.from(branchLabel).length * cw;
+        const branchRight = pillRight + textWidth(branchLabel) * cw;
 
         const cursor = ed.cursor;
         // A rendered Markdown view goes by its rows.
@@ -3252,7 +3294,7 @@ class Painter {
         // progress or diagnostic counts. When short of room, the progress is
         // cut, then left out, while the name keeps at least MIN_NAME columns;
         // after that the name loses its start.
-        const width = (s: string): number => Array.from(s).length;
+        const width = (s: string): number => textWidth(s);
         const room = Math.floor((r.right - r.left) / cw) - label.length - width(branchLabel) - width(right) - 1;
         const name = ` ${ed.fileName()}${ed.isModified() ? ' [+]' : ''}`;
         let spare = room - Math.min(width(name), MIN_NAME);
@@ -3269,7 +3311,7 @@ class Painter {
         const progress = this.st.lspProgress;
         if (progress) {
             const most = Math.min(50, spare - 2);
-            if (most >= 10) parts.push([width(progress) > most ? Array.from(progress).slice(0, most - 1).join('') + '…' : progress, theme.COMMENT]);
+            if (most >= 10) parts.push([width(progress) > most ? cutText(progress, most) : progress, theme.COMMENT]);
         } else {
             this.st.diagnosticCounts.forEach((n, severity) => {
                 const text = `${(this.st.icons ? SIGNS : PLAIN_SIGNS)[severity]} ${n}`;
@@ -3287,7 +3329,7 @@ class Painter {
         }
         // Each part's width includes its two spaces of gap.
         const nameCols = Math.floor((x - branchRight) / cw);
-        const shown = width(name) <= nameCols ? name : ' …' + Array.from(name).slice(-Math.max(nameCols - 2, 0)).join('');
+        const shown = width(name) <= nameCols ? name : ' ' + cutTextStart(name, Math.max(nameCols - 1, 0));
         if (nameCols > 2) {
             if (branchLabel !== '') this.text(pillRight, r.top, branchLabel, theme.MODE_TREE);
             this.text(branchRight, r.top, shown, theme.FG);
@@ -3301,8 +3343,9 @@ class Painter {
         const text = ed.cmdlineText();
         if (text !== undefined) {
             this.text(x, r.top, text, theme.FG);
-            const end = x + Array.from(text).length * layout.charW;
+            const end = x + textWidth(text) * layout.charW;
             this.rect(rect(end, r.top, end + 2, r.top + layout.lineH), theme.CURSOR);
+            if (this.st.focus === 'Editor') this.caret = { x: end, y: r.top, w: 2, h: layout.lineH };
         } else if (ed.message) {
             this.text(x, r.top, ed.message.text, ed.message.error ? theme.ERROR : theme.FG);
         }

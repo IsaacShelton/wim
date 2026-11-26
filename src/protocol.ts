@@ -32,13 +32,26 @@ export type ClientMessage =
     /** The window drew an `animating` frame and is ready for the next one. */
     | { t: 'tick' };
 
+/** Where the caret being typed at is, in CSS pixels, so the system input
+ * method (IME) can show its window there. */
+export interface Caret {
+    x: number;
+    y: number;
+    w: number;
+    h: number;
+}
+
 /** Messages from Node to the window. */
 export type ServerMessage =
     /** `animating`: something is gliding, so the window asks for the next
      * frame (with `tick`) once it has drawn this one, in step with the
      * display. `tracking`: a menu is open, so the window sends `move`
-     * for the pointer even with no button down. */
-    | { t: 'frame'; title: string; dirty: boolean; cmds: DrawCmd[]; animating?: boolean; tracking?: boolean }
+     * for the pointer even with no button down. `caret`: where the text
+     * cursor is, for the input method's window. `ime`: whether keys typed
+     * now are text the system input method should compose (Insert mode, the
+     * agent prompt, the terminal), rather than Vim commands that must reach
+     * the editor as they are. */
+    | { t: 'frame'; title: string; dirty: boolean; cmds: DrawCmd[]; animating?: boolean; tracking?: boolean; caret?: Caret; ime?: boolean }
     /** Wim is exiting; the window should close. */
     | { t: 'quit' }
     | { t: 'audio'; cmd: AudioCommand };
@@ -69,8 +82,9 @@ export type TextStyle = 'italic' | 'bold' | 'italic bold';
 export type DrawCmd =
     | [op: 'rect', x: number, y: number, w: number, h: number, color: string, radius?: number]
     | [op: 'stroke', x: number, y: number, w: number, h: number, color: string]
-    /** Text on the character grid: each character takes one cell starting at
-     * `x`, centered vertically in the row whose top is `y`. */
+    /** Text on the character grid: each character starts at its display
+     * column from `x`, centered vertically in the row whose top is `y`. Wide
+     * characters (Chinese, emoji) take two cells. */
     | [op: 'text', x: number, y: number, text: string, color: string, style?: TextStyle]
     | [op: 'poly', points: number[], color: string]
     /** An image from Wim's server (`src` is its path there), drawn to fill

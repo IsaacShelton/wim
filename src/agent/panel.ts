@@ -12,7 +12,8 @@ import { findFiles } from '../finder';
 import { Glide } from '../glide';
 import { formatBytes } from '../image';
 import { Box, Picker, PickerItem, Run } from '../popup';
-import { DrawCmd } from '../protocol';
+import { Caret, DrawCmd } from '../protocol';
+import { charWidth, cutText, textWidth } from '../textwidth';
 import { theme } from '../theme';
 import { Attachment, imageAttachment, readAttachment } from './attachment';
 import { AgentBackend, ContextUsage, PermissionMode, UsageInfo } from './backend';
@@ -84,12 +85,46 @@ function contains(b: Box, x: number, y: number): boolean {
 }
 
 function width(s: string): number {
-    return Array.from(s).length;
+    return textWidth(s);
 }
 
 function cut(s: string, cols: number): string {
-    const chars = Array.from(s);
-    return chars.length <= cols ? s : chars.slice(0, Math.max(cols - 1, 0)).join('') + '…';
+    return cutText(s, cols);
+}
+
+/** The index in `chars` at display column `col`. */
+function indexAtCol(chars: readonly string[], col: number): number {
+    let used = 0;
+    for (let i = 0; i < chars.length; i++) {
+        if (used >= col) return i;
+        used += charWidth(chars[i]);
+    }
+    return chars.length;
+}
+
+/** Split `chars` into rows at most `cols` display cells wide (never splitting
+ * a wide character), and where each row starts in `chars`. */
+function wrapChars(chars: readonly string[], cols: number): { rows: string[][]; starts: number[] } {
+    const rows: string[][] = [];
+    const starts: number[] = [];
+    let at = 0;
+    while (at < chars.length) {
+        const start = at;
+        let used = 0;
+        while (at < chars.length) {
+            const w = charWidth(chars[at]);
+            if (at > start && used + w > cols) break;
+            used += w;
+            at++;
+        }
+        rows.push(chars.slice(start, at));
+        starts.push(start);
+    }
+    if (rows.length === 0) {
+        rows.push([]);
+        starts.push(0);
+    }
+    return { rows, starts };
 }
 
 /** How long ago a time was, briefly. */
@@ -241,9 +276,16 @@ class Canvas {
         for (const [s, color] of runs) {
             const room = cols - col;
             if (room <= 0) break;
-            const chars = Array.from(s).slice(0, room);
-            this.text(x + col * this.cw, y, chars.join(''), color);
-            col += chars.length;
+            let shown = '';
+            let used = 0;
+            for (const c of s) {
+                const w = charWidth(c);
+                if (used + w > room) break;
+                shown += c;
+                used += w;
+            }
+            if (shown !== '') this.text(x + col * this.cw, y, shown, color);
+            col += used;
         }
         return col;
     }
@@ -329,6 +371,8 @@ export class AgentPanel {
     /** The text selected with the mouse: where it started and where it is. */
     private selection: { anchor: Spot; head: Spot } | undefined;
     private selecting = false;
+    /** Where the prompt's caret was drawn, for the input method's window. */
+    caret: Caret | undefined;
 
     constructor(private readonly opts: PanelOptions) {}
 
@@ -880,8 +924,8 @@ export class AgentPanel {
         const lines: string[] = [];
         for (let r = a.row; r <= b.row && r < this.shownRows.length; r++) {
             const chars = Array.from(rowText(this.shownRows[r]));
-            const from = r === a.row ? a.col : 0;
-            const to = r === b.row ? b.col : chars.length;
+            const from = r === a.row ? indexAtCol(chars, a.col) : 0;
+            const to = r === b.row ? indexAtCol(chars, b.col) : chars.length;
             lines.push(chars.slice(from, to).join('').trimEnd());
         }
         const text = lines.join('\n');
@@ -924,7 +968,7 @@ export class AgentPanel {
         if (!area || this.shownRows.length === 0) return undefined;
         const row = Math.floor((y - area.top) / this.shownLh + this.shownTop);
         const clamped = Math.min(Math.max(row, 0), this.shownRows.length - 1);
-        const width = Array.from(rowText(this.shownRows[clamped])).length;
+        const width = textWidth(rowText(this.shownRows[clamped]));
         const col = Math.round((x - this.shownX) / this.shownCw);
         return { row: clamped, col: Math.min(Math.max(col, 0), width) };
     }
@@ -1534,6 +1578,7 @@ export class AgentPanel {
         const typing = p !== undefined && this.promptView.typing;
         const input = this.activeInput();
         const active = focused && (typing || (this.focus === 'Input' && !p));
+        this.caret = undefined;
         const textCols = Math.max(cols - 2, 1);
         // Wrap the lines, and find the cursor's row and column among them,
         // and each row's first character in the text, for the selection.
@@ -1544,17 +1589,24 @@ export class AgentPanel {
         let cursorX = 0;
         let lineStart = 0;
         lines.forEach((chars, i) => {
-            const start = rows.length;
-            for (let at = 0; at === 0 || at < chars.length; at += textCols) {
-                rows.push(chars.slice(at, at + textCols));
-                starts.push(lineStart + at);
-            }
+            const base = rows.length;
+            const wrapped = wrapChars(chars, textCols);
+            wrapped.rows.forEach((row, r) => {
+                rows.push(row);
+                starts.push(lineStart + wrapped.starts[r]);
+            });
             if (i === cursorLine) {
-                cursorRow = start + Math.floor(cursorCol / textCols);
-                cursorX = cursorCol % textCols;
-                if (cursorRow >= rows.length) {
+                // The row whose start is at or before the cursor holds it.
+                let k = 0;
+                for (let r = 0; r < wrapped.starts.length; r++) if (wrapped.starts[r] <= cursorCol) k = r;
+                cursorRow = base + k;
+                cursorX = textWidth(chars.slice(wrapped.starts[k], cursorCol).join(''));
+                // A caret after a row that fills its last cell needs a row.
+                if (cursorCol === chars.length && cursorX >= textCols) {
                     rows.push([]);
                     starts.push(lineStart + chars.length);
+                    cursorRow = rows.length - 1;
+                    cursorX = 0;
                 }
             }
             // The newline between lines counts too.
@@ -1582,9 +1634,14 @@ export class AgentPanel {
         const range = input.selectedRange();
         if (range && active) {
             for (let i = 0; i < shownRows; i++) {
+                const row = rows[first + i];
                 const from = Math.max(range[0] - starts[first + i], 0);
-                const to = Math.min(range[1] - starts[first + i], rows[first + i].length);
-                if (to > from) cv.rect({ left: x + (2 + from) * cw, top: ty + i * lh, right: x + (2 + to) * cw, bottom: ty + (i + 1) * lh }, theme.SELECTION);
+                const to = Math.min(range[1] - starts[first + i], row.length);
+                if (to > from) {
+                    const a = x + (2 + textWidth(row.slice(0, from).join(''))) * cw;
+                    const b = x + (2 + textWidth(row.slice(0, to).join(''))) * cw;
+                    cv.rect({ left: a, top: ty + i * lh, right: b, bottom: ty + (i + 1) * lh }, theme.SELECTION);
+                }
             }
         }
         for (let i = 0; i < shownRows; i++) cv.text(x + 2 * cw, ty + i * lh, rows[first + i].join(''), theme.FG);
@@ -1592,6 +1649,7 @@ export class AgentPanel {
             const cx = x + (2 + cursorX) * cw;
             const cy = ty + (cursorRow - first) * lh;
             cv.rect({ left: cx, top: cy, right: cx + 2, bottom: cy + lh }, theme.CURSOR);
+            this.caret = { x: cx, y: cy, w: 2, h: lh };
         }
         // Under it: a message, the permission mode if it isn't the default,
         // or the keys.

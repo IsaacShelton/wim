@@ -24,7 +24,7 @@ import { Terminal as XTerm } from '@xterm/headless';
 import { KeyInput } from './editor/keys';
 import { LineTerminal } from './lineterminal';
 import { Box } from './popup';
-import { DrawCmd, TextStyle } from './protocol';
+import { Caret, DrawCmd, TextStyle } from './protocol';
 import { theme } from './theme';
 
 /** What the window should do after a key in the terminal. */
@@ -57,6 +57,8 @@ export interface TerminalPane {
     selectedText(): string | undefined;
     /** Draw the terminal in `r`: a title row and the screen. */
     paint(cmds: DrawCmd[], r: Box, cw: number, lh: number, focused: boolean): void;
+    /** Where the shell's cursor was drawn, for the input method's window. */
+    caret: Caret | undefined;
     dispose(): void;
 }
 
@@ -115,6 +117,7 @@ export class Terminal implements TerminalPane {
     private selecting = false;
     /** Where the screen was drawn last, to find cells under the mouse. */
     private shownAt: { left: number; top: number; cw: number; lh: number; cols: number; rows: number } | undefined;
+    caret: Caret | undefined;
 
     constructor(private readonly opts: TerminalOptions) {
         this.term = new XTerm({ cols: 80, rows: 24, scrollback: SCROLLBACK, allowProposedApi: true });
@@ -379,6 +382,7 @@ export class Terminal implements TerminalPane {
     // ----- Painting ------------------------------------------------------------------
 
     paint(cmds: DrawCmd[], r: Box, cw: number, lh: number, focused: boolean): void {
+        this.caret = undefined;
         const text = (x: number, y: number, s: string, color: string, style?: TextStyle): void => {
             if (s.trim() !== '') cmds.push(style ? ['text', x, y, s, color, style] : ['text', x, y, s, color]);
         };
@@ -466,6 +470,7 @@ export class Terminal implements TerminalPane {
             const cy = top + buf.cursorY * lh;
             if (focused) {
                 cmds.push(['rect', cx, cy, cw, lh, theme.CURSOR]);
+                this.caret = { x: cx, y: cy, w: cw, h: lh };
                 const under = buf.getLine(buf.baseY + buf.cursorY)?.getCell(buf.cursorX, cell)?.getChars();
                 if (under) text(cx, cy, under, theme.BG);
             } else {

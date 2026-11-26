@@ -25,7 +25,7 @@ import { imageSize } from '../src/image';
 import { Keymap } from '../src/keymap';
 import { diagramId } from '../src/markdown';
 import { ServerSpec } from '../src/lsp/servers';
-import { AudioCommand, ClientMessage, DrawCmd } from '../src/protocol';
+import { AudioCommand, Caret, ClientMessage, DrawCmd } from '../src/protocol';
 import { theme } from '../src/theme';
 import { startServer } from '../src/server';
 
@@ -38,6 +38,10 @@ function tempDir(name: string): string {
 interface Harness {
     app: WimApp;
     frames: DrawCmd[][];
+    /** Where each frame said the caret was, for the input method's window. */
+    carets: (Caret | undefined)[];
+    /** Whether each frame said keys go through the input method. */
+    imes: boolean[];
     quit: () => boolean;
     send: (msg: ClientMessage) => void;
     type: (keys: string) => void;
@@ -47,13 +51,19 @@ interface Harness {
 
 function harness(file?: string, servers: ServerSpec[] = [], opts: Partial<AppOptions> = {}): Harness {
     const frames: DrawCmd[][] = [];
+    const carets: (Caret | undefined)[] = [];
+    const imes: boolean[] = [];
     let quit = false;
     const app = new WimApp({
         path: file,
         icons: false,
         clipboard: new MemoryClipboard(),
         servers,
-        onFrame: (_title, _dirty, cmds) => frames.push(cmds),
+        onFrame: (_title, _dirty, cmds, _animating, _tracking, caret, ime) => {
+            frames.push(cmds);
+            carets.push(caret);
+            imes.push(ime);
+        },
         onQuit: () => {
             quit = true;
         },
@@ -64,6 +74,8 @@ function harness(file?: string, servers: ServerSpec[] = [], opts: Partial<AppOpt
     return {
         app,
         frames,
+        carets,
+        imes,
         quit: () => quit,
         send,
         type: (keys) => {
@@ -83,6 +95,41 @@ test('typing edits the buffer and repaints', () => {
     assert.equal(h.app.editor.buffer.text(), 'hello');
     assert.match(h.text(), /hello/);
     assert.match(h.text(), /NORMAL/);
+});
+
+test('the frame says where the caret is, for the input method', () => {
+    const h = harness();
+    h.type('iabc<Esc>0');
+    const start = h.carets[h.carets.length - 1];
+    assert.ok(start, 'the window is told where to put the input method');
+    h.type('l');
+    const next = h.carets[h.carets.length - 1]!;
+    assert.equal(next.x - start.x, 10, 'one cell for an ASCII character');
+    assert.equal(next.w, 10);
+});
+
+test('wide characters take two cells, in the text and the caret', () => {
+    const h = harness();
+    h.type('i中好<Esc>0');
+    assert.equal(h.app.editor.displayCol(0, 1), 2, 'a Chinese character is two cells');
+    const start = h.carets[h.carets.length - 1]!;
+    h.type('l');
+    const next = h.carets[h.carets.length - 1]!;
+    assert.equal(next.x - start.x, 20, 'the next Chinese character starts two cells on');
+    assert.equal(next.w, 20, 'the caret covers both cells of a wide character');
+});
+
+test('the input method composes only while text is being entered', () => {
+    const h = harness();
+    assert.equal(h.imes[h.imes.length - 1], false, 'Normal mode keys are Vim commands');
+    h.type('i');
+    assert.equal(h.imes[h.imes.length - 1], true, 'Insert mode takes text');
+    h.type('<Esc>');
+    assert.equal(h.imes[h.imes.length - 1], false, 'back to Normal mode');
+    h.type('v');
+    assert.equal(h.imes[h.imes.length - 1], false, 'Visual mode keys are commands');
+    h.type('<Esc>:');
+    assert.equal(h.imes[h.imes.length - 1], false, 'the command line takes keys, not text');
 });
 
 test('leader mappings wait for the next key', () => {
@@ -791,6 +838,19 @@ test('the server serves the page and talks WebSocket with the token', async () =
             }),
         );
         assert.match(pageText, /<canvas id="wim"/);
+        // A focused, visually hidden editable field lets the system input
+        // method (macOS Pinyin) compose; a bare canvas can't.
+        assert.match(pageText, /<textarea id="ime"/);
+
+        // The window loads this to lay text out with wide characters.
+        const widthScript = await new Promise<string>((resolve) =>
+            http.get(new URL('/textwidth.js', server.url), (res) => {
+                let body = '';
+                res.on('data', (d) => (body += d));
+                res.on('end', () => resolve(body));
+            }),
+        );
+        assert.match(widthScript, /function charWidth/);
 
         const bad = await connect(server.url.replace('/?t=', '/ws?t=wrong'));
         assert.equal(bad.status, 403);

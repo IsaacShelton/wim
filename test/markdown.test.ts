@@ -53,6 +53,11 @@ test('paragraphs and list items wrap, items hanging under their bullets', () => 
     assert.deepEqual(shown(rows), ['• first item that is', '  long enough to', '  wrap', '  ◦ nested', '1. one', '☑ done', '', 'text']);
 });
 
+test('Chinese text wraps by cells, not characters', () => {
+    const rows = renderMarkdown(['中文中文中文中文'], 10);
+    assert.deepEqual(shown(rows), ['中文中文中', '文中文'], 'each character takes two cells');
+});
+
 test('setext headings and block quotes', () => {
     const rows = renderMarkdown(['Title', '=====', '', '> quoted', '> more', '>', '> > deeper', '', 'out'], 80);
     assert.deepEqual(shown(rows), ['Title', '---', '', '> quoted more', '>', '> > deeper', '', 'out']);

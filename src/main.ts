@@ -83,9 +83,9 @@ export async function main(argv: string[]): Promise<void> {
         icons: fontPath !== undefined,
         config,
         configWarnings: warnings,
-        onFrame: (title, dirty, cmds, animating, tracking) => {
+        onFrame: (title, dirty, cmds, animating, tracking, caret, ime) => {
             window?.setTitle(title);
-            send(client, { t: 'frame', title, dirty, cmds, animating, tracking });
+            send(client, { t: 'frame', title, dirty, cmds, animating, tracking, caret, ime });
         },
         onAudio: (cmd) => send(client, { t: 'audio', cmd }),
         onQuit: shutdown,

@@ -23,6 +23,7 @@ import { CmdKind, Mode, WANT_EOL, isCmdLine, isInsert, isVisual } from './mode';
 import { Range } from './range';
 import { Registers } from './registers';
 import * as search from './search';
+import { charWidth } from '../textwidth';
 import { lineRows as wrapRows } from './wrap';
 
 export interface Options {
@@ -457,7 +458,8 @@ export class Editor {
         }
         const dcol = this.displayCol(line, this.cursor.col);
         if (dcol < this.scrollLeft) this.scrollLeft = dcol;
-        if (dcol >= this.scrollLeft + this.viewCols) this.scrollLeft = dcol + 1 - this.viewCols;
+        const cells = this.cursor.col < this.buffer.lineLen(line) ? charWidth(this.buffer.charAt(this.cursor) ?? ' ') : 1;
+        if (dcol + cells > this.scrollLeft + this.viewCols) this.scrollLeft = dcol + cells - this.viewCols;
     }
 
     /** Scroll the view with the mouse wheel, leaving the cursor where it is:
@@ -497,7 +499,7 @@ export class Editor {
         const chars = this.buffer.line(line);
         let d = 0;
         const n = Math.min(col, chars.length);
-        for (let i = 0; i < n; i++) d = chars[i] === '\t' ? (Math.floor(d / ts) + 1) * ts : d + 1;
+        for (let i = 0; i < n; i++) d = chars[i] === '\t' ? (Math.floor(d / ts) + 1) * ts : d + charWidth(chars[i]);
         return d + Math.max(col - chars.length, 0);
     }
 
@@ -506,7 +508,7 @@ export class Editor {
         const chars = this.buffer.line(line);
         let d = 0;
         for (let i = 0; i < chars.length; i++) {
-            const next = chars[i] === '\t' ? (Math.floor(d / ts) + 1) * ts : d + 1;
+            const next = chars[i] === '\t' ? (Math.floor(d / ts) + 1) * ts : d + charWidth(chars[i]);
             if (dcol < next) return i;
             d = next;
         }

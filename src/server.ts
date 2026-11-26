@@ -170,6 +170,11 @@ export function startServer(opts: ServerOptions): Promise<Server> {
             fs.readFile(clientScript, (err, data) =>
                 err ? send(500, 'text/plain', 'Wim is not built: run `npm run build`.') : send(200, 'text/javascript', data),
             );
+        } else if (url.pathname === '/textwidth.js') {
+            // What the window imports to know how wide a character is.
+            fs.readFile(path.join(__dirname, '..', 'web', 'textwidth.js'), (err, data) =>
+                err ? send(500, 'text/plain', 'Wim is not built: run `npm run build`.') : send(200, 'text/javascript', data),
+            );
         } else if (url.pathname === '/media') {
             // Images and sounds the editor shows and plays, for this session
             // only.
@@ -274,10 +279,23 @@ function page(hasIconFont: boolean): string {
 ${fontFace}
 html, body { margin: 0; height: 100%; overflow: hidden; background: #282c34; }
 canvas { display: block; width: 100vw; height: 100vh; cursor: text; }
+/* A focused, visually hidden text field the system input method (IME, e.g.
+   macOS Pinyin) composes into; the editor itself is only a canvas. It must
+   stay focusable (not display:none) and not capture pointer events. The
+   window moves it to the caret, so the IME's window appears there. */
+#ime {
+  position: fixed; left: 0; top: 0; width: 1px; height: 1px;
+  margin: 0; padding: 0; border: 0; outline: none;
+  opacity: 0; overflow: hidden; resize: none; pointer-events: none;
+  background: transparent; color: transparent; caret-color: transparent;
+  white-space: pre; /* don't let a composing newline collapse */
+}
 </style>
 </head>
 <body>
 <canvas id="wim" data-icons="${hasIconFont ? '1' : ''}"></canvas>
+<textarea id="ime" aria-hidden="true" tabindex="-1"
+  autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false"></textarea>
 <script type="module" src="/client.js"></script>
 </body>
 </html>

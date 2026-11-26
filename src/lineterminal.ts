@@ -14,7 +14,7 @@ import { StringDecoder } from 'node:string_decoder';
 import { TextInput } from './agent/input';
 import { KeyInput, keyNew } from './editor/keys';
 import { Box } from './popup';
-import { DrawCmd } from './protocol';
+import { Caret, DrawCmd } from './protocol';
 import type { TerminalAction, TerminalOptions, TerminalPane } from './terminal';
 import { theme } from './theme';
 
@@ -62,6 +62,7 @@ export class LineTerminal implements TerminalPane {
     /** Rows scrolled up from the end (0 follows the output). */
     scroll = 0;
     private rows = 10;
+    caret: Caret | undefined;
 
     constructor(private readonly opts: TerminalOptions) {}
 
@@ -291,6 +292,7 @@ export class LineTerminal implements TerminalPane {
 
     /** Draw the terminal in `r`: a title row, the output and the prompt. */
     paint(cmds: DrawCmd[], r: Box, cw: number, lh: number, focused: boolean): void {
+        this.caret = undefined;
         const text = (x: number, y: number, s: string, color: string): void => {
             if (s !== '') cmds.push(['text', x, y, s, color]);
         };
@@ -345,6 +347,7 @@ export class LineTerminal implements TerminalPane {
         if (focused) {
             const cx = x + (2 + cursor - from) * cw;
             cmds.push(['rect', cx, promptTop, cw, lh, theme.CURSOR]);
+            this.caret = { x: cx, y: promptTop, w: cw, h: lh };
             const under = chars[cursor];
             if (under !== undefined && under !== ' ') text(cx, promptTop, under, theme.BG);
         }

@@ -1,7 +1,8 @@
 // The window: draws the frames Node sends on a canvas, and forwards keys,
 // mouse and resizes to Node. All editor logic lives in Node.
 
-import type { AudioCommand, ClientMessage, DrawCmd, ServerMessage } from '../protocol';
+import type { AudioCommand, Caret, ClientMessage, DrawCmd, ServerMessage } from '../protocol';
+import { charWidth } from '../textwidth.js';
 
 const BASE_FONT_SIZE = 15;
 const LINE_SPACING = 1.3;
@@ -10,6 +11,16 @@ const canvas = document.getElementById('wim') as HTMLCanvasElement;
 const ctx = canvas.getContext('2d')!;
 const hasIcons = canvas.dataset.icons === '1';
 const isMac = /Mac/.test(navigator.platform);
+/**
+ * A visually hidden text field. The editor draws on a canvas, which can't
+ * receive text input, so macOS (and other systems) only shows the system
+ * input method (IME, e.g. Pinyin) composing into an editable element. It is
+ * focused while text is being entered and blurred otherwise, so that in
+ * Normal mode the input method leaves keys alone. Printable keys are still
+ * forwarded as keys; this field exists so the IME can run, and the text it
+ * inserts or commits is read from it (see the composition and input handlers).
+ */
+const ime = document.getElementById('ime') as HTMLTextAreaElement | null;
 /** This session's token, which the server wants for the WebSocket and images. */
 const token = new URLSearchParams(location.search).get('t') ?? '';
 
@@ -23,6 +34,62 @@ let tickSent = false;
 let quitting = false;
 let socket: WebSocket | undefined;
 let pressed = false;
+/** Whether an IME composition (e.g. Pinyin picking a candidate) is active. */
+let composing = false;
+/** When a composition last committed, to ignore a key WebKit re-sends after it. */
+let lastCompositionEnd = -Infinity;
+/** Text a composition just committed, and when, so its `input` event can be
+ * told from punctuation the input method inserts without composing. */
+let committed: { text: string; at: number } | undefined;
+/** Whether keys go through the system input method (text entry) or straight
+ * to the editor as Vim commands. Node says which for each frame. */
+let imeWanted = false;
+
+/** Focus the hidden field, so the system input method can compose into it. */
+function focusIme(): void {
+    if (!ime || !imeWanted) return;
+    // Focusing while the field holds text would disturb a composition.
+    if (document.activeElement !== ime) ime.focus();
+}
+
+/** Turn the input method on (for Insert mode, the agent prompt, the terminal)
+ * or off, so that in Normal mode its keys reach the editor as they are
+ * instead of being composed by the input method. */
+function setIme(wanted: boolean): void {
+    if (wanted === imeWanted) return;
+    imeWanted = wanted;
+    if (wanted) focusIme();
+    else if (document.activeElement === ime) ime?.blur();
+}
+
+/** Drop any raw letters the browser left in the hidden field. */
+function clearIme(): void {
+    if (ime && !composing) ime.value = '';
+}
+
+/** Send text the input method delivered, one character at a time, as if it
+ * had been typed. */
+function sendText(text: string): void {
+    for (const c of text) send({ t: 'key', key: c, ctrl: false, alt: false });
+}
+
+/** Where the caret is, in CSS pixels; the input method's window goes here. */
+let caret: Caret | undefined;
+/** Where the hidden field was last put, so frames don't reflow it for
+ * nothing (and don't disturb a composition). */
+let placed: Caret | undefined;
+
+/** Put the hidden field at the caret, so the system input method shows its
+ * candidates beside the cursor rather than in the window's top left. */
+function placeIme(): void {
+    if (!ime || !caret) return;
+    if (placed && placed.x === caret.x && placed.y === caret.y && placed.w === caret.w && placed.h === caret.h) return;
+    placed = { ...caret };
+    ime.style.left = `${caret.x}px`;
+    ime.style.top = `${caret.y}px`;
+    ime.style.width = `${Math.max(caret.w, 1)}px`;
+    ime.style.height = `${Math.max(caret.h, 1)}px`;
+}
 
 function fontSize(): number {
     return Math.round(BASE_FONT_SIZE * zoom * 10) / 10;
@@ -168,8 +235,10 @@ function fillSnapped(left: number, top: number, right: number, bottom: number): 
 }
 
 /** Draw text on the character grid. ASCII runs are drawn whole; other
- * characters (icons, symbols, wide glyphs from fallback fonts) one cell at a
- * time so they can't push the rest of the line out of its columns. */
+ * characters (icons, symbols, wide glyphs from fallback fonts) one at a time
+ * so they can't push the rest of the line out of its columns. A wide
+ * character (a Chinese character, an emoji) takes two cells, as it does in
+ * the editor's layout. */
 function drawText(x: number, y: number, text: string, color: string): void {
     ctx.fillStyle = color;
     const mid = y + lineH / 2;
@@ -177,6 +246,7 @@ function drawText(x: number, y: number, text: string, color: string): void {
     let run = '';
     let runCol = 0;
     for (const c of text) {
+        const width = charWidth(c);
         if (c.charCodeAt(0) < 0x80) {
             if (run === '') runCol = col;
             run += c;
@@ -188,7 +258,7 @@ function drawText(x: number, y: number, text: string, color: string): void {
             const cx = x + col * charW;
             if (!drawPowerline(c, cx, y) && !drawBlock(c, cx, y)) ctx.fillText(c, cx, mid);
         }
-        col++;
+        col += width;
     }
     if (run !== '') ctx.fillText(run, x + runCol * charW, mid);
 }
@@ -538,12 +608,19 @@ function setZoom(z: number): void {
 }
 
 window.addEventListener('keydown', (e) => {
-    if (e.isComposing || quitting) return;
+    // While an IME composition is active, keys belong to the input method:
+    // don't forward them or stop it. `keyCode === 229` (`VKEY_PROCESSKEY`,
+    // `key === 'Process'`) marks a key the IME is consuming; committed text
+    // arrives separately on `compositionend`.
+    if (e.isComposing || composing || e.keyCode === 229 || e.key === 'Process' || quitting) return;
     if (shortcut(e)) {
         e.preventDefault();
         return;
     }
     if (isMac && e.metaKey) return;
+    // WebKit can re-dispatch the key that committed a composition (Enter for
+    // Pinyin) right after `compositionend`; don't act on it twice.
+    if (e.key === 'Enter' && e.timeStamp - lastCompositionEnd < 50) return;
     const named = NAMED[e.key];
     if (named) {
         // Option on the editing keys gives macOS word movement/deletion.
@@ -565,6 +642,79 @@ window.addEventListener('keydown', (e) => {
     e.preventDefault();
 });
 
+// ----- Input method (IME) ---------------------------------------------------------------------
+//
+// macOS Pinyin and other system input methods compose into the hidden field;
+// the letters of the composition aren't sent as ordinary keys. When a
+// candidate is chosen (or composition otherwise commits), `compositionend`
+// carries the resulting text, which we insert one character at a time, the
+// same as typing it. Cancelling a composition sends nothing.
+//
+// The field is focused only while text is being entered (Insert mode, the
+// agent prompt, the terminal: see the frame's `ime`). In Normal and other
+// modes it is blurred, so the input method doesn't take the keys for a
+// composition; otherwise `d`, `gg`, `,` and the other commands would never
+// reach the editor while Pinyin is selected.
+if (ime) {
+    ime.addEventListener('compositionstart', () => {
+        composing = true;
+        committed = undefined;
+        ime.value = '';
+        // The candidate window follows the field's caret.
+        placeIme();
+    });
+    ime.addEventListener('compositionend', (e) => {
+        composing = false;
+        lastCompositionEnd = e.timeStamp;
+        const data = e.data ?? '';
+        ime.value = '';
+        // `compositionend` can fire with the field still holding composition
+        // text; clear again after the browser settles it.
+        queueMicrotask(clearIme);
+        // The browser fires an `input` event for this text too; don't insert
+        // it twice (see the `input` handler).
+        committed = { text: data, at: e.timeStamp };
+        // A composition cancelled by leaving text entry (a blur) still ends
+        // here; its text doesn't belong in Normal mode.
+        if (imeWanted) sendText(data);
+        focusIme();
+    });
+    // `input` also fires for raw keys and for composition updates. Raw keys
+    // are handled on `keydown` and never reach the field, but an input method
+    // can insert punctuation (e.g. `，` from Pinyin) without composing: that
+    // text arrives here, and nothing else would forward it.
+    ime.addEventListener('input', (e) => {
+        const ev = e as InputEvent;
+        if (ev.isComposing || composing) return;
+        // Some browsers leave `data` empty and only fill the field.
+        const data = ev.data ?? ime.value;
+        clearIme();
+        if (data === '') return;
+        // Only text entry takes what an input method inserts (an IME blurs
+        // the field in Normal mode, but a stray event shouldn't type there).
+        if (!imeWanted) return;
+        // Text a composition committed was already sent by `compositionend`;
+        // the browser's `input` event for it is a duplicate.
+        if (ev.inputType === 'insertCompositionText') return;
+        if (committed && data === committed.text && ev.timeStamp - committed.at < 100) {
+            committed = undefined;
+            return;
+        }
+        sendText(data);
+        focusIme();
+    });
+    // Keep the input method active while text is being entered: take focus
+    // back unless composing or Node has said keys belong to the editor.
+    ime.addEventListener('blur', () => {
+        // Losing focus ends any composition (some platforms don't fire
+        // `compositionend` for it); don't leave keys stuck with the input
+        // method.
+        composing = false;
+        clearIme();
+        if (imeWanted) queueMicrotask(focusIme);
+    });
+}
+
 // ----- Mouse ---------------------------------------------------------------------------------
 
 canvas.addEventListener('mousedown', (e) => {
@@ -572,6 +722,10 @@ canvas.addEventListener('mousedown', (e) => {
     pressed = true;
     send({ t: 'mouse', kind: 'down', x: e.clientX, y: e.clientY, mod: isMac ? e.metaKey : e.ctrlKey });
     e.preventDefault();
+    // Text entry takes the focus back for the input method; otherwise leave
+    // it off so the key goes to the editor.
+    if (imeWanted) focusIme();
+    else ime?.blur();
 });
 
 window.addEventListener('mousemove', (e) => {
@@ -719,6 +873,11 @@ function connect(): void {
             frame = msg;
             tickSent = false;
             if (document.title !== msg.title) document.title = msg.title;
+            setIme(msg.ime === true);
+            if (msg.caret) {
+                caret = msg.caret;
+                placeIme();
+            }
             queueDraw();
         } else if (msg.t === 'quit') {
             quitting = true;
@@ -741,7 +900,6 @@ async function start(): Promise<void> {
     measure();
     draw();
     connect();
-    canvas.focus();
 }
 
 void start();

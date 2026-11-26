@@ -9,6 +9,7 @@ import * as path from 'node:path';
 import type { Buffer } from './editor/buffer';
 import * as highlight from './highlight';
 import type { TextStyle } from './protocol';
+import { charWidth } from './textwidth';
 import { theme, themeName, tokenColor, tokenStyle } from './theme';
 
 export type StyledRun = [text: string, color: string, style?: TextStyle];
@@ -98,12 +99,15 @@ function inlineCells(chars: readonly string[], from: number, to: number, source:
 /** The runs and links of a row of cells, its links starting `at` columns in. */
 function styled(cells: readonly Cell[], at = 0): { runs: StyledRun[]; links?: RowLink[] } {
     const links: RowLink[] = [];
-    cells.forEach(([, , , , href], i) => {
-        if (href === undefined) return;
-        const last = links[links.length - 1];
-        if (last && last.href === href && last.to === at + i) last.to++;
-        else links.push({ from: at + i, to: at + i + 1, href });
-    });
+    let col = at;
+    for (const [c, , , , href] of cells) {
+        if (href !== undefined) {
+            const last = links[links.length - 1];
+            if (last && last.href === href && last.to === col) last.to += charWidth(c);
+            else links.push({ from: col, to: col + charWidth(c), href });
+        }
+        col += charWidth(c);
+    }
     return links.length > 0 ? { runs: toRuns(cells), links } : { runs: toRuns(cells) };
 }
 
@@ -168,7 +172,15 @@ function toRuns(cells: readonly Cell[]): StyledRun[] {
     return runs;
 }
 
-/** Break cells into rows at most `cols` wide, at spaces where possible. */
+/** How many cells a run of cells takes. */
+function cellsWidth(cells: readonly Cell[]): number {
+    let n = 0;
+    for (const c of cells) n += charWidth(c[0]);
+    return n;
+}
+
+/** Break cells into rows at most `cols` cells wide, at spaces where
+ * possible. */
 function wrapCells(cells: readonly Cell[], cols: number): Cell[][] {
     const out: Cell[][] = [];
     let start = 0;
@@ -178,15 +190,21 @@ function wrapCells(cells: readonly Cell[], cols: number): Cell[][] {
     while (start < cells.length) {
         const brk = cells.findIndex((c, i) => i >= start && c[0] === '\n');
         const limit = brk === -1 ? cells.length : brk;
-        if (limit - start <= cols) {
+        if (cellsWidth(cells.slice(start, limit)) <= cols) {
             out.push(cells.slice(start, limit));
             start = limit + 1;
             skipSpaces();
             continue;
         }
-        let end = start + cols;
+        let end = start;
+        let used = 0;
+        while (end < limit && used + charWidth(cells[end][0]) <= cols) {
+            used += charWidth(cells[end][0]);
+            end++;
+        }
+        if (end === start) end = start + 1;
         for (let i = end; i > start + cols / 2; i--) {
-            if (cells[i][0] === ' ') {
+            if (cells[i]?.[0] === ' ') {
                 end = i;
                 break;
             }
@@ -481,7 +499,7 @@ export function renderMarkdown(lines: readonly string[], cols: number, host?: Me
             body.push({ cells, source: end });
         }
         const n = Math.max(aligns.length, ...body.map((r) => r.cells.length));
-        const widths = Array.from({ length: n }, (_, c) => Math.max(1, ...body.map((r) => r.cells[c]?.length ?? 0)));
+        const widths = Array.from({ length: n }, (_, c) => Math.max(1, ...body.map((r) => cellsWidth(r.cells[c] ?? []))));
         // Narrow the widest columns until the table fits; their cells wrap.
         const room = cols - indent - 2 * quote - (3 * n + 1);
         let total = widths.reduce((a, b) => a + b, 0);
@@ -506,7 +524,7 @@ export function renderMarkdown(lines: readonly string[], cols: number, host?: Me
                 let at = 1;
                 widths.forEach((w, c) => {
                     const cells = wrapped[c][y] ?? [];
-                    const space = w - cells.length;
+                    const space = w - cellsWidth(cells);
                     const align = aligns[c] ?? 'left';
                     const before = align === 'right' ? space : align === 'center' ? Math.floor(space / 2) : 0;
                     const cell = styled(cells, at + before + 1);
