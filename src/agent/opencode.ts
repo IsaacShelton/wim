@@ -4,7 +4,7 @@
 // are translated into the same messages the Claude Agent SDK sends, so the
 // panel draws both the same way.
 
-import { AccountBalance, AgentBackend, AgentQuery, ContextUsage, HistoryMessage, ModelInfo, PastSession, PermissionResult, StartOptions, UsageInfo } from './backend';
+import { AccountBalance, AgentBackend, AgentQuery, ContextUsage, HistoryMessage, ModelInfo, PastSession, PermissionResult, SignIn, StartOptions, UsageInfo } from './backend';
 
 /** The parts of the OpenCode client backend.ts uses. They are kept loose so
  * the SDK stays an optional dependency, imported only when OpenCode is on. */
@@ -19,6 +19,15 @@ const MICRO_CENTS = 100_000_000;
 
 /** How long a balance is trusted before asking the console again. */
 const BALANCE_TTL = 30_000;
+
+/** How often a sign-in's progress is checked, and how long to wait when the
+ * provider doesn't say when it expires. */
+const SIGN_IN_POLL = 1500;
+const SIGN_IN_TIMEOUT = 10 * 60_000;
+
+function delay(ms: number): Promise<void> {
+    return new Promise((resolve) => setTimeout(resolve, ms));
+}
 
 /** The console refuses requests that don't look like a browser's. */
 const CONSOLE_USER_AGENT = 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/142.0.0.0 Safari/537.36';
@@ -85,6 +94,13 @@ function contentText(content: any): string {
         .map((c) => (c?.type === 'text' ? (c.text ?? '') : c?.type === 'file' ? `[${c.name ?? 'File'}]` : ''))
         .filter((s: string) => s !== '')
         .join('\n');
+}
+
+/** Point a sign-in failure at the panel's `/login`, unless the message
+ * already says so (OpenCode's own text mentions it sometimes). */
+function withSignInHint(message: string): string {
+    const aboutSignIn = /\b(?:auth(?:entication|orization|enticate)?|oauth|credentials?|sign[ -]?in|signed out|reconnect)\b/i.test(message);
+    return aboutSignIn && !/\/login/.test(message) ? `${message} (run /login to sign in again)` : message;
 }
 
 /** A user message's text and images, as the panel's channel carries them. */
@@ -187,6 +203,69 @@ export class OpenCodeBackend implements AgentBackend {
             // No console sign-in (or no balance route): there is nothing to show.
             return undefined;
         }
+    }
+
+    /** Sign in again through OpenCode's own device flow. This is for a saved
+     * console session whose refresh token the server no longer accepts:
+     * OpenCode refreshes on its own while the token is good, so only a new
+     * sign-in can replace one that was revoked. */
+    async signIn(dir: string): Promise<SignIn> {
+        const host = await this.host();
+        // The console's method is `device`; ask what the integration offers,
+        // but don't fail just because the list can't be read while signed out.
+        let methodID = 'device';
+        try {
+            const integration = await host.integration.get({ integrationID: 'opencode' });
+            const methods: any[] = integration?.data?.methods ?? [];
+            const method = methods.find((m: any) => m?.type === 'oauth' && m.id === 'device') ?? methods.find((m: any) => m?.type === 'oauth');
+            if (typeof method?.id === 'string') methodID = method.id;
+        } catch {
+            // The fallback is the console's own method.
+        }
+        const started = await host.integration.oauth.connect({
+            integrationID: 'opencode',
+            methodID,
+            location: { directory: dir },
+        });
+        const attempt = started?.data;
+        if (typeof attempt?.attemptID !== 'string' || typeof attempt?.url !== 'string') throw new Error("OpenCode didn't start a sign-in");
+        return {
+            url: attempt.url,
+            instructions: typeof attempt.instructions === 'string' ? attempt.instructions : '',
+            done: this.waitForSignIn(host, dir, attempt),
+        };
+    }
+
+    /** Watch a sign-in until it completes, fails or expires. New credentials
+     * make the old model list and balance stale, so both are forgotten. */
+    private async waitForSignIn(host: Client, dir: string, attempt: any): Promise<boolean> {
+        const deadline = typeof attempt.time?.expires === 'number' ? attempt.time.expires : Date.now() + SIGN_IN_TIMEOUT;
+        const cancel = (): Promise<unknown> =>
+            host.integration.oauth.cancel({ integrationID: 'opencode', attemptID: attempt.attemptID, location: { directory: dir } }).catch(() => undefined);
+        while (Date.now() < deadline) {
+            await delay(SIGN_IN_POLL);
+            try {
+                const result = await host.integration.oauth.status({
+                    integrationID: 'opencode',
+                    attemptID: attempt.attemptID,
+                    location: { directory: dir },
+                });
+                const status = result?.data?.status;
+                if (status === 'complete') {
+                    this.modelsByDir.clear();
+                    this.balanceCache = undefined;
+                    return true;
+                }
+                if (status === 'failed' || status === 'expired') {
+                    await cancel();
+                    return false;
+                }
+            } catch {
+                // A transient error: keep watching until the attempt expires.
+            }
+        }
+        await cancel();
+        return false;
     }
 
     private async ref(dir: string, value: string | undefined): Promise<ModelRef | undefined> {
@@ -367,7 +446,7 @@ class OpenCodeQuery implements AgentQuery {
             }
         } catch (e) {
             if (!this.closed) {
-                const why = `OpenCode couldn't take the message: ${(e as Error).message}`;
+                const why = withSignInHint(`OpenCode couldn't take the message: ${(e as Error).message}`);
                 this.emit({ type: 'system', subtype: 'informational', content: why, level: 'error' });
                 this.finishTurn(why);
             }
@@ -408,7 +487,7 @@ class OpenCodeQuery implements AgentQuery {
                 this.finishTurn();
                 break;
             case 'session.execution.failed': {
-                const why = data.error?.message ?? 'OpenCode stopped by an error';
+                const why = withSignInHint(data.error?.message ?? 'OpenCode stopped by an error');
                 this.emit({ type: 'system', subtype: 'informational', content: why, level: 'error' });
                 this.finishTurn(why);
                 break;

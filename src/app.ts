@@ -9,10 +9,10 @@ import { execFile } from 'node:child_process';
 import { AgentBackend, SdkBackend } from './agent/backend';
 import { OpenCodeBackend } from './agent/opencode';
 import { AgentPanel, PanelAction } from './agent/panel';
-import { Config, defaultConfig } from './config';
+import { Config, configPath, defaultConfig } from './config';
 import { AudioInfo, AudioPlayer, SEEK_STEP, VOLUME_STEP, formatTime } from './audio';
 import { Clipboard, SystemClipboard } from './clipboard';
-import { bufferState, bufferStates, findBuffer, reloadFromDisk, switchToBufferQuietly } from './editor/buffers';
+import { bufferState, bufferStates, deleteAllBuffers, findBuffer, reloadFromDisk, switchToBufferQuietly } from './editor/buffers';
 import { Buffer, Pos, isWhitespace, pos, posCmp } from './editor/buffer';
 import { awaitingMotion } from './editor/command';
 import { Editor, Selection } from './editor/editor';
@@ -45,7 +45,7 @@ import { AudioCommand, Caret, ClientMessage, DrawCmd, TextStyle } from './protoc
 import { charWidth, cutText, cutTextStart, textWidth } from './textwidth';
 import { TerminalAction, TerminalPane, createTerminal } from './terminal';
 import { isThemeName, setTheme, theme, themeName, tokenColor, tokenStyle } from './theme';
-import { openDefaultBrowser, revealInFolder } from './window';
+import { openDefaultBrowser, pickFolder as pickFolderNative, revealInFolder } from './window';
 import { Direction, SplitDir, Win, WinRect, Windows } from './windows';
 
 const TEXT_PADDING = 6;
@@ -136,6 +136,12 @@ interface Layout {
 
 type Focus = 'Editor' | 'Tree' | 'Agents' | 'Terminal';
 
+/** An entry in the project folder picker: work in `dir`, or browse it. */
+type FolderChoice = { t: 'use' | 'open'; dir: string };
+
+/** What the project menu's picker chooses. */
+type ProjectAction = 'open' | 'close' | 'config';
+
 /** Where the active window's view and caret are shown: the top line (or
  * row, in a rendered Markdown view), and the caret's line and display
  * column. Fractional while they glide. */
@@ -188,11 +194,16 @@ export interface AppOptions {
     /** Shows a file or folder in the system file manager (by default, in
      * Finder or Explorer). */
     revealPath?: (path: string) => void;
+    /** Asks the system for a folder, starting at `start` (by default, with
+     * the platform's own folder chooser). */
+    pickFolder?: (start: string) => Promise<string | undefined>;
 }
 
 export class WimApp {
     readonly editor: Editor;
     private readonly clipboard: Clipboard;
+    /** The platform's folder chooser, unless a test provides its own. */
+    private readonly pickFolder: (start: string) => Promise<string | undefined>;
     private readonly keymap = Keymap.fromNeovimConfig();
     /** Keys typed so far that may be the start of a mapping. */
     private mapPending: KeyInput[] = [];
@@ -205,6 +216,9 @@ export class WimApp {
     private readonly icons: boolean;
     private readonly tree: FileTree;
     private treeVisible = false;
+    /** Whether a project folder is open. Closing it leaves Wim running with
+     * no tree or buffers until another folder is chosen. */
+    private projectOpen = true;
     /** The right-click menu, while it is open. */
     private menu: ContextMenu | undefined;
     private focus: Focus = 'Editor';
@@ -244,6 +258,9 @@ export class WimApp {
     private readonly signature: SignatureHelp;
     /** A picker (references, symbols, code actions...) has the keyboard. */
     private picker: Picker<never> | undefined;
+    /** Where focus goes when the picker closes for a project change (the
+     * picker's own cleanup would otherwise move it to the editor). */
+    private pickerFocus: Focus | undefined;
     /** Hover documentation or diagnostics next to the cursor. */
     private float: Float | undefined;
     private refreshQueued = false;
@@ -299,6 +316,7 @@ export class WimApp {
         this.config = opts.config ?? defaultConfig();
         setTheme(this.config.theme);
         this.clipboard = opts.clipboard ?? new SystemClipboard();
+        this.pickFolder = opts.pickFolder ?? pickFolderNative;
         // `wim .` or `wim some/dir`: work in that directory, with no file open.
         let file = opts.path;
         let dirError: string | undefined;
@@ -374,6 +392,7 @@ export class WimApp {
             defaultPreset: this.config.claude.defaultPreset,
             cacheMinutes: this.config.claude.cacheMinutes,
             smoothScroll: () => this.config.editor.smoothScroll,
+            openUrl: (url) => (this.opts.openUrl ?? openDefaultBrowser)(url),
         });
         this.terminal = createTerminal({ shell: this.config.terminal.shell, cwd: currentDir, refresh });
         if (opts.configWarnings?.length) this.editor.setError(opts.configWarnings.join('; '));
@@ -574,7 +593,10 @@ export class WimApp {
                 if (this.picker === picker) this.picker = undefined;
                 // A choice that went somewhere (a symbol from the tree, say)
                 // moves to the editor to show it.
-                if (this.editor.bufferId() !== before[0] || this.editor.cursor !== before[1]) this.focus = 'Editor';
+                const focus = this.pickerFocus;
+                this.pickerFocus = undefined;
+                if (focus !== undefined) this.focus = focus;
+                else if (this.editor.bufferId() !== before[0] || this.editor.cursor !== before[1]) this.focus = 'Editor';
             }
             return;
         }
@@ -728,6 +750,9 @@ export class WimApp {
                 break;
             case 'ToggleWrap':
                 this.toggleWrap();
+                break;
+            case 'ProjectMenu':
+                this.openProjectMenu();
                 break;
             case 'FollowLink':
                 if (!this.followLinkAtCursor()) this.gotoFileAtCursor();
@@ -1600,6 +1625,10 @@ export class WimApp {
 
     private toggleTree(): void {
         this.windowCmdPending = false;
+        if (!this.projectOpen) {
+            this.chooseProjectFolder();
+            return;
+        }
         if (this.treeVisible) {
             this.treeVisible = false;
             this.focus = 'Editor';
@@ -1612,8 +1641,16 @@ export class WimApp {
         this.focus = 'Tree';
     }
 
+    /** Whether a project folder is open, or say how to open one. */
+    private requireProject(): boolean {
+        if (this.projectOpen) return true;
+        this.editor.setError('No project folder open: press ,k to choose one');
+        return false;
+    }
+
     /** `,a`: pick a file under the working directory to open. */
     private findFiles(): void {
+        if (!this.requireProject()) return;
         const root = currentDir();
         const items: PickerItem<string>[] = [];
         const picker = new Picker<string>('Find Files', (file) => this.openAt(path.join(root, file)), {
@@ -1643,6 +1680,7 @@ export class WimApp {
     /** `,fw`: search the working directory's files as you type, and jump to a
      * match. */
     private liveGrep(): void {
+        if (!this.requireProject()) return;
         const root = currentDir();
         let search: Search | undefined;
         const picker: Picker<GrepMatch> = new Picker<GrepMatch>(
@@ -1754,7 +1792,7 @@ export class WimApp {
         // Leaving the terminal or the agents panel, files may have changed.
         if (this.focus !== this.lastFocus && (this.lastFocus === 'Terminal' || this.lastFocus === 'Agents')) this.gitChanged();
         this.lastFocus = this.focus;
-        if (!this.treeVisible) return;
+        if (!this.projectOpen || !this.treeVisible) return;
         this.tree.ensureGit();
         const cwd = currentDir();
         if (cwd !== this.treeCwd) {
@@ -1986,6 +2024,178 @@ export class WimApp {
         }
     }
 
+    // ----- Project menu ------------------------------------------------------------
+
+    /** `,k`: the project menu, a Telescope-style picker. */
+    private openProjectMenu(): void {
+        this.editorToNormal();
+        this.picker?.dispose();
+        this.picker = undefined;
+        this.float = undefined;
+        this.completion.close();
+        this.signature.close();
+        this.press = undefined;
+        const folderIcon: [string, string] | undefined = this.icons ? [icons.FOLDER_CLOSED, theme.TREE_FOLDER_ICON] : undefined;
+        const items: PickerItem<ProjectAction>[] = [
+            { label: 'Open Project Folder…', detail: 'Choose a folder', icon: folderIcon, value: 'open' },
+        ];
+        if (this.projectOpen) {
+            items.push({ label: 'Close Project Folder', detail: displayName(currentDir()), icon: folderIcon, value: 'close' });
+        }
+        items.push({ label: 'Open Configuration', detail: 'wim.config.json', icon: this.fileIcon('wim.config.json'), value: 'config' });
+        const picker = new Picker<ProjectAction>(
+            'Project',
+            (action) => {
+                if (action === 'open') this.openProjectFolder();
+                else if (action === 'close') this.closeProject();
+                else this.openConfig();
+            },
+            { message: 'No project actions' },
+        );
+        picker.setItems(items);
+        this.picker = picker as unknown as Picker<never>;
+    }
+
+    /** Ask the system for a folder and switch to it. Wim's own browser is
+     * the fallback where there is no native chooser (Linux without zenity or
+     * kdialog). */
+    private openProjectFolder(): void {
+        const start = currentDir();
+        void this.pickFolder(start)
+            .then((dir) => {
+                if (dir === undefined) return;
+                this.switchProject(dir);
+                this.refresh();
+            })
+            .catch(() => {
+                this.chooseProjectFolder(start);
+                this.refresh();
+            });
+    }
+
+    /** Close the current project's buffers and windows, if none has unsaved
+     * changes. Returns whether it was done. */
+    private closeProjectBuffers(): boolean {
+        const modified = this.editor.firstModifiedBuffer();
+        if (modified) {
+            this.editor.setError(`E37: No write since last change in "${modified.name}" (save or close it first)`);
+            return false;
+        }
+        this.editorToNormal();
+        this.saveWindow();
+        deleteAllBuffers(this.editor, true, false);
+        this.windows.only();
+        this.windows.active.bufferId = this.editor.bufferId();
+        this.loadWindow(this.windows.active);
+        return true;
+    }
+
+    /** Close the project folder, leaving Wim open with no tree or buffers,
+     * then ask which folder to work in next. */
+    private closeProject(): void {
+        if (!this.projectOpen || !this.closeProjectBuffers()) return;
+        this.projectOpen = false;
+        this.treeVisible = false;
+        this.agentsVisible = false;
+        this.terminalVisible = false;
+        this.closeTreeWatch();
+        this.focus = 'Editor';
+        this.editor.setMessage('Project folder closed; choose another with ,k');
+        this.openProjectFolder();
+    }
+
+    /** Browse `start` for a project folder. Choosing a subdirectory browses
+     * it; "Use This Folder" switches to it. */
+    private chooseProjectFolder(start = currentDir()): void {
+        let entries: fs.Dirent[];
+        try {
+            entries = fs.readdirSync(start, { withFileTypes: true });
+        } catch (e) {
+            this.editor.setError(`E344: Can't read directory "${start}": ${(e as Error).message}`);
+            return;
+        }
+        const items: PickerItem<FolderChoice>[] = [
+            { label: 'Use This Folder', detail: start, truncateStart: true, value: { t: 'use', dir: start } },
+        ];
+        const parent = path.dirname(start);
+        if (parent !== start) items.push({ label: '..', detail: 'Parent folder', value: { t: 'open', dir: parent } });
+        const dirs = entries
+            .filter((entry) => entry.isDirectory() || (entry.isSymbolicLink() && isDirectory(path.join(start, entry.name))))
+            .map((entry) => entry.name)
+            .sort((a, b) => a.localeCompare(b, undefined, { sensitivity: 'base' }));
+        for (const name of dirs) {
+            items.push({
+                label: `${name}/`,
+                icon: this.icons ? [icons.FOLDER_CLOSED, theme.TREE_FOLDER_ICON] : undefined,
+                value: { t: 'open', dir: path.join(start, name) },
+            });
+        }
+        const picker = new Picker<FolderChoice>(
+            'Open Project Folder',
+            (choice) => {
+                if (choice.t === 'use') this.switchProject(choice.dir);
+                else this.chooseProjectFolder(choice.dir);
+            },
+            { message: 'Choose a folder to work in' },
+        );
+        picker.setItems(items);
+        this.picker = picker as unknown as Picker<never>;
+    }
+
+    /** Work in `dir`, closing the current project's buffers and showing the
+     * new folder's tree. */
+    private switchProject(dir: string): void {
+        const target = absolute(expandTilde(dir));
+        if (!isDirectory(target)) {
+            this.editor.setError(`E344: Can't find directory "${dir}"`);
+            return;
+        }
+        if (this.projectOpen && target === currentDir()) {
+            this.treeVisible = true;
+            this.tree.refresh();
+            this.focus = 'Tree';
+            this.editor.setMessage(`Project folder: ${displayName(target)}`);
+            return;
+        }
+        const modified = this.editor.firstModifiedBuffer();
+        if (modified) {
+            this.editor.setError(`E37: No write since last change in "${modified.name}" (save or close it first)`);
+            return;
+        }
+        try {
+            process.chdir(target);
+        } catch (e) {
+            this.editor.setError(`E344: Can't find directory "${dir}": ${(e as Error).message}`);
+            return;
+        }
+        this.closeProjectBuffers();
+        this.projectOpen = true;
+        this.tree.setRoot(target);
+        this.treeCwd = target;
+        this.revealed = undefined;
+        this.closeTreeWatch();
+        this.treeVisible = true;
+        this.focus = 'Tree';
+        if (this.picker) this.pickerFocus = 'Tree';
+        this.gitChanged();
+        this.editor.setMessage(`Project folder: ${displayName(target)}`);
+    }
+
+    private openConfig(): void {
+        this.editorToNormal();
+        this.editor.openFile(configPath());
+        this.focus = 'Editor';
+    }
+
+    /** Stop watching the tree's folder (it moved, or no project is open). */
+    private closeTreeWatch(): void {
+        this.treeWatcher?.close();
+        this.treeWatcher = undefined;
+        this.treeWatchRoot = undefined;
+        if (this.treeWatchTimer) clearTimeout(this.treeWatchTimer);
+        this.treeWatchTimer = undefined;
+    }
+
     /** The mouse with the menu open. Returns whether the menu took it. */
     private menuMouse(kind: 'down' | 'move' | 'up', x: number, y: number): boolean {
         const menu = this.menu;
@@ -2137,6 +2347,7 @@ export class WimApp {
             refresh: () => this.refresh(),
             focus: this.focus,
             icons: this.icons,
+            projectOpen: this.projectOpen,
             tree: this.tree,
             agents: this.agentsVisible ? this.agents : undefined,
             terminal: this.terminalVisible ? this.terminal : undefined,
@@ -2538,6 +2749,8 @@ interface PaintState {
     metrics: Metrics;
     focus: Focus;
     icons: boolean;
+    /** Whether a project folder is open (its git branch is shown when it is). */
+    projectOpen: boolean;
     tree: FileTree;
     /** The agents panel, when it is shown. */
     agents: AgentPanel | undefined;
@@ -3270,7 +3483,7 @@ class Painter {
         this.rect(rect(r.left, r.top, pillRight, r.bottom), modeColor);
         this.text(r.left, r.top, label, theme.BG);
 
-        const branch = gitBranch(currentDir(), this.st.refresh);
+        const branch = this.st.projectOpen ? gitBranch(currentDir(), this.st.refresh) : '';
         const branchLabel = branch === '' ? '' : ` ${this.st.icons ? '\ue0a0 ' : ''}${branch} `;
         const branchRight = pillRight + textWidth(branchLabel) * cw;
 

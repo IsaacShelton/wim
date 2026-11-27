@@ -20,6 +20,7 @@ import {
     PermissionResult,
     PermissionUpdate,
     SDKMessage,
+    SignIn,
     StartOptions,
     UsageInfo,
 } from '../src/agent/backend';
@@ -159,6 +160,10 @@ class FakeBackend implements AgentBackend {
     histories: Record<string, HistoryMessage[]> = {};
     /** What the provider account has left, when the test gives it one. */
     balanceValue: AccountBalance | undefined;
+    /** What `/login` starts, when the test gives it one. */
+    signInFlow: SignIn | undefined;
+    /** How many times `/login` asked this backend to sign in. */
+    signIns = 0;
 
     start(opts: StartOptions): Promise<AgentQuery> {
         const q = new FakeQuery(opts);
@@ -184,6 +189,11 @@ class FakeBackend implements AgentBackend {
 
     balance(): Promise<AccountBalance | undefined> {
         return Promise.resolve(this.balanceValue);
+    }
+
+    signIn(): Promise<SignIn> {
+        this.signIns++;
+        return Promise.resolve(this.signInFlow ?? { url: 'https://example.test/sign-in', instructions: 'Enter code: TEST', done: Promise.resolve(true) });
     }
 
     get last(): FakeQuery {
@@ -260,6 +270,7 @@ function harness(file?: string, extra: AgentBackend[] = [], claude: Partial<Conf
         },
         onFrame: (_title, _dirty, cmds) => frames.push(cmds),
         onQuit: () => {},
+        openUrl: () => {},
     });
     const send = (msg: ClientMessage): void => app.handleMessage(msg);
     send({ t: 'resize', width: 1400, height: 800, charW: 10, lineH: 20 });
@@ -542,6 +553,21 @@ test('/clear closes the session and starts a new one in its place, with the same
     assert.equal(q.opts.model, 'haiku');
     assert.equal(q.opts.permissionMode, 'plan');
     assert.equal(q.opts.effort, 'max');
+});
+
+test('/login signs in again through the agent, and shows where to go', async () => {
+    const url = 'https://opencode.ai/console/device?user_code=ABC-DEF';
+    const h = harness();
+    h.backend.signInFlow = { url, instructions: 'Enter code: ABC-DEF', done: Promise.resolve(true) };
+    h.send({ t: 'command', name: 'agents' });
+    h.type('/login<CR>');
+    await settle();
+    assert.equal(h.backend.signIns, 1);
+    assert.equal(h.backend.queries.length, 0, "/login doesn't start a conversation");
+    assert.match(h.text(), /Enter code: ABC-DEF/);
+    assert.match(h.text(), /opencode\.ai\/console\/device\?user_code=ABC-DEF/);
+    assert.equal(h.clipboard.text, url, 'the link is copied');
+    assert.match(h.text(), /Signed in to Claude Code/);
 });
 
 test('Ctrl+x interrupts Claude, and Ctrl+c leaves the prompt as Esc does', async () => {

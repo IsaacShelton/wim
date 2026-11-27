@@ -43,7 +43,10 @@ export type Command =
     /** Read one more character and insert it before the cursor. */
     | 'InsertCharBefore'
     /** Read one more character and insert it after the cursor. */
-    | 'InsertCharAfter';
+    | 'InsertCharAfter'
+    /** The project menu: open a folder, close the open one, or edit Wim's
+     * settings. */
+    | 'ProjectMenu';
 
 /** Language server features. */
 export type LspAction =
@@ -159,6 +162,8 @@ export class Keymap {
             [N, '<leader>th', command('ToggleTheme')],
             [N, '<leader>m', command('ToggleMarkdownView')],
             [N, '<leader>tw', command('ToggleWrap')],
+            // The project menu: folders and Wim's settings.
+            [N, '<leader>k', command('ProjectMenu')],
             // Following links in Markdown, as obsidian.nvim maps them.
             [N, 'gf', command('FollowLink')],
             [N, '<CR>', command('EnterOrFollowLink')],

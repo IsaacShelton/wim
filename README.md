@@ -212,6 +212,13 @@ modified orange and conflicted red; a folder takes the color of what changed ins
 file's name is bold. Status is read again when the tree is shown, after a write, after an agent
 changes files, and on leaving the terminal or the agents panel; `R` reads it too.
 
+`,k` opens the project menu, a Telescope-style picker. **Open Project Folder…** asks the system for a folder (macOS's
+folder chooser, Windows's folder browser, or zenity/kdialog on Linux; Wim browses inside its own
+window if none is available) and switches Wim to the chosen folder, closing the old project's
+buffers first. **Close Project Folder** closes those buffers and leaves Wim running with no
+tree; it then asks the system for the next folder, and canceling leaves Wim empty until `,k` is
+used again. **Open Configuration** opens Wim's own `wim.config.json`, beside `package.json`.
+
 ## Language servers
 
 Rust files use [rust-analyzer](https://rust-analyzer.github.io/); TypeScript and JavaScript
@@ -417,7 +424,9 @@ single key. Questions from Claude (AskUserQuestion) are answered the same way, t
 with Space where it asks for more than one, or typing another answer. Slash commands
 (`/compact`, `/context`, ...) are sent to Claude Code, except `/clear`, which closes the
 session (it can still be resumed) and opens a new one in its place with the same model,
-permission mode and effort.
+permission mode and effort, and `/login`, which signs in again through the agent (for
+OpenCode, when its saved console session can't be refreshed): it opens and copies the
+link, then waits for the sign-in to finish.
 
 Images dropped on the panel (from Finder, say) are attached to the next message too. Attached
 images show above the prompt: click an image's ✕, or press Backspace in an empty prompt, to remove
@@ -454,6 +463,7 @@ Normal-mode mappings don't apply in the middle of a command, so `f,` still finds
 | `` Ctrl+` `` (or `,tt`, or Cmd+J) | Any | Show or hide the terminal (see [Terminal](#terminal)) |
 | `,th` | Normal | Switch between Wim's colors (One Dark) and Nord |
 | `,tw` | Normal | Turn line wrapping on or off (`:set wrap!`) |
+| `,k` | Normal | The project menu: open another folder, close the current one, or open Wim's configuration |
 | Ctrl+y | Normal | Forward in the jump list (`<C-i>`, which is Tab in a terminal) |
 | `,w` `,b` `,e` `,ge` | Normal, Visual, after an operator | Like `w`, `b`, `e`, `ge` for subwords (nvim-spider): camelCase humps, snake_case parts and digit runs; single punctuation is skipped |
 | `,;` `,o` `,'` | Normal | `:w` |

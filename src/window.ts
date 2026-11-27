@@ -307,6 +307,60 @@ export function openDefaultBrowser(url: string): void {
     spawn(cmd, args, { stdio: 'ignore', detached: true }).on('error', () => { }).unref();
 }
 
+/** Ask the system for a folder: macOS's folder chooser, Windows's
+ * `FolderBrowserDialog`, or zenity/kdialog on Linux. Resolves to `undefined`
+ * when the chooser is canceled, and rejects when it can't be opened (Linux
+ * without zenity or kdialog, say). */
+export function pickFolder(start: string): Promise<string | undefined> {
+    if (process.platform === 'darwin') {
+        const script = [
+            'on run argv',
+            'set startFolder to POSIX file (item 1 of argv)',
+            'set chosenFolder to choose folder with prompt "Open Project Folder" default location (startFolder as alias)',
+            'return POSIX path of chosenFolder',
+            'end run',
+        ].join('\n');
+        return runPicker('osascript', ['-e', script, start]);
+    }
+    if (process.platform === 'win32') {
+        const script = [
+            'Add-Type -AssemblyName System.Windows.Forms',
+            '$dialog = New-Object System.Windows.Forms.FolderBrowserDialog',
+            "$dialog.Description = 'Open Project Folder'",
+            '$dialog.SelectedPath = $env:WIM_START',
+            'if ($dialog.ShowDialog() -eq [System.Windows.Forms.DialogResult]::OK) { [Console]::WriteLine($dialog.SelectedPath) }',
+        ].join('; ');
+        return runPicker('powershell.exe', ['-NoProfile', '-STA', '-Command', script], { ...process.env, WIM_START: start });
+    }
+    const dir = start.endsWith(path.sep) ? start : start + path.sep;
+    if (onPath('zenity')) {
+        return runPicker('zenity', ['--file-selection', '--directory', '--title=Open Project Folder', `--filename=${dir}`]);
+    }
+    if (onPath('kdialog')) {
+        return runPicker('kdialog', ['--getexistingdirectory', start, '--title', 'Open Project Folder']);
+    }
+    return Promise.reject(new Error('No native folder picker found (install zenity or kdialog)'));
+}
+
+/** Run a native folder chooser, with its choice on stdout. */
+function runPicker(command: string, args: string[], env?: NodeJS.ProcessEnv): Promise<string | undefined> {
+    return new Promise((resolve, reject) => {
+        const child = spawn(command, args, { env, stdio: ['ignore', 'pipe', 'pipe'], windowsHide: true });
+        let out = '';
+        child.stdout?.on('data', (chunk: Buffer) => (out += chunk));
+        // A chooser that was canceled exits nonzero, with nothing on stdout.
+        child.stderr?.on('data', () => { });
+        child.on('error', reject);
+        child.on('close', (code) => resolve(code === 0 ? out.trim() || undefined : undefined));
+    });
+}
+
+/** Whether `name` is a program on the PATH. */
+function onPath(name: string): boolean {
+    const found = spawnSync('which', [name], { encoding: 'utf8' });
+    return found.status === 0 && found.stdout.trim() !== '';
+}
+
 /** Show `p` in the system file manager: Finder's "Reveal in Finder", or
  * Explorer with the item selected. On Linux, where there is no common way to
  * select an item, the containing folder is opened instead. */

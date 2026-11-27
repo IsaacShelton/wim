@@ -13,7 +13,7 @@ import { test } from 'node:test';
 
 import { AppOptions, WimApp } from '../src/app';
 import { MemoryClipboard } from '../src/clipboard';
-import { defaultConfig } from '../src/config';
+import { configPath, defaultConfig } from '../src/config';
 import { parseKeys } from '../src/editor/keys';
 import { FileTree } from '../src/filetree';
 import { Glide } from '../src/glide';
@@ -577,6 +577,7 @@ test('leader mappings', () => {
     });
     assert.deepEqual(map.lookup('Normal', parseKeys(',y'), false), { t: 'None' });
     assert.deepEqual(map.lookup('Insert', parseKeys(',;'), false), { t: 'None' });
+    assert.equal(map.lookup('Normal', parseKeys(',k'), false).t, 'Exact', 'the project menu is not ambiguous');
 });
 
 test('the tree only gets window and ex mappings', () => {
@@ -1659,6 +1660,107 @@ test('Wrap Lines is also on <leader>tw', () => {
     assert.equal(h.app.editor.options.wrap, true);
     h.type(',tw');
     assert.equal(h.app.editor.options.wrap, false);
+});
+
+// ----- The project menu ---------------------------------------------------------------
+
+test('leader k opens the project menu', () => {
+    const h = harness();
+    h.type(',k');
+    assert.ok(drawn(h).includes(' Project '), 'the menu is a Telescope-style picker');
+    assert.ok(drawn(h).includes('> '), 'with a query line');
+    assert.ok(drawn(h).includes('Open Project Folder…'), 'the folder action is drawn');
+    assert.ok(drawn(h).includes('Close Project Folder'));
+    assert.ok(drawn(h).includes('Open Configuration'));
+    h.type('<Esc>');
+    assert.ok(!drawn(h).includes('Open Configuration'), 'Esc closes the menu');
+});
+
+test('the project menu opens Wim\'s configuration file', () => {
+    const h = harness();
+    h.type(',k');
+    h.type('<Down><Down><CR>');
+    assert.equal(h.app.editor.filePath, path.resolve(configPath()));
+});
+
+test('closing the project leaves Wim open and asks the system for another folder', async () => {
+    const dir = tempDir('project-close');
+    fs.writeFileSync(path.join(dir, 'a.txt'), 'alpha\n');
+    const cwd = process.cwd();
+    const picks: string[] = [];
+    process.chdir(dir);
+    try {
+        const h = harness(undefined, [], {
+            pickFolder: async (start) => {
+                picks.push(start);
+                return undefined;
+            },
+        });
+        h.type(',k');
+        h.type('<Down><CR>');
+        await until('the folder chooser', () => picks.length === 1);
+        assert.deepEqual(picks, [dir], 'the system folder chooser starts in the old project');
+        assert.equal(h.quit(), false, 'Wim stays open');
+        assert.equal(h.app.editor.filePath, undefined);
+        assert.equal(h.app.editor.buffer.text(), '');
+        assert.ok(!drawn(h).includes('a.txt'), 'the project tree is gone');
+    } finally {
+        process.chdir(cwd);
+        fs.rmSync(dir, { recursive: true });
+    }
+});
+
+test('the project menu switches to the folder the system chooser returns', async () => {
+    const parent = tempDir('project-switch');
+    const child = path.join(parent, 'child');
+    fs.mkdirSync(child);
+    fs.writeFileSync(path.join(child, 'inside.txt'), 'inside\n');
+    const cwd = process.cwd();
+    const picks: string[] = [];
+    process.chdir(parent);
+    try {
+        const h = harness(undefined, [], {
+            pickFolder: async (start) => {
+                picks.push(start);
+                return child;
+            },
+        });
+        h.type(',k');
+        h.type('<CR>');
+        await until('the project switch', () => process.cwd() === child);
+        assert.deepEqual(picks, [parent]);
+        assert.ok(drawn(h).includes('inside.txt'), 'the new project tree is shown');
+    } finally {
+        process.chdir(cwd);
+        fs.rmSync(parent, { recursive: true });
+    }
+});
+
+test('without a native folder chooser, the project menu browses in Wim', async () => {
+    const parent = tempDir('project-fallback');
+    const child = path.join(parent, 'child');
+    fs.mkdirSync(child);
+    fs.writeFileSync(path.join(child, 'inside.txt'), 'inside\n');
+    const cwd = process.cwd();
+    process.chdir(parent);
+    try {
+        const h = harness(undefined, [], {
+            pickFolder: async () => {
+                throw new Error('no native folder chooser');
+            },
+        });
+        h.type(',k');
+        h.type('<CR>');
+        await until('the fallback browser', () => drawn(h).includes('Use This Folder'));
+        // "Use This Folder", then "..", then the one directory: child.
+        h.type('<Down><Down><CR>');
+        h.type('<CR>');
+        assert.equal(process.cwd(), child);
+        assert.ok(drawn(h).includes('inside.txt'), 'the new project tree is shown');
+    } finally {
+        process.chdir(cwd);
+        fs.rmSync(parent, { recursive: true });
+    }
 });
 
 test('a line exactly as wide as the window takes one row, two while typing at its end', () => {

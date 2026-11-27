@@ -236,6 +236,7 @@ const HELP: [string, string][] = [
     ['f', 'Attach an image (or drop one on the panel)'],
     ['Backspace', 'Remove the last image, in an empty prompt'],
     ['/clear', 'A new session in place of this one, with its settings'],
+    ['/login', 'Sign in again, when the agent session has expired'],
     ['j k  Ctrl+d Ctrl+u', 'Scroll the conversation'],
     ['gg  G', 'Go to the top / the end'],
     ['Tab Shift+Tab  ]  [  1-9', 'Next / previous / Nth session'],
@@ -309,6 +310,8 @@ export interface PanelOptions {
     cacheMinutes: number;
     /** Whether the conversation glides when it scrolls. */
     smoothScroll?: () => boolean;
+    /** Opens a web page (a sign-in link, say) in the default browser. */
+    openUrl?: (url: string) => void;
 }
 
 /** How quickly the conversation glides, in ms (as the editor's text does). */
@@ -351,6 +354,8 @@ export class AgentPanel {
     /** `g` was typed, for `gg`, `gt` and `gT`. */
     private pendingG = false;
     private closeWarned = false;
+    /** A sign-in started with `/login` is still waiting on the user. */
+    private signingIn = false;
     /** Shown in place of the hints, until the next key. */
     private message: string | undefined;
     private spinner: NodeJS.Timeout | undefined;
@@ -447,6 +452,55 @@ export class AgentPanel {
         s.close();
         this.sessions[this.sessions.indexOf(s)] = fresh;
         this.message = s.id === undefined ? 'Cleared' : `Cleared "${cut(s.title, 30)}" (s to resume it)`;
+    }
+
+    /** `/login`: sign in again through the session's agent, for when its
+     * saved session has expired and can't be refreshed. The link is opened
+     * and copied, then the panel waits for the sign-in to finish. */
+    private async signIn(s: AgentSession): Promise<void> {
+        const backend = s.backend;
+        if (!backend.signIn) {
+            s.notice(`${backend.label} doesn't offer a sign-in from here`);
+            return;
+        }
+        if (this.signingIn) {
+            s.notice('Already waiting for a sign-in to finish');
+            return;
+        }
+        this.signingIn = true;
+        this.message = `Signing in to ${backend.label}…`;
+        this.changed();
+        try {
+            const flow = await backend.signIn(this.opts.cwd());
+            const what = flow.instructions === '' ? 'Sign in to continue' : flow.instructions;
+            s.notice(`${backend.label}: ${what}`);
+            s.notice(flow.url);
+            this.opts.clipboard.setText(flow.url);
+            this.opts.openUrl?.(flow.url);
+            this.message = 'Waiting for sign-in; the link is copied';
+            const done = await flow.done;
+            // The session may have been closed while the sign-in was waiting.
+            if (!this.sessions.includes(s)) return;
+            if (done) {
+                // New credentials make the model list and balance stale.
+                this.models = undefined;
+                this.loadingModels = undefined;
+                s.notice(`Signed in to ${backend.label}`);
+                void s.refreshUsage();
+                void s.refreshBalance();
+                if (s.preset) this.usePreset(s, s.preset, true);
+                this.message = `Signed in to ${backend.label}`;
+            } else {
+                s.notice(`Sign-in to ${backend.label} didn't finish; /login tries again`, true);
+                this.message = "Sign-in didn't finish";
+            }
+        } catch (e) {
+            s.notice(`Can't sign in to ${backend.label}: ${(e as Error).message}`, true);
+            this.message = 'Sign-in failed';
+        } finally {
+            this.signingIn = false;
+            this.changed();
+        }
     }
 
     /** Switch a session to a preset's model and effort, choosing the agent
@@ -627,6 +681,7 @@ export class AgentPanel {
             const images = this.attachments.splice(0);
             if (text.trim() === '' && images.length === 0) return NONE;
             if (images.length === 0 && /^\/clear\s*$/.test(text.trim())) this.clearSession(s);
+            else if (images.length === 0 && /^\/(?:login|reconnect)\s*$/i.test(text.trim())) this.signIn(s);
             else s.send(text, images);
             if (text.trim() !== '') this.input.remember(text);
             this.input.clear();

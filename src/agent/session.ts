@@ -253,7 +253,8 @@ export class AgentSession {
         this.opts.onChange();
     }
 
-    private notice(text: string, error = false): void {
+    /** Add a Notice to the conversation, from the session or the panel. */
+    notice(text: string, error = false): void {
         this.entries.push({ t: 'Notice', text, error });
         this.changed();
     }

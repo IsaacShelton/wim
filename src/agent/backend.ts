@@ -59,6 +59,18 @@ export interface AccountBalance {
     currency: string;
 }
 
+/** A sign-in waiting on the user, for when the provider's saved session has
+ * expired and can't be refreshed. */
+export interface SignIn {
+    /** The page to open in a browser. */
+    url: string;
+    /** What to do there, such as the code to enter. */
+    instructions: string;
+    /** Resolves true once the provider has new credentials, false if the
+     * attempt failed or expired. */
+    done: Promise<boolean>;
+}
+
 /** A session saved on disk, which can be resumed. */
 export interface PastSession {
     id: string;
@@ -94,6 +106,8 @@ export interface AgentBackend {
     models?(dir: string): Promise<sdk.ModelInfo[]>;
     /** The provider account's remaining balance, when it has one. */
     balance?(dir: string): Promise<AccountBalance | undefined>;
+    /** Sign in again, when the provider's saved session can't be refreshed. */
+    signIn?(dir: string): Promise<SignIn>;
 }
 
 /** How many past sessions the session picker lists. */
