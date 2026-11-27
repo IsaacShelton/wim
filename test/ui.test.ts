@@ -26,6 +26,7 @@ import { Keymap } from '../src/keymap';
 import { diagramId } from '../src/markdown';
 import { ServerSpec } from '../src/lsp/servers';
 import { AudioCommand, Caret, ClientMessage, DrawCmd } from '../src/protocol';
+import { MemoryRecentProjects } from '../src/recent';
 import { theme } from '../src/theme';
 import { startServer } from '../src/server';
 
@@ -1681,6 +1682,31 @@ test('the project menu opens Wim\'s configuration file', () => {
     h.type(',k');
     h.type('<Down><Down><CR>');
     assert.equal(h.app.editor.filePath, path.resolve(configPath()));
+});
+
+test('the project menu switches to a recent project', () => {
+    const first = tempDir('recent-first');
+    const second = tempDir('recent-second');
+    fs.writeFileSync(path.join(second, 'second.txt'), 'two\n');
+    const cwd = process.cwd();
+    const recents = new MemoryRecentProjects();
+    process.chdir(first);
+    try {
+        const h = harness(undefined, [], { recentProjects: recents });
+        recents.add(second);
+        h.type(',k');
+        assert.ok(drawn(h).some((line) => line.includes(path.basename(second))), 'the recent project is in the menu');
+        assert.ok(!drawn(h).some((line) => line.includes(path.basename(first))), 'the open project is not');
+        // Open Project Folder, then the recent project.
+        h.type('<Down><CR>');
+        assert.equal(process.cwd(), second);
+        assert.deepEqual(recents.list(), [second, first], 'the project just switched to is the most recent');
+        assert.ok(drawn(h).includes('second.txt'), 'the new project tree is shown');
+    } finally {
+        process.chdir(cwd);
+        fs.rmSync(first, { recursive: true });
+        fs.rmSync(second, { recursive: true });
+    }
 });
 
 test('closing the project leaves Wim open and asks the system for another folder', async () => {

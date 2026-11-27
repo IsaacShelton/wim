@@ -42,6 +42,7 @@ import { SignatureHelp } from './lsp/signature';
 import { absolute, baseName, currentDir, displayName, expandTilde } from './paths';
 import { Float, Overlay, Picker, PickerItem, PreviewSource, readPreview } from './popup';
 import { AudioCommand, Caret, ClientMessage, DrawCmd, TextStyle } from './protocol';
+import { MemoryRecentProjects, RecentProjects } from './recent';
 import { charWidth, cutText, cutTextStart, textWidth } from './textwidth';
 import { TerminalAction, TerminalPane, createTerminal } from './terminal';
 import { isThemeName, setTheme, theme, themeName, tokenColor, tokenStyle } from './theme';
@@ -140,7 +141,7 @@ type Focus = 'Editor' | 'Tree' | 'Agents' | 'Terminal';
 type FolderChoice = { t: 'use' | 'open'; dir: string };
 
 /** What the project menu's picker chooses. */
-type ProjectAction = 'open' | 'close' | 'config';
+type ProjectAction = { t: 'open' } | { t: 'switch'; dir: string } | { t: 'close' } | { t: 'config' };
 
 /** Where the active window's view and caret are shown: the top line (or
  * row, in a rendered Markdown view), and the caret's line and display
@@ -197,6 +198,9 @@ export interface AppOptions {
     /** Asks the system for a folder, starting at `start` (by default, with
      * the platform's own folder chooser). */
     pickFolder?: (start: string) => Promise<string | undefined>;
+    /** The projects the menu remembers (kept between runs by the window's
+     * entry point). */
+    recentProjects?: RecentProjects;
 }
 
 export class WimApp {
@@ -204,6 +208,8 @@ export class WimApp {
     private readonly clipboard: Clipboard;
     /** The platform's folder chooser, unless a test provides its own. */
     private readonly pickFolder: (start: string) => Promise<string | undefined>;
+    /** The project folders the menu offers to switch to. */
+    private readonly recents: RecentProjects;
     private readonly keymap = Keymap.fromNeovimConfig();
     /** Keys typed so far that may be the start of a mapping. */
     private mapPending: KeyInput[] = [];
@@ -317,6 +323,7 @@ export class WimApp {
         setTheme(this.config.theme);
         this.clipboard = opts.clipboard ?? new SystemClipboard();
         this.pickFolder = opts.pickFolder ?? pickFolderNative;
+        this.recents = opts.recentProjects ?? new MemoryRecentProjects();
         // `wim .` or `wim some/dir`: work in that directory, with no file open.
         let file = opts.path;
         let dirError: string | undefined;
@@ -371,6 +378,7 @@ export class WimApp {
         const root = currentDir();
         this.tree = new FileTree(root, !openedDir);
         this.treeCwd = root;
+        this.recents.add(root);
         // `wim .` starts with the tree open and focused.
         if (openedDir) {
             this.treeVisible = true;
@@ -2036,18 +2044,31 @@ export class WimApp {
         this.signature.close();
         this.press = undefined;
         const folderIcon: [string, string] | undefined = this.icons ? [icons.FOLDER_CLOSED, theme.TREE_FOLDER_ICON] : undefined;
+        const here = currentDir();
         const items: PickerItem<ProjectAction>[] = [
-            { label: 'Open Project Folder…', detail: 'Choose a folder', icon: folderIcon, value: 'open' },
+            { label: 'Open Project Folder…', detail: 'Choose a folder', icon: folderIcon, value: { t: 'open' } },
         ];
-        if (this.projectOpen) {
-            items.push({ label: 'Close Project Folder', detail: displayName(currentDir()), icon: folderIcon, value: 'close' });
+        // Recent projects follow, after the one that is open, so the menu can
+        // switch between them as Telescope's `oldfiles` does.
+        for (const dir of this.recents.list()) {
+            if (this.projectOpen && dir === here) continue;
+            items.push({
+                label: baseName(dir) || dir,
+                detail: displayName(dir),
+                icon: folderIcon,
+                value: { t: 'switch', dir },
+            });
         }
-        items.push({ label: 'Open Configuration', detail: 'wim.config.json', icon: this.fileIcon('wim.config.json'), value: 'config' });
+        if (this.projectOpen) {
+            items.push({ label: 'Close Project Folder', detail: displayName(here), icon: folderIcon, value: { t: 'close' } });
+        }
+        items.push({ label: 'Open Configuration', detail: 'wim.config.json', icon: this.fileIcon('wim.config.json'), value: { t: 'config' } });
         const picker = new Picker<ProjectAction>(
             'Project',
             (action) => {
-                if (action === 'open') this.openProjectFolder();
-                else if (action === 'close') this.closeProject();
+                if (action.t === 'open') this.openProjectFolder();
+                else if (action.t === 'switch') this.switchProject(action.dir);
+                else if (action.t === 'close') this.closeProject();
                 else this.openConfig();
             },
             { message: 'No project actions' },
@@ -2170,6 +2191,7 @@ export class WimApp {
         }
         this.closeProjectBuffers();
         this.projectOpen = true;
+        this.recents.add(target);
         this.tree.setRoot(target);
         this.treeCwd = target;
         this.revealed = undefined;

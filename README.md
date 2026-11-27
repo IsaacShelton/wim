@@ -140,6 +140,7 @@ default, and a mistake in it is reported at startup and ignored.
 | `src/links.ts` | Links between Markdown files: what a link points at, and which file and line that is |
 | `src/audio.ts` | Which files are sounds, and the player's state |
 | `src/config.ts` | The settings file, `wim.config.json` |
+| `src/recent.ts` | The project folders the project menu remembers between runs |
 | `src/glide.ts` | Smooth motion for the caret and scrolling |
 | `src/terminal.ts` | The integrated terminal: a shell on a pseudo-terminal (made by `script`), its screen kept by @xterm/headless |
 | `src/lineterminal.ts` | The line-based terminal used where there is no `script` (Windows) |
@@ -212,12 +213,15 @@ modified orange and conflicted red; a folder takes the color of what changed ins
 file's name is bold. Status is read again when the tree is shown, after a write, after an agent
 changes files, and on leaving the terminal or the agents panel; `R` reads it too.
 
-`,k` opens the project menu, a Telescope-style picker. **Open Project Folder…** asks the system for a folder (macOS's
+`,k` opens the project menu, a Telescope-style picker. It lists the folders Wim has opened before,
+most recent first, and choosing one switches to it. **Open Project Folder…** asks the system for a folder (macOS's
 folder chooser, Windows's folder browser, or zenity/kdialog on Linux; Wim browses inside its own
 window if none is available) and switches Wim to the chosen folder, closing the old project's
 buffers first. **Close Project Folder** closes those buffers and leaves Wim running with no
 tree; it then asks the system for the next folder, and canceling leaves Wim empty until `,k` is
 used again. **Open Configuration** opens Wim's own `wim.config.json`, beside `package.json`.
+Recent projects are kept in `~/Library/Application Support/wim/recent-projects.json` on macOS,
+`%APPDATA%\wim` on Windows, and `$XDG_STATE_HOME/wim` (by default `~/.local/state/wim`) on Linux.
 
 ## Language servers
 
@@ -463,7 +467,7 @@ Normal-mode mappings don't apply in the middle of a command, so `f,` still finds
 | `` Ctrl+` `` (or `,tt`, or Cmd+J) | Any | Show or hide the terminal (see [Terminal](#terminal)) |
 | `,th` | Normal | Switch between Wim's colors (One Dark) and Nord |
 | `,tw` | Normal | Turn line wrapping on or off (`:set wrap!`) |
-| `,k` | Normal | The project menu: open another folder, close the current one, or open Wim's configuration |
+| `,k` | Normal | The project menu: switch to a recent project, open another folder, close the current one, or open Wim's configuration |
 | Ctrl+y | Normal | Forward in the jump list (`<C-i>`, which is Tab in a terminal) |
 | `,w` `,b` `,e` `,ge` | Normal, Visual, after an operator | Like `w`, `b`, `e`, `ge` for subwords (nvim-spider): camelCase humps, snake_case parts and digit runs; single punctuation is skipped |
 | `,;` `,o` `,'` | Normal | `:w` |

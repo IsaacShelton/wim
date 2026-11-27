@@ -6,6 +6,7 @@ import { WimApp } from './app';
 import { loadConfig } from './config';
 import { findNerdFont } from './fonts';
 import { ClientMessage, ServerMessage } from './protocol';
+import { FileRecentProjects } from './recent';
 import { WebSocketConnection, startServer } from './server';
 import { WindowHandle, WindowKind, openWindow } from './window';
 
@@ -83,6 +84,7 @@ export async function main(argv: string[]): Promise<void> {
         icons: fontPath !== undefined,
         config,
         configWarnings: warnings,
+        recentProjects: new FileRecentProjects(),
         onFrame: (title, dirty, cmds, animating, tracking, caret, ime) => {
             window?.setTitle(title);
             send(client, { t: 'frame', title, dirty, cmds, animating, tracking, caret, ime });
