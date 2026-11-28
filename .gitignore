@@ -5,3 +5,4 @@
 # The native app's build output, and what Tauri generates while building.
 /native/target
 /native/gen
+next.txt

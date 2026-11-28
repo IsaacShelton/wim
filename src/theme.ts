@@ -9,6 +9,9 @@ const ONE_DARK = {
     BG: '#282c34',
     FG: '#abb2bf',
     CURSOR_LINE: '#2c313c',
+    /** The context lines at the top of the view: a lighter grey, as they are
+     * the lines above the ones shown. */
+    CONTEXT_BG: '#39414f',
     GUTTER: '#4b5263',
     GUTTER_CURRENT: '#e5c07b',
     TILDE: '#3b4048',
@@ -106,6 +109,7 @@ const NORD: Theme = {
     BG: '#2E3440', // polar night origin
     FG: '#D8DEE9', // snow storm origin
     CURSOR_LINE: '#3B4252', // polar night bright
+    CONTEXT_BG: '#3E4A5F',
     GUTTER: '#4C566A', // polar night brightest
     GUTTER_CURRENT: '#D8DEE9',
     TILDE: '#3B4252',

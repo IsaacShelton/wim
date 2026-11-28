@@ -93,7 +93,7 @@ default, and a mistake in it is reported at startup and ignored.
     },
     "opencode": { "enabled": false },
     "terminal": { "shell": "zsh" },
-    "editor": { "smoothCaret": false, "smoothScroll": false, "wrap": false, "yankClipboard": true }
+    "editor": { "smoothCaret": false, "smoothScroll": false, "wrap": false, "context": true, "yankClipboard": true }
 }
 ```
 
@@ -108,6 +108,7 @@ default, and a mistake in it is reported at startup and ignored.
 | `terminal.shell` | The shell the terminal runs (default `zsh`, or `powershell.exe` on Windows) |
 | `editor.smoothCaret` | Whether the caret glides quickly to where it moves instead of jumping (default `false`) |
 | `editor.wrap` | Whether long lines wrap onto several rows instead of scrolling sideways (default `false`) |
+| `editor.context` | Whether the lines the cursor is inside show at the top of the view once they have scrolled above it (default `true`) |
 | `editor.smoothScroll` | Whether the text glides when it scrolls (`<C-d>`, `<C-u>`, `<C-f>`, `<C-b>`, `zz`, the mouse wheel, ...) instead of jumping, in rendered Markdown too (default `false`) |
 | `editor.yankClipboard` | Whether a yank copies to the system clipboard (default `true`); `"+y` still copies when off |
 
@@ -185,6 +186,8 @@ word in Normal mode, and Option+Delete deletes a word on the command line.
 `<C-d>` and `<C-u>` move only the cursor (half a page); the view scrolls only as far as the
 cursor needs (`scrolloff`). The mouse wheel scrolls the view and leaves the caret where it is,
 out of view if the view has moved past it; the view follows the cursor again once it moves.
+While the lines the cursor is inside (a class, a function) sit above the view, their topmost
+ones show at its top instead, on a lighter background (see **Context at the top of the view**).
 
 **Search:** incremental, highlights matches, wraps around. Vim regex syntax: `\<word\>`,
 `\(group\)`, `\|`, `\+`, `\{n,m}`, `\v`, `\c`.
@@ -540,7 +543,7 @@ it was closed.
 
 **Options (`:set`):** `number`, `relativenumber` (both on by default: relative numbers, with
 the absolute number on the cursor line), `ignorecase`, `smartcase`, `hlsearch`,
-`incsearch`, `expandtab`, `autoindent`, `autopairs`, `wrap`, `tabstop`, `shiftwidth`, `scrolloff`,
+`incsearch`, `expandtab`, `autoindent`, `autopairs`, `wrap`, `context`, `tabstop`, `shiftwidth`, `scrolloff`,
 `clipboard=unnamed`. Each supports the `no`, `!` and `?` forms.
 
 **Desktop additions:** click to place the cursor, drag to select, Cmd+C / Cmd+X copy or cut the
@@ -551,7 +554,7 @@ the macOS window with unsaved changes shows a warning first; closing again disca
 an Edge or Chrome window, the browser asks before closing with unsaved changes instead.
 
 **Right-click menu:** right-clicking opens a menu for what is under the pointer: Cut, Copy, Paste,
-Select All and Wrap Lines in the editor (Cut and Copy work on a Visual selection, and Paste in Normal
+Select All, Context at Top and Wrap Lines in the editor (Cut and Copy work on a Visual selection, and Paste in Normal
 mode puts the clipboard as `"+p` does), and Copy and Paste in the agents panel and the terminal. Click
 an item, or move with Up/Down and press Enter; Esc or a click elsewhere closes it. Dragging in the
 terminal selects its text, which Copy (or Cmd+C) puts on the clipboard.
@@ -560,6 +563,16 @@ terminal selects its text, which Copy (or Cmd+C) puts on the clipboard.
 long lines over several rows, cut at the window's width, instead of scrolling sideways. `j` and `k`
 still move by whole lines. Set `editor.wrap` in the settings file to start with it on. Smooth
 scrolling and the gliding caret work by screen rows while lines wrap.
+
+**Context at the top of the view:** with `context` on (the default), the lines the cursor is
+inside — a class, a function, an `if` — show at the top of the view once they have scrolled
+above it, on a lighter grey background, so the code under the cursor keeps its surroundings in
+sight. Only off-screen lines show: a line appears when the rows would otherwise hide it and
+disappears when it comes back into frame, so nothing is drawn twice. There are at most five
+such rows, and they never cover the cursor's line; clicking one jumps to it. The lines are
+found from the indentation alone (no language server needed), in any file, skipping blank
+lines, comments and lines that only close a block. `:set nocontext` turns it off (also Context
+at Top in the right-click menu), and `editor.context` in the settings file starts it off.
 
 ## Terminal
 

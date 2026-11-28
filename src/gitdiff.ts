@@ -14,7 +14,7 @@ export type LineChange = 'Added' | 'Modified' | 'Deleted' | 'DeletedAbove';
 export type Hunk = [number, number, number, number];
 
 /** Past this many lines changed, the changed middle is one hunk. */
-const MAX_EDITS = 1000;
+const MAX_EDITS = 10000;
 
 /** The hunks that turn `a` into `b` (Myers' diff, after the lines the two
  * start and end with in common). */
@@ -158,7 +158,7 @@ export class GitDiff {
     private bases = new Map<string, { at: number; lines: string[] | undefined }>();
     private changes = new WeakMap<Source, { version: number; base: string[]; out: (LineChange | undefined)[] }>();
 
-    constructor(private readonly read: (file: string) => string[] | undefined = readBase) {}
+    constructor(private readonly read: (file: string) => string[] | undefined = readBase) { }
 
     /** Files may have changed in git: read its copies again. */
     invalidate(): void {

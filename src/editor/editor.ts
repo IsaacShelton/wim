@@ -37,6 +37,9 @@ export interface Options {
     autoindent: boolean;
     /** Insert closing brackets and quotes with opening ones (nvim-autopairs). */
     autopairs: boolean;
+    /** Show the lines the cursor is inside at the top of the view once they
+     * have scrolled above it. */
+    context: boolean;
     tabstop: number;
     shiftwidth: number;
     scrolloff: number;
@@ -55,6 +58,7 @@ export function defaultOptions(): Options {
         expandtab: true,
         autoindent: true,
         autopairs: true,
+        context: true,
         tabstop: 4,
         shiftwidth: 4,
         scrolloff: 3,

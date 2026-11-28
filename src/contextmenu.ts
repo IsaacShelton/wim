@@ -6,7 +6,7 @@ import { DrawCmd } from './protocol';
 import { textWidth } from './textwidth';
 import { theme } from './theme';
 
-export type MenuAction = 'cut' | 'copy' | 'paste' | 'selectAll' | 'wrap' | 'reveal' | 'newTerminal' | 'closeTerminal';
+export type MenuAction = 'cut' | 'copy' | 'paste' | 'selectAll' | 'context' | 'wrap' | 'reveal' | 'newTerminal' | 'closeTerminal';
 
 export interface MenuItem {
     action: MenuAction;

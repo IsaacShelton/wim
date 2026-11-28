@@ -482,6 +482,7 @@ type BoolOption =
     | 'expandtab'
     | 'autoindent'
     | 'autopairs'
+    | 'context'
     | 'wrap';
 const BOOL_OPTIONS: readonly string[] = [
     'number',
@@ -493,6 +494,7 @@ const BOOL_OPTIONS: readonly string[] = [
     'expandtab',
     'autoindent',
     'autopairs',
+    'context',
     'wrap',
 ];
 
@@ -509,6 +511,7 @@ function setOptions(ed: Editor, args: string): void {
                 flag(o.hlsearch, 'hlsearch'),
                 flag(o.expandtab, 'expandtab'),
                 flag(o.autopairs, 'autopairs'),
+                flag(o.context, 'context'),
                 flag(o.wrap, 'wrap'),
                 `tabstop=${o.tabstop}`,
                 `shiftwidth=${o.shiftwidth}`,

@@ -5,7 +5,8 @@ import * as path from 'node:path';
 import { test } from 'node:test';
 
 import { MemoryClipboard } from '../src/clipboard';
-import { pos } from '../src/editor/buffer';
+import { Buffer, pos } from '../src/editor/buffer';
+import { contextLines, shownContext } from '../src/editor/context';
 import { Editor } from '../src/editor/editor';
 import { KeyInput, ch, parseKeys, plain } from '../src/editor/keys';
 import { subwords } from '../src/editor/subword';
@@ -356,12 +357,14 @@ test('ex commands', () => {
 
 test('ex set options', () => {
     const ed = editor('|x');
-    ed.handleKeys(parseKeys(':set nonu ts=8 ic<CR>'));
+    ed.handleKeys(parseKeys(':set nonu ts=8 ic nocontext<CR>'));
     assert.ok(!ed.options.number);
     assert.equal(ed.options.tabstop, 8);
     assert.ok(ed.options.ignorecase);
-    ed.handleKeys(parseKeys(':set nu!<CR>'));
+    assert.ok(!ed.options.context);
+    ed.handleKeys(parseKeys(':set nu! context<CR>'));
     assert.ok(ed.options.number);
+    assert.ok(ed.options.context);
     ed.handleKeys(parseKeys(':set bogus<CR>'));
     assert.ok(ed.message!.error);
 });
@@ -610,4 +613,61 @@ test('yanks copy to the clipboard unless yankClipboard is off', () => {
     assert.equal(clipboard.text, 'keep', 'no copy with the setting off');
     ed.handleKeys(parseKeys('"+yiw'));
     assert.equal(clipboard.text, 'bar', 'the clipboard register still copies');
+});
+
+// ----- Context at the top of the view ------------------------------------------
+
+/** The lines the code at the cursor is inside, in text where `|` marks the
+ * cursor. */
+function contextOf(text: string): number[] {
+    const ed = editor(text);
+    return contextLines(ed.buffer, ed.cursor.line, ed.options.tabstop);
+}
+
+/** The same, for a cursor on line `line` of the buffer `text` holds (a
+ * trailing newline leaves a last empty line to put it on). */
+function contextAt(text: string, line: number): number[] {
+    return contextLines(Buffer.fromText(text), line, 4);
+}
+
+test('context lines are the lines the cursor is inside', () => {
+    assert.deepEqual(contextOf('class Foo:\n    def bar(self):\n        x = |1'), [0, 1]);
+    assert.deepEqual(contextOf('fn main() {\n    if x {\n        |y();\n    }\n}'), [0, 1]);
+    assert.deepEqual(contextOf('\tdef f():\n\t\t|x = 1'), [0], 'tabs count for their width');
+    assert.deepEqual(contextOf('|x'), [], 'nothing encloses the first line');
+    assert.deepEqual(contextOf('a\n|\nb'), [], 'a line at the top has nothing above it');
+});
+
+test('context lines ignore comments, closing lines and empty lines', () => {
+    // A comment dedented out of the block it sits in still says nothing.
+    assert.deepEqual(contextOf('if x:\n    y()\n# comment\n    |z()'), [0]);
+    assert.deepEqual(contextOf('class Foo:\n    def bar(self):\n        |'), [0, 1], 'an empty line in a body is inside it');
+    assert.deepEqual(contextAt('class Foo:\n    def bar(self):\n\n', 2), [0, 1], 'an empty line after a declaration is inside it');
+    assert.deepEqual(contextOf('module M\n  def qux\n    x\nend\n  def bar\n    |y'), [0, 4], 'a line closing a block is not context');
+    assert.deepEqual(contextOf('def f():\n        x = 1\n\n        |y'), [0], 'a blank line in a body keeps its context');
+});
+
+test('context lines stop at the innermost five', () => {
+    const deep: string[] = [];
+    for (let i = 0; i < 8; i++) deep.push(' '.repeat(i * 2) + `${i}(`);
+    deep.push(' '.repeat(16) + '|x');
+    assert.deepEqual(contextOf(deep.join('\n')), [3, 4, 5, 6, 7], 'the innermost five');
+});
+
+test('context rows show the lines above the view, never twice', () => {
+    const one = (): number => 1;
+    assert.deepEqual(shownContext([0, 1], 10, one, 28, 40), [0, 1], 'lines above the view show');
+    assert.deepEqual(shownContext([0, 1], 0, one, 28, 40), [], 'lines in the view do not show');
+    assert.deepEqual(shownContext([4, 5], 5, one, 28, 40), [4, 5], 'a line the rows would hide shows');
+    assert.deepEqual(shownContext([0, 1, 2], 5, one, 28, 6), [2], 'the rows stop at the cursor line');
+    assert.deepEqual(shownContext([0, 1, 2, 3, 4], 10, one, 4, 20), [2, 3, 4], 'at most three of a small view, the innermost');
+    assert.deepEqual(shownContext([0, 1, 2, 3, 4], 10, one, 28, 40), [0, 1, 2, 3, 4], 'five rows of a large one');
+});
+
+test('with wrapping, a line counts for the rows it takes', () => {
+    // Line 5 wraps over three rows; every other line takes one.
+    const rows = (l: number): number => (l === 5 ? 3 : 1);
+    assert.deepEqual(shownContext([0, 1], 6, rows, 28, 40), [0, 1], 'the lines above a wrapped view still show');
+    assert.deepEqual(shownContext([0, 1], 0, rows, 28, 40), [], 'lines in the view do not show');
+    assert.deepEqual(shownContext([0, 1, 4], 5, rows, 28, 6), [0, 1, 4], 'three rows cover the wrapped line and leave the cursor line below them');
 });

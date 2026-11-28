@@ -473,3 +473,31 @@ made where a request was open to interpretation.
      a terminal has it, and starts in the home directory rather than `/`.
      Built with `npm run native` (the Tauri CLI is a dev dependency); only
      the macOS app has been tried.
+
+
+20. Context at the top of the view
+-----------------------------------
+20.1 The lines the cursor is inside (a class, a function, an `if`) show at
+     the top of the text view once they have scrolled above it, so the code
+     under the cursor keeps its surroundings in sight.
+     Decided: classic sticky scroll, only while a line is off screen: a
+     context line shows when the rows would otherwise hide it (above the
+     view, or behind the rows already drawn), and hides again when it comes
+     back into frame, so no line is ever drawn twice. At most five rows, and
+     never over the cursor's line, so it is always visible. The rows are
+     drawn over the full width of the view (gutter included) on a lighter
+     grey background (`CONTEXT_BG`, in both themes), with the lines'
+     absolute numbers, git marks and syntax highlighting; a bottom edge
+     sets them off from the text below.
+20.2 Which lines those are, in any file, with no language server.
+     Decided: worked out from the indentation, scanning up from the cursor
+     to each line less indented than the one before it (tabs count for
+     their width), skipping blank lines, comment lines and lines that only
+     close a block, and stopping at column 0, so it works for every
+     language. On a blank line the nearest line with text above says how
+     far in it is. The scan stops after 1000 lines, so a huge file cannot
+     hold up a frame.
+20.3 Turning it off.
+     Decided: `:set context` / `:set nocontext` (on by default), also
+     "Context at Top" in the right-click menu, and `editor.context` in the
+     settings file (15.1). Clicking a context row jumps to its line.

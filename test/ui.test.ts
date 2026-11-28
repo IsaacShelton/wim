@@ -501,6 +501,57 @@ test('changed lines are marked at the left of the gutter', (t) => {
     }
 });
 
+test('the context lines show at the top once they are above the view', () => {
+    const dir = tempDir('context');
+    const file = path.join(dir, 'a.py');
+    const lines = ['class Foo:', '    def bar(self):'];
+    for (let i = 0; i < 60; i++) lines.push(`        x = ${i}`);
+    fs.writeFileSync(file, lines.join('\n') + '\n');
+    const cwd = process.cwd();
+    const h = harness(file);
+    const frame = (): DrawCmd[] => h.frames[h.frames.length - 1];
+    const bands = () => frame().filter((c) => c[0] === 'rect' && c[5] === theme.CONTEXT_BG);
+    const topRow = () =>
+        frame()
+            .filter((c) => c[0] === 'text' && c[2] === 0)
+            .map((c) => c[3])
+            .join('');
+
+    h.type(':60<CR>');
+    const ed = h.app.editor;
+    const first = ed.scrollTop;
+    assert.ok(first > 1, 'the class is above the view');
+    assert.ok(bands().length > 0, 'a band for the context rows');
+    assert.equal(bands()[0][2], 0, 'at the top of the view');
+    assert.match(topRow(), /class Foo:/, 'the line it is inside shows there');
+
+    h.type('gg');
+    assert.equal(bands().length, 0, 'no band while those lines are in the view');
+
+    h.type(':60<CR>');
+    h.type(':set nocontext<CR>');
+    assert.equal(bands().length, 0, 'no band with :set nocontext');
+    h.type(':set context<CR>');
+    assert.ok(bands().length > 0, 'and the band is back');
+
+    // A click on a context row goes to its line; one on the rows below them
+    // still goes to the line they show.
+    h.send({ t: 'mouse', kind: 'down', x: 60, y: 10 });
+    assert.equal(ed.cursor.line, 0, 'the top row is the class line');
+    h.type(':60<CR>');
+    const viewTop = ed.scrollTop;
+    h.send({ t: 'mouse', kind: 'down', x: 60, y: 2 * 20 + 10 });
+    assert.equal(ed.cursor.line, viewTop + 2, 'the first row under the context');
+
+    // Wrapped lines count for the rows they take.
+    h.type(':60<CR>');
+    h.type(':set wrap<CR>');
+    assert.ok(bands().length > 0, 'the context still shows while lines wrap');
+    h.type(':set nowrap<CR>');
+    process.chdir(cwd);
+    fs.rmSync(dir, { recursive: true });
+});
+
 test('dd in the tree deletes after asking', () => {
     const dir = tempDir('app-delete');
     fs.mkdirSync(path.join(dir, 'dir'));
@@ -1478,7 +1529,7 @@ test('with smooth scrolling and caret, the text and the caret glide to their pla
         await settle();
         assert.equal(plain.frames.length, count, 'no frames after');
 
-        const config = { ...defaultConfig(), editor: { smoothCaret: true, smoothScroll: true, wrap: false, yankClipboard: true } };
+        const config = { ...defaultConfig(), editor: { smoothCaret: true, smoothScroll: true, wrap: false, context: true, yankClipboard: true } };
         const h = harness(file, [], { config });
         const ed = h.app.editor;
         h.type('<C-f>');
@@ -1883,7 +1934,7 @@ test('with wrapping, smooth scrolling and the gliding caret still glide by rows'
             return r ? [r[1] as number, r[2] as number] : [];
         };
         const settle = (): Promise<void> => new Promise((resolve) => setTimeout(resolve, 400));
-        const config = { ...defaultConfig(), editor: { smoothCaret: true, smoothScroll: true, wrap: true, yankClipboard: true } };
+        const config = { ...defaultConfig(), editor: { smoothCaret: true, smoothScroll: true, wrap: true, context: true, yankClipboard: true } };
         const h = harness(file, [], { config });
         const ed = h.app.editor;
         const last = (): DrawCmd[] => h.frames[h.frames.length - 1];

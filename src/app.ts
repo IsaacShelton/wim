@@ -15,6 +15,7 @@ import { Clipboard, SystemClipboard } from './clipboard';
 import { bufferState, bufferStates, deleteAllBuffers, findBuffer, hasUnsavedChanges, reloadFromDisk, switchToBufferQuietly } from './editor/buffers';
 import { Buffer, Pos, isWhitespace, pos, posCmp } from './editor/buffer';
 import { awaitingMotion } from './editor/command';
+import { contextLines, shownContext } from './editor/context';
 import { Editor, Selection } from './editor/editor';
 import { fail } from './editor/errors';
 import { KeyInput, ch, charOf, ctrl, isNamedKey, keyEq, keyIs, keyNew, keyToString, parseKeys, plain } from './editor/keys';
@@ -370,6 +371,7 @@ export class WimApp {
         }
         this.editor = new Editor(this.clipboard);
         this.editor.options.wrap = this.config.editor.wrap;
+        this.editor.options.context = this.config.editor.context;
         this.editor.registers.yankToClipboard = this.config.editor.yankClipboard;
         const refresh = (): void => this.refresh();
         this.lsp = new LspManager(this.editor, opts.servers ?? defaultServers(), { refresh });
@@ -2167,7 +2169,8 @@ export class WimApp {
                     { action: 'selectAll', label: 'Select All', separator: true },
                 );
             }
-            items.push({ action: 'wrap', label: 'Wrap Lines', checked: this.editor.options.wrap, separator: items.length > 0 });
+            items.push({ action: 'context', label: 'Context at Top', checked: this.editor.options.context, separator: items.length > 0 });
+            items.push({ action: 'wrap', label: 'Wrap Lines', checked: this.editor.options.wrap });
         } else {
             this.menu = undefined;
             return;
@@ -2194,6 +2197,9 @@ export class WimApp {
                 break;
             case 'closeTerminal':
                 this.closeTerminal();
+                break;
+            case 'context':
+                this.toggleContext();
                 break;
             case 'wrap':
                 this.toggleWrap();
@@ -2472,9 +2478,27 @@ export class WimApp {
         this.editor.setMessage(o.wrap ? 'wrap' : 'nowrap');
     }
 
+    /** Show the lines the cursor is inside at the top of the view, or not. */
+    private toggleContext(): void {
+        const o = this.editor.options;
+        o.context = !o.context;
+        this.editor.setMessage(o.context ? 'context' : 'nocontext');
+    }
+
     private posAt(layout: Layout, x: number, y: number): Pos {
         const ed = this.editor;
         const row = Math.max(Math.floor((y - layout.textArea.top) / layout.lineH), 0);
+        // A click on a context row at the top of the view goes to its line,
+        // where its text starts there.
+        const context = ed.options.context ? contextLines(ed.buffer, ed.cursor.line, ed.options.tabstop) : [];
+        const last = ed.buffer.lastLine();
+        const rowsAt = (l: number): number => (ed.options.wrap && l <= last ? ed.lineRows(l) : 1);
+        const rows = shownContext(context, Math.floor(ed.scrollTop), rowsAt, ed.viewRows, ed.cursor.line);
+        if (row < rows.length) {
+            const line = rows[row];
+            const dcol = Math.max(Math.floor((x - layout.textLeft) / layout.charW), 0);
+            return pos(line, ed.colFromDisplay(line, dcol));
+        }
         if (ed.options.wrap) return ed.posFromRow(row, Math.floor((x - layout.textLeft) / layout.charW));
         const line = Math.min(ed.scrollTop + row, ed.buffer.lastLine());
         const dcol = Math.max(Math.floor((x - layout.textLeft) / layout.charW), 0) + ed.scrollLeft;
@@ -2790,6 +2814,7 @@ export class WimApp {
                 gitChanges: this.gitDiff.lineChanges(file, buffer),
                 references: active ? this.features.highlights() : [],
                 flash: active ? this.flash : undefined,
+                context: ed.options.context ? contextLines(buffer, cursor.line, ed.options.tabstop) : [],
                 semantic: (line, chars) => this.lsp.semanticFor(file, line, chars),
             };
             return [{ ...pane, content: { t: 'Text', view } }];
@@ -2965,6 +2990,9 @@ interface TextView {
     gitChanges: readonly (LineChange | undefined)[] | undefined;
     references: [Pos, Pos][];
     flash: Flash | undefined;
+    /** The lines the cursor is inside, for the context at the top of the
+     * view. Empty when `:set nocontext`. */
+    context: readonly number[];
     /** A language server's semantic token spans for a line, if it has them. */
     semantic: (line: number, chars: readonly string[]) => highlight.Span[] | undefined;
 }
@@ -3422,7 +3450,47 @@ class Painter {
                 this.lineDiagnostics(v, line, y, diags, left, right, part === parts - 1);
             }
         }
+        this.paintContext(v, lang, first, rowsOf);
         this.cmds.push(['unclip']);
+    }
+
+    /** The lines the cursor is inside, at the top of the view once they have
+     * scrolled above it (a lighter grey, and their line numbers, since they
+     * are the lines above the ones shown). */
+    private paintContext(v: TextView, lang: highlight.Language | undefined, first: number, rowsOf: (l: number) => number): void {
+        if (v.context.length === 0) return;
+        const { layout } = this;
+        const buf = v.buffer;
+        const cw = layout.charW;
+        const lh = layout.lineH;
+        const last = buf.lastLine();
+        // Past the last line there is nothing to wrap: one row, so the count
+        // below stops at the end of the buffer rather than reading past it.
+        const rowsAt = (l: number): number => (v.wrap && l <= last ? rowsOf(l) : 1);
+        const rows = shownContext(v.context, first, rowsAt, v.rows, v.cursor.line);
+        if (rows.length === 0) return;
+        const numbers = v.gutterCols > v.signCols;
+        rows.forEach((line, i) => {
+            const y = v.area.top + i * lh;
+            this.rect(rect(v.area.left, y, v.area.right, y + lh), theme.CONTEXT_BG);
+            const change = v.gitChanges?.[line];
+            if (change) this.gitMark(v.area.left, y, change);
+            const chars = buf.line(line);
+            let spans: highlight.Span[] = [];
+            if (lang) {
+                const state = this.st.highlightCache(v.bufferId).stateAt(lang, buf, line);
+                spans = highlight.highlightLine(lang, chars, state)[0];
+            }
+            const semantic = v.semantic(line, chars);
+            if (semantic) spans = highlight.overlaySpans(spans, semantic, chars.length);
+            // The absolute number: these lines are not where a relative one
+            // would count from.
+            if (numbers) this.textRight(v.area.left + (v.gutterCols - 1) * cw, y, String(line + 1), theme.GUTTER);
+            this.lineText(v, chars, spans, y, 0, v.wrap ? v.cols : v.cols + 1);
+        });
+        // A line under the rows, to set them off from the text below.
+        const bottom = v.area.top + rows.length * lh;
+        this.rect(rect(v.area.left, bottom - 1, v.area.right, bottom), theme.CURSOR_LINE);
     }
 
     /** A line's git change at the left of the gutter: a thin bar beside a
