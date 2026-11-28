@@ -67,6 +67,8 @@ test('the terminal runs the shell on a real terminal, sized to the panel', { ski
     // The panel is 1400px wide, in 10px cells, less a cell's margin each side.
     assert.equal(Number(cols), 138);
     assert.ok(Number(rows) >= 6, `${rows} rows`);
+    h.type('echo "term-program=$TERM_PROGRAM"<CR>');
+    await h.until(/^term-program=wim$/m);
     // A narrower window makes a narrower terminal, which the shell is told.
     h.setWidth(1000);
     await new Promise((r) => setTimeout(r, 200));

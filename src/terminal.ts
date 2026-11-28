@@ -289,6 +289,7 @@ export class Terminal implements TerminalPane {
         const env: NodeJS.ProcessEnv = {
             ...process.env,
             TERM: 'xterm-256color',
+            TERM_PROGRAM: 'wim',
             COLORTERM: 'truecolor',
             WIM_SHELL: this.shell,
             WIM_ROWS: String(this.term.rows),

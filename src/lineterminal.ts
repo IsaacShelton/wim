@@ -95,7 +95,16 @@ export class LineTerminal implements TerminalPane {
         try {
             proc = spawn(shell, args, {
                 cwd: this.dir(),
-                env: { ...process.env, TERM: 'dumb', NO_COLOR: '1', PAGER: 'cat', GIT_PAGER: 'cat' },
+                env: {
+                    ...process.env,
+                    TERM: 'dumb',
+                    // TERM_PROGRAM says which terminal a program is in; it is
+                    // a UNIX convention, not a Windows one.
+                    ...(process.platform === 'win32' ? {} : { TERM_PROGRAM: 'wim' }),
+                    NO_COLOR: '1',
+                    PAGER: 'cat',
+                    GIT_PAGER: 'cat',
+                },
                 stdio: ['pipe', 'pipe', 'pipe'],
                 // Its own process group, so Ctrl+c can stop all of it.
                 detached: process.platform !== 'win32',
