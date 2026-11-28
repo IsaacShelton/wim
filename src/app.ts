@@ -23,6 +23,7 @@ import { Range } from './editor/range';
 import { lineMatches } from './editor/search';
 import { lineRows } from './editor/wrap';
 import { ContextMenu, MenuItem } from './contextmenu';
+import { Dashboard, DashboardItem, projectItems } from './dashboard';
 import { FileTree, GitStatus } from './filetree';
 import { Glide } from './glide';
 import { GitDiff, LineChange } from './gitdiff';
@@ -201,6 +202,9 @@ export interface AppOptions {
     /** The projects the menu remembers (kept between runs by the window's
      * entry point). */
     recentProjects?: RecentProjects;
+    /** Whether to start on the dashboard (by default when no file or folder
+     * is given on the command line). */
+    dashboard?: boolean;
 }
 
 export class WimApp {
@@ -310,6 +314,8 @@ export class WimApp {
     /** Whether any agent backend is enabled (Claude Code or OpenCode). */
     private agentsAvailable: boolean;
     private agentsVisible = false;
+    /** The startup dashboard, when Wim was launched without a project. */
+    private dashboardState: Dashboard | undefined;
     readonly config: Config;
     /** The shells under the editor, one per tab. */
     private readonly terminals: TerminalPane[] = [];
@@ -325,6 +331,11 @@ export class WimApp {
         return this.terminals[this.terminalIndex];
     }
 
+    /** The startup dashboard, while it is shown. */
+    get dashboard(): Dashboard | undefined {
+        return this.dashboardState;
+    }
+
     constructor(private readonly opts: AppOptions) {
         this.icons = opts.icons;
         this.config = opts.config ?? defaultConfig();
@@ -332,6 +343,9 @@ export class WimApp {
         this.clipboard = opts.clipboard ?? new SystemClipboard();
         this.pickFolder = opts.pickFolder ?? pickFolderNative;
         this.recents = opts.recentProjects ?? new MemoryRecentProjects();
+        // With no file or folder on the command line, the dashboard offers
+        // the projects opened recently instead of assuming the current folder.
+        const startOnDashboard = opts.dashboard ?? opts.path === undefined;
         // `wim .` or `wim some/dir`: work in that directory, with no file open.
         let file = opts.path;
         let dirError: string | undefined;
@@ -387,6 +401,7 @@ export class WimApp {
         this.tree = new FileTree(root, !openedDir);
         this.treeCwd = root;
         this.recents.add(root);
+        if (startOnDashboard) this.dashboardState = new Dashboard(projectItems(this.recents.list()));
         // `wim .` starts with the tree open and focused.
         if (openedDir) {
             this.treeVisible = true;
@@ -441,7 +456,7 @@ export class WimApp {
                 this.mouse(layout, msg.kind, msg.x, msg.y, msg.mod ?? false);
                 break;
             case 'context':
-                this.openMenu(layout, msg.x, msg.y);
+                if (!this.dashboardState) this.openMenu(layout, msg.x, msg.y);
                 break;
             case 'wheel':
                 this.wheel(layout, msg);
@@ -461,6 +476,7 @@ export class WimApp {
                 // below.
                 break;
             case 'drop':
+                if (this.dashboardState) break;
                 // Images dropped on the agents panel go with the next message.
                 if (layout.agents && contains(layout.agents, msg.x, msg.y)) {
                     this.editorToNormal();
@@ -476,6 +492,13 @@ export class WimApp {
 
     private command(name: 'save' | 'selectAll' | 'copy' | 'cut' | 'paste' | 'agents' | 'terminal' | 'terminalNew' | 'terminalClose' | 'terminalNext' | 'terminalPrev'): void {
         this.closeWarned = false;
+        if (this.dashboardState) {
+            if (name === 'paste') {
+                const text = this.clipboard.getText();
+                if (text !== undefined) this.dashboardState.paste(text);
+            }
+            return;
+        }
         switch (name) {
             case 'selectAll':
                 if (this.picker || this.float?.focused) break;
@@ -537,6 +560,11 @@ export class WimApp {
     }
 
     private wheel(layout: Layout, msg: { x: number; y: number; delta: number; dx: number; mode: number; zoom: boolean }): void {
+        if (this.dashboardState) {
+            const lines = msg.mode === 1 ? msg.delta : msg.mode === 2 ? msg.delta * layout.rows : msg.delta / layout.lineH;
+            this.dashboardState.wheel(lines);
+            return;
+        }
         const view = this.imageView();
         if (view && contains(layout.textArea, msg.x, msg.y)) {
             const area = imageArea(layout.textArea, layout.lineH);
@@ -593,6 +621,12 @@ export class WimApp {
 
     private key(key: KeyInput, raw = key): void {
         this.closeWarned = false;
+        if (this.dashboardState) {
+            const choice = this.dashboardState.key(key);
+            if (choice === 'cancel') this.dashboardState = undefined;
+            else if (choice !== undefined) this.openDashboardItem(choice);
+            return;
+        }
         // Ctrl+` toggles the terminal from anywhere, even where other keys go elsewhere.
         if (keyEq(key, ctrl('`'))) {
             this.toggleTerminal();
@@ -876,6 +910,10 @@ export class WimApp {
                 // `:Agents` shows the panel; `:Agents message` also sends it.
                 this.showAgents();
                 if (args !== '') this.agents.session?.send(args);
+                return;
+            case 'Dashboard':
+                this.editorToNormal();
+                this.dashboardState = new Dashboard(projectItems(this.recents.list()));
                 return;
             default:
                 fail(`E492: Not an editor command: ${name}${args ? ' ' + args : ''}`);
@@ -1925,6 +1963,7 @@ export class WimApp {
     }
 
     private mouse(layout: Layout, kind: 'down' | 'move' | 'up', x: number, y: number, mod = false): void {
+        if (this.dashboardState && this.dashboardMouse(kind, x, y)) return;
         if (this.menu && this.menuMouse(kind, x, y)) return;
         if (kind === 'down') {
             this.picker?.dispose();
@@ -2165,7 +2204,50 @@ export class WimApp {
         }
     }
 
-    // ----- Project menu ------------------------------------------------------------
+    // ----- Dashboard and project menu ----------------------------------------------
+
+    /** The mouse over the dashboard: hovering selects a project, clicking
+     * opens it. */
+    private dashboardMouse(kind: 'down' | 'move' | 'up', x: number, y: number): boolean {
+        const d = this.dashboardState;
+        if (!d) return false;
+        if (kind === 'up') return true;
+        const { width, height, charW, lineH } = this.metrics;
+        const item = d.itemAt(x, y, width, height, charW, lineH);
+        if (kind === 'down' && item) this.openDashboardItem(item);
+        return true;
+    }
+
+    /** Open what was chosen on the dashboard. */
+    private openDashboardItem(item: DashboardItem): void {
+        if (item.pickFolder) {
+            const dashboard = this.dashboardState;
+            this.dashboardState = undefined;
+            void this.pickFolder(currentDir())
+                .then((dir) => {
+                    if (dir !== undefined) {
+                        this.switchProject(dir);
+                    } else {
+                        // Cancelled: back to the dashboard.
+                        this.dashboardState = dashboard;
+                    }
+                    this.refresh();
+                })
+                .catch(() => {
+                    // No native chooser: use Wim's own folder picker.
+                    this.dashboardState = undefined;
+                    this.chooseProjectFolder(currentDir());
+                    this.refresh();
+                });
+            return;
+        }
+        if (!isDirectory(item.dir)) {
+            this.dashboardState?.setMessage(`Can't find "${item.detail}"`);
+            return;
+        }
+        if (this.switchProject(item.dir)) this.dashboardState = undefined;
+        else this.dashboardState?.setMessage(`Can't open "${item.label}"`);
+    }
 
     /** `,k`: the project menu, a Telescope-style picker. */
     private openProjectMenu(): void {
@@ -2297,30 +2379,30 @@ export class WimApp {
     }
 
     /** Work in `dir`, closing the current project's buffers and showing the
-     * new folder's tree. */
-    private switchProject(dir: string): void {
+     * new folder's tree. Returns whether it did. */
+    private switchProject(dir: string): boolean {
         const target = absolute(expandTilde(dir));
         if (!isDirectory(target)) {
             this.editor.setError(`E344: Can't find directory "${dir}"`);
-            return;
+            return false;
         }
         if (this.projectOpen && target === currentDir()) {
             this.treeVisible = true;
             this.tree.refresh();
             this.focus = 'Tree';
             this.editor.setMessage(`Project folder: ${displayName(target)}`);
-            return;
+            return true;
         }
         const modified = this.editor.firstModifiedBuffer();
         if (modified) {
             this.editor.setError(`E37: No write since last change in "${modified.name}" (save or close it first)`);
-            return;
+            return false;
         }
         try {
             process.chdir(target);
         } catch (e) {
             this.editor.setError(`E344: Can't find directory "${dir}": ${(e as Error).message}`);
-            return;
+            return false;
         }
         this.closeProjectBuffers();
         this.projectOpen = true;
@@ -2334,6 +2416,7 @@ export class WimApp {
         if (this.picker) this.pickerFocus = 'Tree';
         this.gitChanged();
         this.editor.setMessage(`Project folder: ${displayName(target)}`);
+        return true;
     }
 
     private openConfig(): void {
@@ -2507,6 +2590,7 @@ export class WimApp {
             agents: this.agentsVisible ? this.agents : undefined,
             terminal: this.terminalVisible ? { pane: this.terminal, tabs: this.terminalTabs() } : undefined,
             badge: this.agentsAvailable ? this.agents.badge(Date.now()) : undefined,
+            dashboard: this.dashboardState,
             mapPending: this.mapPending,
             highlightCache: (id) => {
                 let cache = this.highlightCaches.get(id);
@@ -2524,9 +2608,18 @@ export class WimApp {
         // Where the input method's window goes: the caret of whatever is
         // being typed into.
         let caret = painter.caret;
-        if (this.focus === 'Agents' && this.agentsVisible) caret = this.agents.caret ?? caret;
+        if (this.dashboardState) caret = painter.dashboardCaret ?? caret;
+        else if (this.focus === 'Agents' && this.agentsVisible) caret = this.agents.caret ?? caret;
         else if (this.focus === 'Terminal' && this.terminalVisible) caret = this.terminal?.caret ?? caret;
-        this.opts.onFrame(title, dirty, cmds, animating, this.menu !== undefined, caret, this.imeTyping());
+        this.opts.onFrame(
+            title,
+            dirty,
+            cmds,
+            animating,
+            this.menu !== undefined || this.dashboardState !== undefined,
+            caret,
+            this.imeTyping(),
+        );
     }
 
     /** Whether keys typed now are text the system input method should compose,
@@ -2534,6 +2627,7 @@ export class WimApp {
      * Insert and Replace modes, the agent prompt and the terminal take text;
      * Normal, Visual and the command line are keys. */
     private imeTyping(): boolean {
+        if (this.dashboardState !== undefined) return true;
         if (this.picker !== undefined) return true;
         switch (this.focus) {
             case 'Editor':
@@ -2915,6 +3009,8 @@ interface PaintState {
     /** The agents badge at the end of the status line (not with the agents
      * turned off). */
     badge: { text: string; color: string; bg: string } | undefined;
+    /** The startup dashboard, over everything else. */
+    dashboard: Dashboard | undefined;
     mapPending: KeyInput[];
     /** Highlighter states for a buffer. */
     highlightCache: (bufferId: number) => highlight.Cache;
@@ -2954,6 +3050,8 @@ class Painter {
     terminalChrome: TerminalChrome = { tabs: [] };
     /** Where the text caret is, for the system input method's window. */
     caret: Caret | undefined;
+    /** Where the dashboard's search caret is. */
+    dashboardCaret: Caret | undefined;
 
     constructor(
         private readonly ed: Editor,
@@ -2997,6 +3095,7 @@ class Painter {
         }
         this.paintStatus();
         this.paintCmdline();
+        if (this.st.dashboard) this.paintDashboard(this.st.dashboard);
         this.paintPopups();
         return this.cmds;
     }
@@ -3365,6 +3464,61 @@ class Painter {
         const first = diags.find((d) => d.start.line === line);
         const at = lineEnd + 4;
         if (first && lastPart && at >= left && at < right) this.text(x(at), y, `■ ${first.message.split('\n')[0]}`, severityColor(first.severity));
+    }
+
+    /** The dashboard: the recent projects over the whole window. */
+    private paintDashboard(d: Dashboard): void {
+        const { width, height, charW, lineH } = this.st.metrics;
+        const geo = d.layout(width, height, charW, lineH);
+        this.rect(rect(0, 0, width, height), theme.BG);
+        this.text(geo.left, geo.titleTop, 'Wim', theme.MODE_NORMAL, 'bold');
+        this.textRight(geo.right, geo.titleTop, 'Choose a project', theme.COMMENT);
+
+        // The search box, with the caret after what has been typed.
+        this.rect(geo.prompt, theme.POPUP_BG, 4);
+        this.cmds.push([
+            'stroke',
+            geo.prompt.left,
+            geo.prompt.top,
+            geo.prompt.right - geo.prompt.left,
+            geo.prompt.bottom - geo.prompt.top,
+            theme.POPUP_BORDER,
+        ]);
+        this.text(geo.left + charW, geo.promptTextTop, '>', theme.MODE_NORMAL);
+        this.cmds.push(['clip', geo.prompt.left, geo.prompt.top, geo.prompt.right - geo.prompt.left, geo.prompt.bottom - geo.prompt.top]);
+        const empty = d.query === '';
+        this.text(geo.left + 3 * charW, geo.promptTextTop, empty ? 'Type to filter projects…' : d.query, empty ? theme.COMMENT : theme.FG);
+        const caretX = Math.min(geo.caretX, geo.prompt.right - 2);
+        this.rect(rect(caretX, geo.promptTextTop + 2, caretX + 2, geo.promptTextTop + lineH - 2), theme.CURSOR);
+        this.cmds.push(['unclip']);
+        this.dashboardCaret = { x: caretX, y: geo.promptTextTop + 2, w: 2, h: lineH - 4 };
+
+        // The projects, with the selected one highlighted.
+        if (d.filtered.length === 0) {
+            this.text(geo.left + charW, geo.listTop, d.message ?? 'No matching projects', d.message ? theme.ERROR : theme.COMMENT);
+        } else {
+            const cols = Math.floor((geo.right - geo.left) / charW);
+            for (const row of geo.rows) {
+                if (row.index === d.selected) this.rect(rect(geo.left, row.top, geo.right, row.bottom), theme.POPUP_SELECTION);
+                let x = geo.left + charW;
+                if (this.st.icons) {
+                    this.text(x, row.top, row.item.pickFolder ? icons.FOLDER_OPEN : icons.FOLDER_CLOSED, theme.TREE_FOLDER_ICON);
+                    x += 2 * charW;
+                }
+                const labelRoom = cols - (this.st.icons ? 4 : 2) - 4;
+                const detailRoom = Math.max(Math.floor(labelRoom / 2), 0);
+                const detail = row.item.detail;
+                const showDetail = textWidth(detail) <= detailRoom;
+                const label = cutText(row.item.label, Math.max(showDetail ? labelRoom - textWidth(detail) - 2 : labelRoom, 1));
+                this.text(x, row.top, label, theme.FG);
+                if (showDetail) this.textRight(geo.right - charW, row.top, detail, theme.COMMENT);
+            }
+        }
+
+        // Keys, and how many projects the query leaves (or the last problem).
+        this.text(geo.left, geo.footerTop, '↑ ↓ choose    Enter open    Esc close', theme.COMMENT);
+        const count = `${d.filtered.length} project${d.filtered.length === 1 ? '' : 's'}`;
+        this.textRight(geo.right, geo.footerTop, d.message ?? count, d.message ? theme.ERROR : theme.COMMENT);
     }
 
     /** The completion menu, a float and a picker, over everything else. */

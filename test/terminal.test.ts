@@ -22,7 +22,7 @@ function harness() {
     const frames: DrawCmd[][] = [];
     const config = defaultConfig();
     config.terminal.shell = 'sh';
-    const app = new WimApp({ icons: false, clipboard: new MemoryClipboard(), servers: [], config, onFrame: (_t, _d, c) => frames.push(c), onQuit: () => {} });
+    const app = new WimApp({ dashboard: false, icons: false, clipboard: new MemoryClipboard(), servers: [], config, onFrame: (_t, _d, c) => frames.push(c), onQuit: () => {} });
     let width = 1400;
     const resize = (): void => app.handleMessage({ t: 'resize', width, height: 800, charW: 10, lineH: 20 });
     resize();
@@ -171,7 +171,7 @@ test('dragging selects terminal text, and the right-click menu copies and pastes
     const frames: DrawCmd[][] = [];
     const config = defaultConfig();
     config.terminal.shell = 'sh';
-    const app = new WimApp({ icons: false, clipboard, servers: [], config, onFrame: (_t, _d, c) => frames.push(c), onQuit: () => {} });
+    const app = new WimApp({ dashboard: false, icons: false, clipboard, servers: [], config, onFrame: (_t, _d, c) => frames.push(c), onQuit: () => {} });
     const resize = (): void => app.handleMessage({ t: 'resize', width: 1400, height: 800, charW: 10, lineH: 20 });
     resize();
     const texts = (): TextCmd[] => frames[frames.length - 1].filter((c): c is TextCmd => c[0] === 'text');

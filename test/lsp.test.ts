@@ -322,6 +322,7 @@ function lspHarness(content: string): LspHarness {
     const cwd = process.cwd();
     const app = new WimApp({
         path: file,
+        dashboard: false,
         icons: false,
         clipboard: new MemoryClipboard(),
         servers: [spec],
@@ -496,6 +497,7 @@ test('every way a server failed to start is reported', async () => {
     fs.writeFileSync(file, '');
     const app = new WimApp({
         path: file,
+        dashboard: false,
         icons: false,
         clipboard: new MemoryClipboard(),
         servers: [
@@ -526,6 +528,7 @@ test('a missing server is reported once', async () => {
     fs.writeFileSync(file, '');
     const app = new WimApp({
         path: file,
+        dashboard: false,
         icons: false,
         clipboard: new MemoryClipboard(),
         servers: [{ name: 'nope', languageId: () => 'rust', commands: () => [], root: () => dir }],

@@ -263,6 +263,7 @@ function harness(file?: string, extra: AgentBackend[] = [], claude: Partial<Conf
     const clipboard = new MemoryClipboard();
     const app = new WimApp({
         path: file,
+        dashboard: false,
         icons: false,
         clipboard,
         servers: [],
@@ -890,7 +891,7 @@ test('Ctrl+h and Ctrl+l move between the panel and the editor, from the prompt t
 
 test('Claude Code is off unless the settings turn it on', () => {
     const frames: DrawCmd[][] = [];
-    const app = new WimApp({ icons: false, clipboard: new MemoryClipboard(), servers: [], agents: new FakeBackend(), onFrame: (_t, _d, c) => frames.push(c), onQuit: () => {} });
+    const app = new WimApp({ dashboard: false, icons: false, clipboard: new MemoryClipboard(), servers: [], agents: new FakeBackend(), onFrame: (_t, _d, c) => frames.push(c), onQuit: () => {} });
     app.handleMessage({ t: 'resize', width: 1400, height: 800, charW: 10, lineH: 20 });
     app.handleMessage({ t: 'command', name: 'agents' });
     const drawn = frames[frames.length - 1].map((c) => (c[0] === 'text' ? c[3] : '')).join('\n');

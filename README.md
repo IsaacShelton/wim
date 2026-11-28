@@ -140,7 +140,8 @@ default, and a mistake in it is reported at startup and ignored.
 | `src/links.ts` | Links between Markdown files: what a link points at, and which file and line that is |
 | `src/audio.ts` | Which files are sounds, and the player's state |
 | `src/config.ts` | The settings file, `wim.config.json` |
-| `src/recent.ts` | The project folders the project menu remembers between runs |
+| `src/recent.ts` | The project folders the project menu and dashboard remember between runs |
+| `src/dashboard.ts` | The startup dashboard: recent projects, fuzzy-filtered |
 | `src/glide.ts` | Smooth motion for the caret and scrolling |
 | `src/terminal.ts` | The integrated terminal: a shell on a pseudo-terminal (made by `script`), its screen kept by @xterm/headless |
 | `src/lineterminal.ts` | The line-based terminal used where there is no `script` (Windows) |
@@ -213,6 +214,14 @@ Names in the tree are colored by their git status: untracked green, staged cyan 
 modified orange and conflicted red; a folder takes the color of what changed inside it. The open
 file's name is bold. Status is read again when the tree is shown, after a write, after an agent
 changes files, and on leaving the terminal or the agents panel; `R` reads it too.
+
+Starting Wim without a file or folder (`wim`) shows the dashboard instead of assuming the current
+folder: a list of the projects opened recently, most recent first. Type to fuzzy-filter it, use
+the arrow keys (or `Ctrl+n`/`Ctrl+p`, Tab, PageUp/PageDown) to choose, and press Enter to open
+the project; clicking a row works too, and hovering selects it. The mouse wheel scrolls the list.
+**Open Project Folder…**, at the end of the list, asks the system for a folder. Esc leaves the
+dashboard for the current folder, and `:Dashboard` shows it again later. Starting Wim with a
+file or a folder (`wim some/file`, `wim .`) goes straight to it, as before.
 
 `,k` opens the project menu, a Telescope-style picker. It lists the folders Wim has opened before,
 most recent first, and choosing one switches to it. **Open Project Folder…** asks the system for a folder (macOS's

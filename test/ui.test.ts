@@ -57,6 +57,9 @@ function harness(file?: string, servers: ServerSpec[] = [], opts: Partial<AppOpt
     let quit = false;
     const app = new WimApp({
         path: file,
+        // Tests start in an editor; pass `dashboard: true` to start on the
+        // dashboard instead.
+        dashboard: false,
         icons: false,
         clipboard: new MemoryClipboard(),
         servers,
@@ -317,7 +320,7 @@ test(':q exits when nothing is modified', () => {
 test('Cmd+V pastes the clipboard in Insert mode', () => {
     const clipboard = new MemoryClipboard();
     clipboard.text = 'pasted';
-    const app = new WimApp({ icons: false, clipboard, onFrame: () => { }, onQuit: () => { } });
+    const app = new WimApp({ dashboard: false, icons: false, clipboard, onFrame: () => { }, onQuit: () => { } });
     app.handleMessage({ t: 'key', key: 'i', ctrl: false, alt: false });
     app.handleMessage({ t: 'command', name: 'paste' });
     assert.equal(app.editor.buffer.text(), 'pasted');
@@ -1013,6 +1016,7 @@ test('a sound opens in a player', () => {
         const frames: DrawCmd[][] = [];
         const app = new WimApp({
             path: song,
+            dashboard: false,
             icons: false,
             clipboard: new MemoryClipboard(),
             servers: [],
@@ -1707,6 +1711,67 @@ test('the project menu switches to a recent project', () => {
         fs.rmSync(first, { recursive: true });
         fs.rmSync(second, { recursive: true });
     }
+});
+
+test('the dashboard lists recent projects and opens one by fuzzy search', () => {
+    const start = tempDir('dashboard-start');
+    const alpha = tempDir('dashboard-alpha');
+    const beta = tempDir('dashboard-beta');
+    fs.writeFileSync(path.join(beta, 'beta.txt'), 'beta\n');
+    const cwd = process.cwd();
+    const recents = new MemoryRecentProjects();
+    recents.add(alpha);
+    recents.add(beta);
+    process.chdir(start);
+    try {
+        const h = harness(undefined, [], { dashboard: true, recentProjects: recents });
+        const text = drawn(h);
+        assert.ok(text.includes('Wim'), 'the dashboard is drawn');
+        assert.ok(text.includes('Open Project Folder…'));
+        assert.ok(text.some((line) => line.includes(path.basename(alpha))));
+        assert.ok(text.some((line) => line.includes(path.basename(beta))));
+        h.type('bet');
+        assert.equal(h.app.dashboard!.filtered[0].dir, beta, 'the best match comes first');
+        h.type('<CR>');
+        assert.equal(process.cwd(), beta);
+        assert.equal(h.app.dashboard, undefined, 'the dashboard closes');
+        assert.ok(drawn(h).includes('beta.txt'), 'the chosen project is shown');
+    } finally {
+        process.chdir(cwd);
+        fs.rmSync(start, { recursive: true });
+        fs.rmSync(alpha, { recursive: true });
+        fs.rmSync(beta, { recursive: true });
+    }
+});
+
+test('a click on the dashboard opens the project under the pointer', () => {
+    const start = tempDir('dashboard-click-start');
+    const target = tempDir('dashboard-click-target');
+    const cwd = process.cwd();
+    const recents = new MemoryRecentProjects();
+    recents.add(target);
+    process.chdir(start);
+    try {
+        const h = harness(undefined, [], { dashboard: true, recentProjects: recents });
+        const row = h.app.dashboard!.layout(800, 600, 10, 20).rows.find((r) => r.item.dir === target)!;
+        h.send({ t: 'mouse', kind: 'down', x: row.left + 20, y: row.top + 10 });
+        h.send({ t: 'mouse', kind: 'up', x: row.left + 20, y: row.top + 10 });
+        assert.equal(process.cwd(), target);
+        assert.equal(h.app.dashboard, undefined);
+    } finally {
+        process.chdir(cwd);
+        fs.rmSync(start, { recursive: true });
+        fs.rmSync(target, { recursive: true });
+    }
+});
+
+test('launching without a path starts on the dashboard, and Esc leaves it', () => {
+    const h = harness(undefined, [], { dashboard: undefined });
+    assert.ok(h.app.dashboard, 'no path on the command line shows the dashboard');
+    h.type('<Esc>');
+    assert.equal(h.app.dashboard, undefined);
+    h.type('ihello<Esc>');
+    assert.equal(h.app.editor.buffer.text(), 'hello');
 });
 
 test('closing the project leaves Wim open and asks the system for another folder', async () => {
