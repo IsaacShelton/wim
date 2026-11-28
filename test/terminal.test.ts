@@ -104,6 +104,52 @@ test('Ctrl+k and Ctrl+j move between the editor and the terminal; Cmd+J hides it
     h.app.dispose();
 });
 
+test('the terminal has tabs: Cmd+T opens one, clicking switches, × closes and + opens', { skip: !posix }, async () => {
+    const h = harness();
+    const command = (name: 'terminal' | 'terminalNew') => h.app.handleMessage({ t: 'command', name });
+    const tab = (n: number): TextCmd | undefined => h.texts().find((c) => new RegExp(`^${n} `).test(String(c[3])));
+    const click = (c: TextCmd) => h.app.handleMessage({ t: 'mouse', kind: 'down', x: Number(c[1]) + 1, y: Number(c[2]) + 5 });
+    command('terminal');
+    assert.ok(tab(1), 'the first tab is shown');
+    command('terminalNew');
+    assert.ok(tab(1) && tab(2), 'a second tab is shown');
+
+    // The second tab has the keys, so its output appears and the first's doesn't.
+    h.type('echo second<CR>');
+    await h.until(/^second$/m);
+    click(tab(1)!);
+    assert.doesNotMatch(h.text(), /^second$/m);
+    h.type('echo first<CR>');
+    await h.until(/^first$/m);
+    click(tab(2)!);
+    await h.until(/^second$/m);
+
+    // Its close button closes it, leaving the first tab.
+    const closes = h.texts().filter((c) => String(c[3]) === '×');
+    assert.equal(closes.length, 2);
+    click(closes[1]);
+    assert.ok(tab(1));
+    assert.ok(!tab(2), 'the second tab is gone');
+
+    // The + at the end of the tabs opens another one.
+    const plus = h.texts().find((c) => String(c[3]) === '+');
+    assert.ok(plus, 'there is a new-tab button');
+    click(plus);
+    assert.ok(tab(2), 'the new tab is shown');
+    h.app.dispose();
+});
+
+test("a tab's label follows the shell's folder", { skip: !posix }, async () => {
+    const dir = fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(), 'wim-label-')));
+    const h = harness();
+    h.app.handleMessage({ t: 'command', name: 'terminal' });
+    assert.match(h.text(), new RegExp(`1 sh ${path.basename(process.cwd())}`), "it starts in Wim's folder");
+    h.type(`cd ${dir}<CR>`);
+    await h.until(new RegExp(`1 sh ${path.basename(dir)}`));
+    h.app.dispose();
+    fs.rmSync(dir, { recursive: true });
+});
+
 test('keys are sent as xterm sends them', () => {
     const k = (key: string, ctrl = false, alt = false) => ({ key, ctrl, alt });
     assert.equal(encodeKey(k('c', true), false), '\x03');

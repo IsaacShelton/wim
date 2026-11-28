@@ -12,7 +12,7 @@ import { AgentPanel, PanelAction } from './agent/panel';
 import { Config, configPath, defaultConfig } from './config';
 import { AudioInfo, AudioPlayer, SEEK_STEP, VOLUME_STEP, formatTime } from './audio';
 import { Clipboard, SystemClipboard } from './clipboard';
-import { bufferState, bufferStates, deleteAllBuffers, findBuffer, reloadFromDisk, switchToBufferQuietly } from './editor/buffers';
+import { bufferState, bufferStates, deleteAllBuffers, findBuffer, hasUnsavedChanges, reloadFromDisk, switchToBufferQuietly } from './editor/buffers';
 import { Buffer, Pos, isWhitespace, pos, posCmp } from './editor/buffer';
 import { awaitingMotion } from './editor/command';
 import { Editor, Selection } from './editor/editor';
@@ -44,7 +44,7 @@ import { Float, Overlay, Picker, PickerItem, PreviewSource, readPreview } from '
 import { AudioCommand, Caret, ClientMessage, DrawCmd, TextStyle } from './protocol';
 import { MemoryRecentProjects, RecentProjects } from './recent';
 import { charWidth, cutText, cutTextStart, textWidth } from './textwidth';
-import { TerminalAction, TerminalPane, createTerminal } from './terminal';
+import { TerminalAction, TerminalChrome, TerminalPane, TerminalTabInfo, createTerminal } from './terminal';
 import { isThemeName, setTheme, theme, themeName, tokenColor, tokenStyle } from './theme';
 import { openDefaultBrowser, pickFolder as pickFolderNative, revealInFolder } from './window';
 import { Direction, SplitDir, Win, WinRect, Windows } from './windows';
@@ -311,11 +311,19 @@ export class WimApp {
     private agentsAvailable: boolean;
     private agentsVisible = false;
     readonly config: Config;
-    /** The shell under the editor. */
-    readonly terminal: TerminalPane;
+    /** The shells under the editor, one per tab. */
+    private readonly terminals: TerminalPane[] = [];
+    private terminalIndex = 0;
     private terminalVisible = false;
+    /** Where the terminal's tabs were drawn last frame, for clicks. */
+    private terminalChrome: TerminalChrome = { tabs: [] };
     /** The status line's agents badge in the last frame, for clicks. */
     private badgeHit: Rect | undefined;
+
+    /** The terminal tab in view. */
+    get terminal(): TerminalPane {
+        return this.terminals[this.terminalIndex];
+    }
 
     constructor(private readonly opts: AppOptions) {
         this.icons = opts.icons;
@@ -402,7 +410,7 @@ export class WimApp {
             smoothScroll: () => this.config.editor.smoothScroll,
             openUrl: (url) => (this.opts.openUrl ?? openDefaultBrowser)(url),
         });
-        this.terminal = createTerminal({ shell: this.config.terminal.shell, cwd: currentDir, refresh });
+        this.terminals.push(this.createTerminalPane());
         if (opts.configWarnings?.length) this.editor.setError(opts.configWarnings.join('; '));
     }
 
@@ -466,7 +474,7 @@ export class WimApp {
         this.render();
     }
 
-    private command(name: 'save' | 'selectAll' | 'copy' | 'cut' | 'paste' | 'agents' | 'terminal'): void {
+    private command(name: 'save' | 'selectAll' | 'copy' | 'cut' | 'paste' | 'agents' | 'terminal' | 'terminalNew' | 'terminalClose' | 'terminalNext' | 'terminalPrev'): void {
         this.closeWarned = false;
         switch (name) {
             case 'selectAll':
@@ -480,9 +488,16 @@ export class WimApp {
                 this.toggleAgents();
                 break;
             case 'terminal':
+            case 'terminalNew':
+            case 'terminalClose':
+            case 'terminalNext':
+            case 'terminalPrev':
                 this.picker?.dispose();
                 this.picker = undefined;
-                this.toggleTerminal();
+                if (name === 'terminal') this.toggleTerminal();
+                else if (name === 'terminalNew') this.newTerminal();
+                else if (name === 'terminalClose') this.closeTerminal();
+                else this.cycleTerminal(name === 'terminalNext' ? 1 : -1);
                 break;
             case 'save':
                 this.editor.handleKeys(parseKeys('<Esc>:w<CR>'));
@@ -620,6 +635,12 @@ export class WimApp {
         }
         if (this.focus === 'Terminal') {
             this.mapPending = [];
+            // Ctrl+PageUp/PageDown move between the terminal's tabs, as in
+            // most terminal emulators.
+            if (!raw.alt && raw.ctrl && (raw.key === 'PageUp' || raw.key === 'PageDown')) {
+                this.cycleTerminal(raw.key === 'PageDown' ? 1 : -1);
+                return;
+            }
             this.terminalAction(this.terminal.key(raw));
             return;
         }
@@ -749,6 +770,18 @@ export class WimApp {
             case 'ToggleTerminal':
                 this.toggleTerminal();
                 break;
+            case 'TerminalNew':
+                this.newTerminal();
+                break;
+            case 'TerminalClose':
+                this.closeTerminal();
+                break;
+            case 'TerminalNext':
+                this.cycleTerminal(1);
+                break;
+            case 'TerminalPrev':
+                this.cycleTerminal(-1);
+                break;
             case 'ToggleTheme':
                 setTheme(themeName() === 'nord' ? 'onedark' : 'nord');
                 this.editor.setMessage(`colorscheme ${themeName()}`);
@@ -824,6 +857,18 @@ export class WimApp {
             case 'Terminal':
                 this.toggleTerminal();
                 return;
+            case 'TerminalNew':
+                this.newTerminal();
+                return;
+            case 'TerminalClose':
+                this.closeTerminal();
+                return;
+            case 'TerminalNext':
+                this.cycleTerminal(1);
+                return;
+            case 'TerminalPrev':
+                this.cycleTerminal(-1);
+                return;
             case 'MarkdownPreview':
                 this.toggleMarkdown();
                 return;
@@ -891,7 +936,7 @@ export class WimApp {
         this.features.dispose();
         this.lsp.dispose();
         this.agents.dispose();
-        this.terminal.dispose();
+        for (const terminal of this.terminals) terminal.dispose();
     }
 
     /** Send an (unmapped) key to whichever pane has focus. */
@@ -1571,9 +1616,68 @@ export class WimApp {
             this.focus = 'Editor';
             return;
         }
+        this.showTerminal();
+    }
+
+    private createTerminalPane(): TerminalPane {
+        return createTerminal({ shell: this.config.terminal.shell, cwd: currentDir, refresh: () => this.refresh() });
+    }
+
+    private terminalTabs(): TerminalTabInfo[] {
+        return this.terminals.map((terminal, index) => ({ label: terminal.label(), active: index === this.terminalIndex }));
+    }
+
+    /** Show the terminal, keeping the tab in view. */
+    private showTerminal(): void {
         this.editorToNormal();
         this.terminalVisible = true;
         this.focus = 'Terminal';
+    }
+
+    /** Open another shell in a new tab (Cmd+T, `,tn`, `:TerminalNew`). */
+    private newTerminal(): void {
+        this.editorToNormal();
+        this.terminals.push(this.createTerminalPane());
+        this.terminalIndex = this.terminals.length - 1;
+        this.terminalVisible = true;
+        this.focus = 'Terminal';
+    }
+
+    /** Bring the terminal's tab at `index` into view (wrapping around). */
+    private selectTerminal(index: number): void {
+        const n = this.terminals.length;
+        if (n === 0) return;
+        this.editorToNormal();
+        this.terminalIndex = ((index % n) + n) % n;
+        this.terminalVisible = true;
+        this.focus = 'Terminal';
+    }
+
+    /** Move to the next (1) or previous (-1) terminal tab. */
+    private cycleTerminal(delta: number): void {
+        if (!this.terminalVisible) {
+            this.showTerminal();
+            return;
+        }
+        this.selectTerminal(this.terminalIndex + delta);
+    }
+
+    /** Close the terminal's tab (the last one just hides the terminal). */
+    private closeTerminal(index = this.terminalIndex): void {
+        if (index < 0 || index >= this.terminals.length) return;
+        const wasFocused = this.focus === 'Terminal';
+        if (this.terminals.length === 1) {
+            this.terminalVisible = false;
+            if (wasFocused) this.focus = 'Editor';
+            return;
+        }
+        this.terminals[index].dispose();
+        this.terminals.splice(index, 1);
+        let active = this.terminalIndex;
+        if (index < active) active--;
+        else if (index === active) active = Math.min(index, this.terminals.length - 1);
+        this.terminalIndex = active;
+        if (wasFocused) this.focus = 'Terminal';
     }
 
     private terminalAction(action: TerminalAction): void {
@@ -1872,6 +1976,24 @@ export class WimApp {
             return;
         }
         if (layout.terminal && contains(layout.terminal, x, y)) {
+            // Its title row holds the tabs: a click switches, closes or opens
+            // one, rather than selecting text.
+            if (y < layout.terminal.top + layout.lineH) {
+                const tab = this.terminalChrome.tabs.find((t) => contains(t.box, x, y));
+                if (tab) {
+                    this.selectTerminal(tab.index);
+                    if (contains(tab.close, x, y)) this.closeTerminal(tab.index);
+                    return;
+                }
+                if (this.terminalChrome.newTab && contains(this.terminalChrome.newTab, x, y)) {
+                    this.newTerminal();
+                    return;
+                }
+                this.editorToNormal();
+                this.terminalVisible = true;
+                this.focus = 'Terminal';
+                return;
+            }
             this.editorToNormal();
             this.focus = 'Terminal';
             this.terminal.select('down', x, y);
@@ -1962,8 +2084,13 @@ export class WimApp {
         if (layout.terminal && contains(layout.terminal, x, y)) {
             this.editorToNormal();
             this.focus = 'Terminal';
+            // Right-clicking a tab targets it.
+            const tab = this.terminalChrome.tabs.find((t) => contains(t.box, x, y));
+            if (tab) this.terminalIndex = tab.index;
             items.push(
-                { action: 'copy', label: 'Copy', hint: hint('C'), disabled: this.terminal.selectedText() === undefined },
+                { action: 'newTerminal', label: 'New Terminal', hint: hint('T') },
+                { action: 'closeTerminal', label: this.terminals.length === 1 ? 'Hide Terminal' : 'Close Terminal' },
+                { action: 'copy', label: 'Copy', hint: hint('C'), disabled: this.terminal.selectedText() === undefined, separator: true },
                 { action: 'paste', label: 'Paste', hint: hint('V') },
             );
         } else if (layout.agents && contains(layout.agents, x, y)) {
@@ -2022,6 +2149,12 @@ export class WimApp {
                 break;
             case 'selectAll':
                 this.editor.handleKeys(parseKeys('<Esc>ggVG'));
+                break;
+            case 'newTerminal':
+                this.newTerminal();
+                break;
+            case 'closeTerminal':
+                this.closeTerminal();
                 break;
             case 'wrap':
                 this.toggleWrap();
@@ -2372,7 +2505,7 @@ export class WimApp {
             projectOpen: this.projectOpen,
             tree: this.tree,
             agents: this.agentsVisible ? this.agents : undefined,
-            terminal: this.terminalVisible ? this.terminal : undefined,
+            terminal: this.terminalVisible ? { pane: this.terminal, tabs: this.terminalTabs() } : undefined,
             badge: this.agentsAvailable ? this.agents.badge(Date.now()) : undefined,
             mapPending: this.mapPending,
             highlightCache: (id) => {
@@ -2387,6 +2520,7 @@ export class WimApp {
         const cmds = painter.paint();
         this.tabHits = painter.tabHits;
         this.badgeHit = painter.badgeHit;
+        this.terminalChrome = painter.terminalChrome;
         // Where the input method's window goes: the caret of whatever is
         // being typed into.
         let caret = painter.caret;
@@ -2522,7 +2656,7 @@ export class WimApp {
             if (!st) return [];
             const file = st.filePath;
             const name = displayName(file);
-            const modified = st.buffer.version() !== st.savedVersion;
+            const modified = hasUnsavedChanges(st.filePath, st.buffer, st.savedVersion);
             const pane = { rect, active, name, modified };
             if (st.image && file !== undefined) {
                 const area = rectSize(imageArea(rect.area, lh));
@@ -2776,8 +2910,8 @@ interface PaintState {
     tree: FileTree;
     /** The agents panel, when it is shown. */
     agents: AgentPanel | undefined;
-    /** The terminal, when it is shown. */
-    terminal: TerminalPane | undefined;
+    /** The terminal in view, when it is shown, and all its tabs. */
+    terminal: { pane: TerminalPane; tabs: TerminalTabInfo[] } | undefined;
     /** The agents badge at the end of the status line (not with the agents
      * turned off). */
     badge: { text: string; color: string; bg: string } | undefined;
@@ -2816,6 +2950,8 @@ class Painter {
     readonly tabHits: [Rect, number][] = [];
     /** Where the agents badge was drawn. */
     badgeHit: Rect | undefined;
+    /** Where the terminal's tabs were drawn, for clicks. */
+    terminalChrome: TerminalChrome = { tabs: [] };
     /** Where the text caret is, for the system input method's window. */
     caret: Caret | undefined;
 
@@ -2857,7 +2993,7 @@ class Painter {
         }
         const terminal = this.layout.terminal;
         if (terminal && this.st.terminal) {
-            this.st.terminal.paint(this.cmds, terminal, this.layout.charW, this.layout.lineH, this.st.focus === 'Terminal');
+            this.terminalChrome = this.st.terminal.pane.paint(this.cmds, terminal, this.layout.charW, this.layout.lineH, this.st.focus === 'Terminal', this.st.terminal.tabs);
         }
         this.paintStatus();
         this.paintCmdline();

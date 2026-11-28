@@ -216,7 +216,7 @@ export class Editor {
     }
 
     isModified(): boolean {
-        return this.buffer.version() !== this.savedVersion;
+        return buffers.hasUnsavedChanges(this.filePath, this.buffer, this.savedVersion);
     }
 
     setMessage(text: string): void {

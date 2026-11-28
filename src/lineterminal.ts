@@ -7,7 +7,6 @@
 
 import { ChildProcess, spawn as nodeSpawn } from 'node:child_process';
 import { randomBytes } from 'node:crypto';
-import * as os from 'node:os';
 import * as path from 'node:path';
 import { StringDecoder } from 'node:string_decoder';
 
@@ -15,7 +14,8 @@ import { TextInput } from './agent/input';
 import { KeyInput, keyNew } from './editor/keys';
 import { Box } from './popup';
 import { Caret, DrawCmd } from './protocol';
-import type { TerminalAction, TerminalOptions, TerminalPane } from './terminal';
+import { paintTerminalChrome } from './terminal';
+import type { TerminalAction, TerminalChrome, TerminalOptions, TerminalPane, TerminalTabInfo } from './terminal';
 import { theme } from './theme';
 
 const NONE: TerminalAction = { t: 'None' };
@@ -68,6 +68,13 @@ export class LineTerminal implements TerminalPane {
 
     get shell(): string {
         return this.opts.shell ?? (process.platform === 'win32' ? 'powershell.exe' : 'zsh');
+    }
+
+    /** The shell's name and folder. */
+    label(): string {
+        const dir = this.dir();
+        const name = path.basename(dir);
+        return `${path.basename(this.shell).replace(/\.exe$/i, '')}${name === '' ? '' : ` ${name}`}`;
     }
 
     private note(text: string): void {
@@ -291,23 +298,15 @@ export class LineTerminal implements TerminalPane {
     // ----- Painting ------------------------------------------------------------------
 
     /** Draw the terminal in `r`: a title row, the output and the prompt. */
-    paint(cmds: DrawCmd[], r: Box, cw: number, lh: number, focused: boolean): void {
+    paint(cmds: DrawCmd[], r: Box, cw: number, lh: number, focused: boolean, tabs: readonly TerminalTabInfo[] = []): TerminalChrome {
         this.caret = undefined;
         const text = (x: number, y: number, s: string, color: string): void => {
             if (s !== '') cmds.push(['text', x, y, s, color]);
         };
         cmds.push(['rect', r.left, r.top, r.right - r.left, r.bottom - r.top, theme.BG]);
         cmds.push(['clip', r.left, r.top, r.right - r.left, r.bottom - r.top]);
-        // The title.
-        cmds.push(['rect', r.left, r.top, r.right - r.left, lh, theme.STATUS_BG]);
-        const shell = path.basename(this.shell).replace(/\.exe$/i, '');
-        const dir = this.dir();
-        const home = os.homedir();
-        const shown = dir === home || dir.startsWith(home + path.sep) ? '~' + dir.slice(home.length) : dir;
-        if (focused) cmds.push(['rect', r.left + cw, r.top, 10 * cw, lh, theme.MODE_TREE]);
-        text(r.left + cw, r.top, ' TERMINAL ', focused ? theme.BG : theme.COMMENT);
-        const info = `${shell}  ${shown}${this.running ? '  running…' : ''}`;
-        text(r.left + 12 * cw, r.top, info, theme.COMMENT);
+        // The title row, with the tabs.
+        const chrome = paintTerminalChrome(cmds, r, cw, lh, focused, tabs);
 
         const x = r.left + cw;
         const cols = Math.max(Math.floor((r.right - x) / cw) - 1, 4);
@@ -352,6 +351,7 @@ export class LineTerminal implements TerminalPane {
             if (under !== undefined && under !== ' ') text(cx, promptTop, under, theme.BG);
         }
         cmds.push(['unclip']);
+        return chrome;
     }
 }
 

@@ -579,6 +579,17 @@ function shortcut(e: KeyboardEvent): boolean {
         case 'j':
             send({ t: 'command', name: 'terminal' });
             break;
+        case 't':
+            send({ t: 'command', name: 'terminalNew' });
+            break;
+        case ']':
+        case '}':
+            send({ t: 'command', name: 'terminalNext' });
+            break;
+        case '[':
+        case '{':
+            send({ t: 'command', name: 'terminalPrev' });
+            break;
         case 'q':
         case 'w':
             send({ t: 'close' });

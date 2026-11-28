@@ -14,9 +14,8 @@
 // wherever `script` is missing, the line-based terminal in lineterminal.ts is
 // used instead.
 
-import { ChildProcess, SpawnOptions, spawn as nodeSpawn } from 'node:child_process';
+import { ChildProcess, SpawnOptions, execFile, spawn as nodeSpawn } from 'node:child_process';
 import * as fs from 'node:fs';
-import * as os from 'node:os';
 import * as path from 'node:path';
 
 import { Terminal as XTerm } from '@xterm/headless';
@@ -25,6 +24,7 @@ import { KeyInput } from './editor/keys';
 import { LineTerminal } from './lineterminal';
 import { Box } from './popup';
 import { Caret, DrawCmd, TextStyle } from './protocol';
+import { cutText, textWidth } from './textwidth';
 import { theme } from './theme';
 
 /** What the window should do after a key in the terminal. */
@@ -43,6 +43,18 @@ export interface TerminalOptions {
     spawn?: Spawn;
 }
 
+/** A tab shown in the terminal's title row. */
+export interface TerminalTabInfo {
+    label: string;
+    active: boolean;
+}
+
+/** Where the title row's tabs and new-tab button were drawn, for the mouse. */
+export interface TerminalChrome {
+    tabs: { index: number; box: Box; close: Box }[];
+    newTab?: Box;
+}
+
 /** The terminal as the window uses it. Keys come as typed: Ctrl+c is
  * Ctrl+c, not Esc. */
 export interface TerminalPane {
@@ -55,11 +67,50 @@ export interface TerminalPane {
     select(kind: 'down' | 'move' | 'up', x: number, y: number): void;
     /** The selected text, if any. */
     selectedText(): string | undefined;
-    /** Draw the terminal in `r`: a title row and the screen. */
-    paint(cmds: DrawCmd[], r: Box, cw: number, lh: number, focused: boolean): void;
+    /** What the tab for this terminal says: its shell and current folder. */
+    label(): string;
+    /** Draw the terminal in `r`: a title row (with `tabs`) and the screen.
+     * Returns where the tabs were drawn. */
+    paint(cmds: DrawCmd[], r: Box, cw: number, lh: number, focused: boolean, tabs?: readonly TerminalTabInfo[]): TerminalChrome;
     /** Where the shell's cursor was drawn, for the input method's window. */
     caret: Caret | undefined;
     dispose(): void;
+}
+
+/** Draw the terminal title row: the TERMINAL label, a tab for each shell
+ * (the active one lit), each with a close button, and a button for a new
+ * one. */
+export function paintTerminalChrome(cmds: DrawCmd[], r: Box, cw: number, lh: number, focused: boolean, tabs: readonly TerminalTabInfo[]): TerminalChrome {
+    const text = (x: number, y: number, s: string, color: string): void => {
+        if (s.trim() !== '') cmds.push(['text', x, y, s, color]);
+    };
+    cmds.push(['rect', r.left, r.top, r.right - r.left, lh, theme.STATUS_BG]);
+    if (focused) cmds.push(['rect', r.left + cw, r.top, 10 * cw, lh, theme.MODE_TREE]);
+    text(r.left + cw, r.top, ' TERMINAL ', focused ? theme.BG : theme.COMMENT);
+    const chrome: TerminalChrome = { tabs: [] };
+    let x = r.left + 12 * cw;
+    for (let i = 0; i < tabs.length; i++) {
+        const tab = tabs[i];
+        // The number identifies the tab; the label is cut to keep a row of
+        // tabs readable.
+        const label = `${i + 1} ${cutText(tab.label, 24)}`;
+        const w = (textWidth(label) + 4) * cw;
+        if (x + w > r.right - 2 * cw) break;
+        const box = { left: x, top: r.top, right: x + w, bottom: r.top + lh };
+        if (tab.active) cmds.push(['rect', box.left, box.top, w, lh, focused ? theme.MODE_TREE : theme.SELECTION]);
+        const color = tab.active ? (focused ? theme.BG : theme.FG) : theme.COMMENT;
+        text(box.left + cw, r.top, label, color);
+        const close = { left: box.right - 2 * cw, top: r.top, right: box.right, bottom: r.top + lh };
+        text(close.left, r.top, '×', color);
+        chrome.tabs.push({ index: i, box, close });
+        x = box.right + cw;
+    }
+    const newTab = { left: x, top: r.top, right: x + 2 * cw, bottom: r.top + lh };
+    if (newTab.right <= r.right) {
+        text(x + cw / 2, r.top, '+', theme.COMMENT);
+        chrome.newTab = newTab;
+    }
+    return chrome;
 }
 
 /** The terminal for this system: on a pseudo-terminal where `script` can make
@@ -78,6 +129,9 @@ interface Spot {
 const SCROLLBACK = 5000;
 /** The control sequence (OSC) number the wrapper reports on. */
 const REPORT = 7777;
+/** How often the shell's directory is read from the OS, in ms, when the
+ * shell doesn't report it itself (OSC 7). */
+const DIR_REFRESH = 1000;
 
 /** Runs in the pseudo-terminal: says which one it is (once it has its
  * size), runs the shell, and says when the shell is gone. */
@@ -105,10 +159,18 @@ export class Terminal implements TerminalPane {
     /** The shell exited; Enter starts another. */
     private exited = false;
     private cursorVisible = true;
-    /** What the shell or a program last set as the title. */
-    private title = '';
-    /** The shell's directory, when it reports it (OSC 7). */
+    /** The shell's directory, when it reports it (OSC 7) or the OS tells
+     * (see `askDir`). */
     private dir: string | undefined;
+    /** The shell's process, for reading its directory from the OS. */
+    private shellPid: number | undefined;
+    /** When the shell's directory was last asked of the OS, and whether an
+     * answer is still to come. */
+    private dirAskedAt = 0;
+    private dirAsking = false;
+    /** Set while waiting to ask again, for a shell that doesn't report its
+     * directory itself. */
+    private dirTimer: NodeJS.Timeout | undefined;
     /** Rows scrolled back from the end (0 follows the output). */
     scroll = 0;
     /** The selected cells, as rows of the whole buffer (scrollback
@@ -123,9 +185,6 @@ export class Terminal implements TerminalPane {
         this.term = new XTerm({ cols: 80, rows: 24, scrollback: SCROLLBACK, allowProposedApi: true });
         // Replies to the shell's questions (where is the cursor?) go back to it.
         this.term.onData((data) => this.send(data));
-        this.term.onTitleChange((title) => {
-            this.title = title;
-        });
         this.term.onWriteParsed(() => this.opts.refresh());
         this.term.parser.registerOscHandler(REPORT, (data) => {
             if (data.startsWith('tty=')) {
@@ -162,11 +221,71 @@ export class Terminal implements TerminalPane {
         return this.opts.shell ?? 'zsh';
     }
 
+    /** The shell's name and the folder it is in. */
+    label(): string {
+        this.askDir();
+        const dir = this.dir ?? this.opts.cwd();
+        const name = path.basename(dir);
+        return `${path.basename(this.shell)}${name === '' ? '' : ` ${name}`}`;
+    }
+
+    /** Ask the OS where the shell is now, so the tab follows `cd` even in
+     * shells that don't report their directory (OSC 7). The answer comes in
+     * the background and the next frame shows it; asking is at most once a
+     * second, and a timer asks again when an answer would come too soon
+     * (label is only read while something repaints). */
+    private askDir(): void {
+        if (this.dirAsking || !this.proc) return;
+        const wait = DIR_REFRESH - (Date.now() - this.dirAskedAt);
+        if (wait > 0) {
+            this.dirTimer ??= setTimeout(() => {
+                this.dirTimer = undefined;
+                this.askDir();
+            }, wait);
+            return;
+        }
+        this.dirAskedAt = Date.now();
+        this.dirAsking = true;
+        const proc = this.proc;
+        void this.shellDir().then(
+            (dir) => {
+                this.dirAsking = false;
+                // The shell (or Wim) may be gone by now.
+                if (this.proc !== proc || dir === undefined) return;
+                if (dir !== this.dir) {
+                    this.dir = dir;
+                    this.opts.refresh();
+                }
+            },
+            () => {
+                this.dirAsking = false;
+            },
+        );
+    }
+
+    /** The shell's directory, read from its process. */
+    private async shellDir(): Promise<string | undefined> {
+        const root = this.proc?.pid;
+        if (root === undefined) return undefined;
+        let pid = this.shellPid;
+        if (pid === undefined) {
+            pid = await findShellPid(root, path.basename(this.shell));
+            if (pid === undefined) return undefined;
+            this.shellPid = pid;
+        }
+        const dir = await processDir(pid);
+        if (dir === undefined) this.shellPid = undefined;
+        return dir;
+    }
+
     private start(): void {
         if (this.proc) return;
         this.exited = false;
         this.tty = undefined;
         this.cursorVisible = true;
+        this.dir = undefined;
+        this.shellPid = undefined;
+        this.dirAskedAt = 0;
         const env: NodeJS.ProcessEnv = {
             ...process.env,
             TERM: 'xterm-256color',
@@ -271,6 +390,8 @@ export class Terminal implements TerminalPane {
     dispose(): void {
         const proc = this.proc;
         this.proc = undefined;
+        if (this.dirTimer) clearTimeout(this.dirTimer);
+        this.dirTimer = undefined;
         if (proc) kill(proc);
         this.term.dispose();
     }
@@ -381,24 +502,15 @@ export class Terminal implements TerminalPane {
 
     // ----- Painting ------------------------------------------------------------------
 
-    paint(cmds: DrawCmd[], r: Box, cw: number, lh: number, focused: boolean): void {
+    paint(cmds: DrawCmd[], r: Box, cw: number, lh: number, focused: boolean, tabs: readonly TerminalTabInfo[] = []): TerminalChrome {
         this.caret = undefined;
         const text = (x: number, y: number, s: string, color: string, style?: TextStyle): void => {
             if (s.trim() !== '') cmds.push(style ? ['text', x, y, s, color, style] : ['text', x, y, s, color]);
         };
         cmds.push(['rect', r.left, r.top, r.right - r.left, r.bottom - r.top, theme.BG]);
         cmds.push(['clip', r.left, r.top, r.right - r.left, r.bottom - r.top]);
-        // The title.
-        cmds.push(['rect', r.left, r.top, r.right - r.left, lh, theme.STATUS_BG]);
-        if (focused) cmds.push(['rect', r.left + cw, r.top, 10 * cw, lh, theme.MODE_TREE]);
-        text(r.left + cw, r.top, ' TERMINAL ', focused ? theme.BG : theme.COMMENT);
-        const shell = path.basename(this.shell);
-        const dir = this.dir ?? this.opts.cwd();
-        const home = os.homedir();
-        const shown = dir === home || dir.startsWith(home + path.sep) ? '~' + dir.slice(home.length) : dir;
-        const info = this.title !== '' && !this.exited ? this.title : `${shell}  ${shown}`;
-        const scrolled = this.scroll > 0 ? `  [${this.scroll} up]` : '';
-        text(r.left + 12 * cw, r.top, info + scrolled, theme.COMMENT);
+        // The title row, with the tabs.
+        const chrome = paintTerminalChrome(cmds, r, cw, lh, focused, tabs);
 
         // The screen.
         const left = r.left + cw;
@@ -478,6 +590,7 @@ export class Terminal implements TerminalPane {
             }
         }
         cmds.push(['unclip']);
+        return chrome;
     }
 }
 
@@ -546,6 +659,63 @@ export function encodeKey(key: KeyInput, appCursor: boolean): string | undefined
     if (/^[a-z]$/.test(c)) return meta + String.fromCharCode(c.charCodeAt(0) - 96);
     const controls: Record<string, string> = { '@': '\x00', ' ': '\x00', '[': '\x1b', '\\': '\x1c', ']': '\x1d', '^': '\x1e', _: '\x1f', '?': '\x7f' };
     return controls[c] === undefined ? undefined : meta + controls[c];
+}
+
+/** Run `command` with `args`, getting its output, or nothing if it fails. */
+function run(command: string, args: string[]): Promise<string | undefined> {
+    return new Promise((resolve) => {
+        execFile(command, args, { encoding: 'utf8', timeout: 2000, windowsHide: true }, (error, stdout) =>
+            resolve(error ? undefined : stdout),
+        );
+    });
+}
+
+/** The shell's process among `root`'s descendants: the one named `name` (the
+ * login shell), not the wrapper `script` runs, which may share its name. */
+async function findShellPid(root: number, name: string): Promise<number | undefined> {
+    const table = await run('ps', ['-A', '-o', 'pid=,ppid=,command=']);
+    if (table === undefined) return undefined;
+    const children = new Map<number, { pid: number; name: string }[]>();
+    const names = new Map<number, string>();
+    for (const line of table.split('\n')) {
+        const m = /^\s*(\d+)\s+(\d+)\s+(\S+)/.exec(line);
+        if (!m) continue;
+        const pid = Number(m[1]);
+        const ppid = Number(m[2]);
+        const proc = { pid, name: path.basename(m[3]).replace(/^-/, '') };
+        names.set(pid, proc.name);
+        const list = children.get(ppid) ?? [];
+        list.push(proc);
+        children.set(ppid, list);
+    }
+    // Breadth first, so the shell itself wins over a shell run inside it.
+    let level = [root];
+    while (level.length > 0) {
+        const next: number[] = [];
+        for (const pid of level) {
+            for (const child of children.get(pid) ?? []) {
+                // The wrapper under `script` is named like the shell too.
+                if (child.name === name && names.get(pid) !== 'script') return child.pid;
+                next.push(child.pid);
+            }
+        }
+        level = next;
+    }
+    return undefined;
+}
+
+/** The working directory of process `pid`, if the OS tells. */
+async function processDir(pid: number): Promise<string | undefined> {
+    if (process.platform === 'linux') {
+        try {
+            return fs.readlinkSync(`/proc/${pid}/cwd`);
+        } catch {
+            return undefined;
+        }
+    }
+    const out = await run('lsof', ['-a', '-d', 'cwd', '-p', String(pid), '-Fn']);
+    const line = out?.split('\n').find((l) => l.startsWith('n'));
+    return line === undefined ? undefined : line.slice(1) || undefined;
 }
 
 /** Whether `command` is a program on the PATH. */

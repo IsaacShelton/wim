@@ -196,7 +196,8 @@ click a tab to switch. `:q`, `:wq`, `:x`, `ZZ` and `ZQ` close the current buffer
 when it is the last one; `:qa` quits everything and refuses while any buffer has unsaved changes.
 `:q` and `:bd` (`,x`) on a buffer with unsaved changes ask `Discard changes to "name"? (y/n)`:
 `y` closes it, `n` or Esc keeps it, and any other key keeps it and does what it does (so `:q!`
-still works).
+still works). An unnamed buffer holding nothing but whitespace never counts as changed, even
+after something was typed into it and deleted again.
 
 **File tree:** Ctrl+n shows or hides a sidebar tree of the working directory and focuses it,
 set up like the nvim-tree config: 30 columns wide, Nerd Font folder and file icons (from an
@@ -371,7 +372,9 @@ Each session is a Claude Code session (through the
 [Claude Agent SDK](https://www.npmjs.com/package/@anthropic-ai/claude-agent-sdk), which brings
 its own copy of Claude Code) or an OpenCode session (through the
 [OpenCode SDK](https://www.npmjs.com/package/@opencode/client)), working in Wim's working directory
-with that agent's own settings, tools, instructions and sign-in. Which one runs a session follows
+with that agent's own settings, tools, instructions and sign-in. A new conversation starts in the
+project folder that is open when its first message is sent (so switching projects before typing
+moves the session too); one with history keeps the folder it started in. Which one runs a session follows
 from its model: `m` lists every model both agents offer, and a Claude model appears once for each
 agent. Picking one switches the session to that agent automatically (starting a new conversation
 when the agent changes), as does a preset whose model belongs to another agent. Its process starts with the first message. Several can be open at once,
@@ -465,6 +468,10 @@ Normal-mode mappings don't apply in the middle of a command, so `f,` still finds
 | Ctrl+n | Normal | Toggle the file tree |
 | Ctrl+e, `,cc` (or Cmd+L) | Normal | Show or hide the agents panel (see [Agents](#agents)) |
 | `` Ctrl+` `` (or `,tt`, or Cmd+J) | Any | Show or hide the terminal (see [Terminal](#terminal)) |
+| `,tn` (or Cmd+T) | Normal | Open another shell in a new terminal tab |
+| `,tx` | Normal | Close the active terminal tab (the last one hides the terminal) |
+| `,t]` / `,t[` (or Cmd+] / Cmd+[) | Normal | Next / previous terminal tab |
+| Ctrl+PageDown / Ctrl+PageUp | Terminal | Next / previous terminal tab |
 | `,th` | Normal | Switch between Wim's colors (One Dark) and Nord |
 | `,tw` | Normal | Turn line wrapping on or off (`:set wrap!`) |
 | `,k` | Normal | The project menu: switch to a recent project, open another folder, close the current one, or open Wim's configuration |
@@ -528,7 +535,8 @@ the absolute number on the cursor line), `ignorecase`, `smartcase`, `hlsearch`,
 `clipboard=unnamed`. Each supports the `no`, `!` and `?` forms.
 
 **Desktop additions:** click to place the cursor, drag to select, Cmd+C / Cmd+X copy or cut the
-selection, Cmd+V pastes, Cmd+S saves, Cmd+L shows the agents panel, Cmd+J the terminal, Cmd+= / Cmd+- / Cmd+0 zoom, Cmd+W / Cmd+Q close. On Windows
+selection, Cmd+V pastes, Cmd+S saves, Cmd+L shows the agents panel, Cmd+J the terminal, Cmd+T a new
+terminal tab (Cmd+] / Cmd+[ move between them), Cmd+= / Cmd+- / Cmd+0 zoom, Cmd+W / Cmd+Q close. On Windows
 and Linux these are Ctrl+Shift+C, Ctrl+Shift+V and so on, since Ctrl alone belongs to Vim. Closing
 the macOS window with unsaved changes shows a warning first; closing again discards the changes. In
 an Edge or Chrome window, the browser asks before closing with unsaved changes instead.
@@ -556,6 +564,14 @@ Ctrl+j, Ctrl+k and Ctrl+l, which move between windows as everywhere else (Ctrl+k
 editor, Ctrl+h to the tree, Ctrl+l to the agents panel). Cmd+V pastes (bracketed, when the program
 asks for it). The wheel and PageUp/PageDown scroll back through the output; in a full-screen
 program they go to the program instead. When the shell exits, Enter starts a new one.
+
+The terminal's title row holds its tabs. Cmd+T (Ctrl+Shift+T on Windows and Linux), `,tn` or
+`:TerminalNew` opens another shell in a new tab, and Ctrl+PageDown / Ctrl+PageUp, Cmd+] / Cmd+[,
+`,t]` / `,t[`, `:TerminalNext` / `:TerminalPrev` move between them. Click a tab to switch to it,
+click its `×` to close it, or click `+` to open another; right-clicking a tab offers New Terminal
+and Close Terminal too. The last tab stays for next time when its `×` is clicked: closing it hides
+the terminal. `:TerminalClose` and `,tx` also close the active tab. Each tab shows its shell and
+the folder that shell is in, following `cd`.
 
 Wim has no native code, so it doesn't make the pseudo-terminal itself: the system's `script`
 command does, and [@xterm/headless](https://www.npmjs.com/package/@xterm/headless) (plain

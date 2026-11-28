@@ -108,6 +108,11 @@ export class Buffer {
         return this.lines[i].every(isWhitespace);
     }
 
+    /** Whether the buffer holds nothing but whitespace. */
+    isEmpty(): boolean {
+        return this.lines.every((line) => line.every(isWhitespace));
+    }
+
     firstNonBlank(i: number): number {
         const line = this.lines[i];
         const idx = line.findIndex((c) => !isWhitespace(c));

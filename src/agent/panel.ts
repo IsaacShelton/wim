@@ -68,6 +68,11 @@ const NONE: PanelAction = { t: 'None' };
 const INPUT_ROWS = 8;
 /** How often the spinner turns while a session works, in ms. */
 const SPIN = 120;
+/** How long the first message waits, when no agent has listed its models yet,
+ * before starting with the best guess it has, in ms. */
+const MODEL_WAIT = 4000;
+/** How often that wait checks whether an agent has answered, in ms. */
+const MODEL_POLL = 50;
 /** How often the cache countdown is redrawn, in ms. */
 const CACHE_TICK = 15000;
 /** Columns of the context and usage meters. */
@@ -346,6 +351,16 @@ export class AgentPanel {
     private cacheTimer: NodeJS.Timeout | undefined;
     /** The models the backends offer, once asked. */
     private models: ModelChoice[] | undefined;
+    /** The lists that have answered so far, while the others are still being
+     * asked. A model can be found here before every agent has answered. */
+    private partialModels: ModelChoice[] = [];
+    /** Why a backend's models couldn't be listed, from the last ask. A backend
+     * that couldn't answer may still offer a preset's model. */
+    private readonly modelErrors = new Map<string, string>();
+    /** Backends still being asked for their models. Until one answers, a
+     * preset's model may be theirs; the first message doesn't wait forever
+     * for an agent that can't list them. */
+    private readonly askingModels = new Set<string>();
     /** The question for the models, while the backends are being asked. */
     private loadingModels: Promise<ModelChoice[]> | undefined;
     /** Counts preset changes per session, so a slow model lookup doesn't
@@ -416,21 +431,55 @@ export class AgentPanel {
         this.current = this.sessions.length - 1;
         void s.refreshBalance();
         // A preset names a model, whichever agent offers it.
-        if (presetName !== undefined && preset !== undefined) this.usePreset(s, presetName, true);
+        if (presetName !== undefined && preset !== undefined) {
+            this.usePreset(s, presetName, true);
+            // Ask now, so the answer is usually here before the first message.
+            if (this.opts.backends.length > 1 && preset.model !== undefined) void this.knownModels().catch(() => {});
+        }
         return s;
     }
 
     /** The backend whose models include `model`, once their lists are known
-     * (the preferred backend, usually the session's, wins a tie). */
+     * (the preferred backend, usually the session's, wins a tie). If no list
+     * names it, the one whose list couldn't be read is the best guess. */
     private backendForModel(model: string | undefined, preferred = this.opts.backends[0]?.id): AgentBackend | undefined {
         if (model === undefined) return undefined;
-        return this.backendById(this.resolveModel(model, preferred)?.backend);
+        return this.backendById(this.resolveModel(model, preferred)?.backend) ?? this.backendWithUnreadModels();
+    }
+
+    /** The agent whose models couldn't be listed, when only one couldn't: a
+     * model none of the others offer most likely belongs to it. */
+    private backendWithUnreadModels(): AgentBackend | undefined {
+        if (this.modelErrors.size !== 1) return undefined;
+        return this.backendById(this.modelErrors.keys().next().value);
+    }
+
+    /** The agent whose models are still unknown (it couldn't list them, or
+     * hasn't answered yet), when only one is: a model no readable list names
+     * most likely belongs to it. An agent still being asked comes before one
+     * that failed to answer, since it may yet offer the model. */
+    private backendWithUnknownModels(): AgentBackend | undefined {
+        if (this.askingModels.size === 1) return this.backendById(this.askingModels.values().next().value);
+        if (this.askingModels.size === 0 && this.modelErrors.size === 1) return this.backendById(this.modelErrors.keys().next().value);
+        return undefined;
+    }
+
+    /** Whether a backend has answered with its models (or failed to), while
+     * others may still be asked. */
+    private someModelsAnswered(): boolean {
+        return this.askingModels.size < this.opts.backends.length;
+    }
+
+    /** Whether `backend`'s model list, which was readable, includes `model`. */
+    private backendOffers(backend: AgentBackend, model: string): boolean {
+        return this.models?.some((m) => m.backend === backend.id && (m.value === model || m.resolvedModel === model || m.value.endsWith(`/${model}`))) ?? false;
     }
 
     private createSession(backend: AgentBackend, resume?: { id: string; title: string; modified?: number }): AgentSession {
         return new AgentSession({
             backend,
             cwd: this.opts.cwd(),
+            currentCwd: this.opts.cwd,
             resume,
             onChange: () => this.changed(),
             onFiles: this.opts.onFiles,
@@ -458,19 +507,26 @@ export class AgentPanel {
      * saved session has expired and can't be refreshed. The link is opened
      * and copied, then the panel waits for the sign-in to finish. */
     private async signIn(s: AgentSession): Promise<void> {
-        const backend = s.backend;
-        if (!backend.signIn) {
-            s.notice(`${backend.label} doesn't offer a sign-in from here`);
-            return;
-        }
         if (this.signingIn) {
             s.notice('Already waiting for a sign-in to finish');
             return;
         }
         this.signingIn = true;
-        this.message = `Signing in to ${backend.label}…`;
+        this.message = 'Preparing sign-in…';
         this.changed();
         try {
+            // A preset may still be choosing its agent by model: /login goes
+            // to the agent that will run the session, not the first one.
+            await s.whenReady();
+            if (!this.sessions.includes(s)) return;
+            const backend = s.backend;
+            if (!backend.signIn) {
+                s.notice(`${backend.label} doesn't offer a sign-in from here`);
+                this.message = undefined;
+                return;
+            }
+            this.message = `Signing in to ${backend.label}…`;
+            this.changed();
             const flow = await backend.signIn(this.opts.cwd());
             const what = flow.instructions === '' ? 'Sign in to continue' : flow.instructions;
             s.notice(`${backend.label}: ${what}`);
@@ -484,6 +540,7 @@ export class AgentPanel {
             if (done) {
                 // New credentials make the model list and balance stale.
                 this.models = undefined;
+                this.modelErrors.clear();
                 this.loadingModels = undefined;
                 s.notice(`Signed in to ${backend.label}`);
                 void s.refreshUsage();
@@ -495,7 +552,7 @@ export class AgentPanel {
                 this.message = "Sign-in didn't finish";
             }
         } catch (e) {
-            s.notice(`Can't sign in to ${backend.label}: ${(e as Error).message}`, true);
+            s.notice(`Can't sign in to ${s.backend.label}: ${(e as Error).message}`, true);
             this.message = 'Sign-in failed';
         } finally {
             this.signingIn = false;
@@ -516,11 +573,33 @@ export class AgentPanel {
         }
         const run = (this.presetRuns.get(s) ?? 0) + 1;
         this.presetRuns.set(s, run);
+        /** The lookup was given up on, so its late answer mustn't undo the
+         * choice the first message started with. */
+        let stopped = false;
         const apply = (choice: ModelChoice | undefined, late = false): void => {
+            if (stopped) return;
             if (this.presetRuns.get(s) !== run || !this.sessions.includes(s)) return;
             // A model (or another preset) picked while the lists loaded wins.
             if (late && s.preset !== name) return;
             if (!choice) {
+                // A model that no readable list names most likely belongs to
+                // the agent whose list couldn't be read (or hasn't answered).
+                // Running it on the agent that did answer would authenticate
+                // as the wrong one (and a preset should not change the agent
+                // by accident).
+                const unread = this.backendWithUnknownModels();
+                if (unread && unread.id !== s.backend.id) {
+                    s.switchBackend(unread);
+                    s.applyPreset(name, preset, this.presetLabel(preset));
+                    return;
+                }
+                // Don't give a model to an agent whose own list doesn't
+                // include it: it can only report a confusing error.
+                if (preset.model !== undefined && this.models !== undefined && !this.modelErrors.has(s.backend.id) && !this.backendOffers(s.backend, preset.model)) {
+                    s.applyPreset(name, { effort: preset.effort }, 'default model');
+                    s.notice(`No agent offers ${preset.model}; using ${s.backend.label}'s default model`, true);
+                    return;
+                }
                 s.applyPreset(name, preset, this.presetLabel(preset));
                 return;
             }
@@ -544,8 +623,50 @@ export class AgentPanel {
                 () => apply(this.resolveModel(preset.model!, s.backend.id), true),
                 () => apply(undefined, true),
             );
-        if (defer && !s.started) s.waitFor(work);
-        else void work();
+        if (defer && !s.started) {
+            // The first message waits for the lists, but not forever: an
+            // agent that can't answer them (signed out, a service that isn't
+            // running) mustn't keep the message from being sent at all. Once
+            // one agent has answered, the others can't hold it up either.
+            s.waitFor(
+                () =>
+                    new Promise<void>((resolve) => {
+                        let finished = false;
+                        let quick: NodeJS.Immediate | undefined;
+                        let poll: NodeJS.Timeout | undefined;
+                        let deadline: NodeJS.Timeout | undefined;
+                        const finish = (early: boolean): void => {
+                            if (finished) return;
+                            finished = true;
+                            if (quick) clearImmediate(quick);
+                            if (poll) clearInterval(poll);
+                            if (deadline) clearTimeout(deadline);
+                            if (early) {
+                                // Use the lists that have answered, if one of
+                                // them names the model; otherwise the one
+                                // agent still unknown is the best guess.
+                                apply(this.resolveModel(preset.model!, s.backend.id, this.partialModels), true);
+                                stopped = true;
+                            }
+                            resolve();
+                        };
+                        quick = setImmediate(() => {
+                            if (finished) return;
+                            if (!this.someModelsAnswered()) {
+                                poll = setInterval(() => {
+                                    if (this.someModelsAnswered()) finish(true);
+                                }, MODEL_POLL);
+                                deadline = setTimeout(() => finish(true), MODEL_WAIT);
+                                return;
+                            }
+                            finish(true);
+                        });
+                        void work().then(() => finish(false));
+                    }),
+            );
+        } else {
+            void work();
+        }
     }
 
     private presetLabel(p: Preset): string {
@@ -1205,12 +1326,13 @@ export class AgentPanel {
         return { t: 'Picker', picker: new Picker<PresetName>('Preset', (name) => this.usePreset(s, name), { items }) as unknown as Picker<never> };
     }
 
-    /** The model a configured name means, from the lists already asked for:
-     * the preferred backend's, or else the one that offers it. */
-    private resolveModel(model: string | undefined, preferred: string | undefined): ModelChoice | undefined {
-        if (model === undefined || this.models === undefined) return undefined;
-        const exact = this.models.filter((m) => m.value === model);
-        const matches = exact.length > 0 ? exact : this.models.filter((m) => m.resolvedModel === model || m.value.endsWith(`/${model}`));
+    /** The model a configured name means, from the lists already asked for
+     * (or `from`, a partial set): the preferred backend's, or else the one
+     * that offers it. */
+    private resolveModel(model: string | undefined, preferred: string | undefined, from = this.models): ModelChoice | undefined {
+        if (model === undefined || from === undefined) return undefined;
+        const exact = from.filter((m) => m.value === model);
+        const matches = exact.length > 0 ? exact : from.filter((m) => m.resolvedModel === model || m.value.endsWith(`/${model}`));
         return matches.find((m) => m.backend === preferred) ?? matches[0];
     }
 
@@ -1230,23 +1352,35 @@ export class AgentPanel {
     private async loadModels(): Promise<ModelChoice[]> {
         const dir = this.opts.cwd();
         const errors: string[] = [];
+        const failed = new Map<string, string>();
+        this.askingModels.clear();
+        this.partialModels = [];
+        for (const backend of this.opts.backends) this.askingModels.add(backend.id);
         const lists = await Promise.all(
             this.opts.backends.map(async (backend): Promise<ModelChoice[]> => {
                 try {
                     const models = backend.models ? await backend.models(dir) : [];
-                    return models.map((m) => ({
+                    const choices = models.map((m) => ({
                         backend: backend.id,
                         value: m.value,
                         resolvedModel: m.resolvedModel,
                         displayName: m.displayName,
                         description: m.description,
                     }));
+                    this.partialModels.push(...choices);
+                    return choices;
                 } catch (e) {
-                    errors.push(`${backend.label}: ${(e as Error).message}`);
+                    const why = (e as Error).message;
+                    errors.push(`${backend.label}: ${why}`);
+                    failed.set(backend.id, why);
                     return [];
+                } finally {
+                    this.askingModels.delete(backend.id);
                 }
             }),
         );
+        this.modelErrors.clear();
+        for (const [id, why] of failed) this.modelErrors.set(id, why);
         const merged = lists.flat();
         if (merged.length === 0 && errors.length > 0) throw new Error(errors.join('; '));
         return merged;

@@ -24,6 +24,11 @@ export type Command =
     | 'ToggleAgents'
     /** The shell under the editor. */
     | 'ToggleTerminal'
+    /** Terminal tabs: another shell, closing one, or moving between them. */
+    | 'TerminalNew'
+    | 'TerminalClose'
+    | 'TerminalNext'
+    | 'TerminalPrev'
     /** Between Wim's colors and Nord (`,th`, the config's theme toggle). */
     | 'ToggleTheme'
     /** A Markdown file between editing it and reading it rendered. */
@@ -159,6 +164,10 @@ export class Keymap {
             [N, '<C-e>', command('ToggleAgents')],
             [N, '<leader>cc', command('ToggleAgents')],
             [N, '<leader>tt', command('ToggleTerminal')],
+            [N, '<leader>tn', command('TerminalNew')],
+            [N, '<leader>tx', command('TerminalClose')],
+            [N, '<leader>t]', command('TerminalNext')],
+            [N, '<leader>t[', command('TerminalPrev')],
             [N, '<leader>th', command('ToggleTheme')],
             [N, '<leader>m', command('ToggleMarkdownView')],
             [N, '<leader>tw', command('ToggleWrap')],

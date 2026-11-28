@@ -164,6 +164,8 @@ class FakeBackend implements AgentBackend {
     signInFlow: SignIn | undefined;
     /** How many times `/login` asked this backend to sign in. */
     signIns = 0;
+    /** Why listing this backend's models fails, when the test makes it. */
+    modelsError: string | undefined;
 
     start(opts: StartOptions): Promise<AgentQuery> {
         const q = new FakeQuery(opts);
@@ -184,6 +186,7 @@ class FakeBackend implements AgentBackend {
     }
 
     models(): Promise<ModelInfo[]> {
+        if (this.modelsError) return Promise.reject(new Error(this.modelsError));
         return Promise.resolve(CLAUDE_MODELS);
     }
 
@@ -207,6 +210,7 @@ class FakeOpenCodeBackend extends FakeBackend {
     override readonly label = 'OpenCode';
 
     override models(): Promise<ModelInfo[]> {
+        if (this.modelsError) return Promise.reject(new Error(this.modelsError));
         return Promise.resolve([
             { value: 'anthropic/claude-opus-5-5', resolvedModel: 'claude-opus-5-5', displayName: 'Opus 5.5', description: 'anthropic' },
             { value: 'openai/gpt-6', resolvedModel: 'gpt-6', displayName: 'GPT-6', description: 'openai' },
@@ -1119,6 +1123,114 @@ test('presets choose the agent that offers their model, the default preset too',
     await settle();
     assert.equal(h.app.agents.session?.backend.id, 'opencode');
     assert.equal(h.app.agents.session?.model, 'openai/gpt-6');
+});
+
+test('a preset whose model belongs to an agent that cannot list its models still goes there', async () => {
+    const opencode = new FakeOpenCodeBackend();
+    opencode.modelsError = 'OAuth session expired and could not be refreshed';
+    const h = harness(undefined, [opencode], {
+        presets: {
+            low: { model: 'haiku', effort: 'low' },
+            medium: { model: 'claude-opus-5-5', effort: 'medium' },
+            high: { model: 'gpt-6', effort: 'high' },
+        },
+        defaultPreset: 'high',
+    });
+    h.send({ t: 'command', name: 'agents' });
+    h.type('hello<CR>');
+    await settle();
+    // Claude Code answered but does not offer `gpt-6`; OpenCode is the one
+    // whose list could not be read, so it gets the model (and its sign-in).
+    assert.equal(h.app.agents.session?.backend.id, 'opencode');
+    assert.equal(h.backend.queries.length, 0, 'Claude Code is not started for another agent\'s model');
+    assert.equal(opencode.last.opts.model, 'gpt-6');
+    assert.deepEqual(opencode.last.sent, ['hello']);
+});
+
+test('the first message is not held up by an agent that never lists its models', async () => {
+    const opencode = new FakeOpenCodeBackend();
+    opencode.models = () => new Promise<ModelInfo[]>(() => {});
+    const h = harness(undefined, [opencode], {
+        presets: {
+            low: { model: 'haiku', effort: 'low' },
+            medium: { model: 'gpt-6', effort: 'medium' },
+            high: { model: 'gpt-6', effort: 'high' },
+        },
+        defaultPreset: 'medium',
+    });
+    h.send({ t: 'command', name: 'agents' });
+    h.type('hello<CR>');
+    await settle();
+    // OpenCode hasn't answered, so no readable list names `gpt-6`; it is the
+    // one still being asked, and the message goes to it.
+    assert.equal(h.app.agents.session?.backend.id, 'opencode');
+    assert.equal(opencode.last.opts.model, 'gpt-6');
+    assert.deepEqual(opencode.last.sent, ['hello']);
+});
+
+test("a new session's first message uses the project folder open at that time", async () => {
+    const first = tempDir('agent-cwd-first');
+    const second = tempDir('agent-cwd-second');
+    const cwd = process.cwd();
+    process.chdir(first);
+    try {
+        const h = harness();
+        h.send({ t: 'command', name: 'agents' });
+        // The session was made in `first`; before its first message Wim
+        // switches to `second`, so that is where the conversation starts.
+        process.chdir(second);
+        h.type('hello<CR>');
+        await settle();
+        assert.equal(h.backend.last.opts.cwd, second);
+        assert.deepEqual(h.backend.last.sent, ['hello']);
+        // Once it has a conversation, it keeps that folder.
+        process.chdir(first);
+        h.type('again<CR>');
+        await settle();
+        assert.equal(h.backend.last.opts.cwd, second);
+        assert.deepEqual(h.backend.last.sent, ['hello', 'again']);
+    } finally {
+        process.chdir(cwd);
+        fs.rmSync(first, { recursive: true });
+        fs.rmSync(second, { recursive: true });
+    }
+});
+
+test('/login goes to the agent that offers the preset model, before the first message', async () => {
+    const opencode = new FakeOpenCodeBackend();
+    const h = harness(undefined, [opencode], {
+        presets: {
+            low: { model: 'haiku', effort: 'low' },
+            medium: { model: 'claude-opus-5-5', effort: 'medium' },
+            high: { model: 'gpt-6', effort: 'high' },
+        },
+        defaultPreset: 'high',
+    });
+    h.send({ t: 'command', name: 'agents' });
+    h.type('/login<CR>');
+    await settle();
+    assert.equal(opencode.signIns, 1);
+    assert.equal(h.backend.signIns, 0, 'Claude Code is not signed in for an OpenCode model');
+    assert.equal(h.app.agents.session?.backend.id, 'opencode');
+    assert.equal(opencode.queries.length, 0, '/login does not start a conversation');
+});
+
+test("a preset naming a model no agent offers doesn't give it to the wrong agent", async () => {
+    const opencode = new FakeOpenCodeBackend();
+    const h = harness(undefined, [opencode], {
+        presets: {
+            low: { model: 'haiku', effort: 'low' },
+            medium: { model: 'claude-opus-5-5', effort: 'medium' },
+            high: { model: 'imaginary-model', effort: 'high' },
+        },
+        defaultPreset: 'high',
+    });
+    h.send({ t: 'command', name: 'agents' });
+    h.type('hello<CR>');
+    await settle();
+    assert.equal(h.app.agents.session?.backend.id, 'claude');
+    assert.equal(h.backend.last.opts.model, undefined, 'Claude Code is not asked for a model it does not offer');
+    assert.match(h.text(), /No agent offers imaginary-model/);
 });
 
 test('a preset model offered by both agents stays with the session\'s agent', async () => {

@@ -15,6 +15,15 @@ import type { Editor, LastVisual, Snapshot } from './editor';
 import { EditorError, fail } from './errors';
 import { isVisual } from './mode';
 
+/** Whether `buffer` differs from the content last written (or, for a new
+ * buffer, from nothing) in a way worth saving or asking about. An unnamed
+ * buffer holding nothing but whitespace has nothing to save, even after
+ * something was typed into it and deleted again. */
+export function hasUnsavedChanges(filePath: string | undefined, buffer: Buffer, savedVersion: number): boolean {
+    if (buffer.version() === savedVersion) return false;
+    return filePath !== undefined || !buffer.isEmpty();
+}
+
 export class BufferSlot {
     buffer = new Buffer();
     cursor: Pos = pos(0, 0);
@@ -35,7 +44,7 @@ export class BufferSlot {
     constructor(readonly id: number) {}
 
     isModified(): boolean {
-        return this.buffer.version() !== this.savedVersion;
+        return hasUnsavedChanges(this.filePath, this.buffer, this.savedVersion);
     }
 }
 

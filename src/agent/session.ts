@@ -152,7 +152,13 @@ class Channel<T> implements AsyncIterable<T> {
 
 export interface SessionOptions {
     backend: AgentBackend;
+    /** The folder a new conversation works in. Until the first message is
+     * sent, this follows the project that is open (see `currentCwd`). */
     cwd: string;
+    /** The project folder open now, asked for the first message: a session
+     * made before switching projects starts its conversation where Wim is
+     * now, not where it was when the session was created. */
+    currentCwd?: () => string;
     /** A saved session to continue, with its title and when it was last
      * active. */
     resume?: { id: string; title: string; modified?: number };
@@ -163,7 +169,10 @@ export interface SessionOptions {
 }
 
 export class AgentSession {
-    readonly cwd: string;
+    /** The folder the conversation works in. It moves to the open project
+     * until the first message is sent (a new chat has nothing tied to the old
+     * folder), then stays with the conversation. */
+    cwd: string;
     /** The agent this session talks to: Claude Code or OpenCode. */
     backend: AgentBackend;
     /** Claude Code's id for the session, once known. */
@@ -221,6 +230,8 @@ export class AgentSession {
      * conversation says so yet. */
     private interrupting = false;
     private interruptNoted = false;
+    /** A message has been sent, so the conversation's folder is settled. */
+    private sent = false;
     private closed = false;
     /** Counts backend switches, so a history read from an old agent doesn't
      * land in the new conversation. */
@@ -287,6 +298,13 @@ export class AgentSession {
      * Claude Code if needed. */
     send(text: string, images: readonly Attachment[] = []): void {
         if (this.closed || (text.trim() === '' && images.length === 0)) return;
+        // A new chat belongs to the project that is open when it starts. A
+        // resumed conversation (or one that has already sent) keeps its
+        // folder, even after Wim switches projects.
+        if (!this.sent) {
+            this.sent = true;
+            if (this.id === undefined) this.cwd = this.opts.currentCwd?.() ?? this.cwd;
+        }
         const shown = images.map((i) => `[Image: ${i.name}]`).join(' ');
         this.entries.push({ t: 'User', text: shown === '' ? text : text.trim() === '' ? shown : `${shown}\n${text}` });
         if (this.title === 'New session') this.title = (text.trim() === '' ? shown : text).split('\n')[0].slice(0, 60);
@@ -321,6 +339,12 @@ export class AgentSession {
      * session's settings are still being worked out waits for them. */
     waitFor(work: () => Promise<unknown>): void {
         this.ready = this.ready.then(work).catch(() => {});
+    }
+
+    /** Wait for the settings that must be worked out before the process
+     * starts (which agent a preset's model belongs to, say). */
+    async whenReady(): Promise<void> {
+        await this.ready;
     }
 
     /** Start Claude Code (resuming the session, if it has an id). */
@@ -812,14 +836,21 @@ export class AgentSession {
     switchBackend(backend: AgentBackend): void {
         if (backend.id === this.backend.id) return;
         const wasStarted = this.query !== undefined || this.id !== undefined;
+        // A message sent while the agent was being chosen is still waiting to
+        // start; switching backends mustn't make it look finished.
+        const sending = this.running && !wasStarted;
         this.epoch++;
         this.stopQuery();
+        if (sending) this.running = true;
         this.backend = backend;
         if (wasStarted) {
             this.id = undefined;
             this.title = 'New session';
             this.entries = [];
             this.loading = false;
+            // This is a new conversation too, so its first message may start
+            // in the project that is open now.
+            this.sent = false;
             this.notice(`Switched to ${backend.label}; this is a new session`);
         }
         this.live = undefined;

@@ -368,10 +368,32 @@ test('ex set options', () => {
 
 test('quit guards unsaved changes', () => {
     const ed = editor('|x');
-    ed.handleKeys(parseKeys('dd:q<CR>'));
+    ed.handleKeys(parseKeys('A!<Esc>:q<CR>'));
     assert.ok(!ed.quitRequested);
     ed.handleKeys(parseKeys(':q!<CR>'));
     assert.ok(ed.quitRequested);
+});
+
+test('an empty unnamed buffer has nothing to save', () => {
+    // Typing and deleting again leaves the buffer empty but changed.
+    const ed = new Editor(new MemoryClipboard());
+    ed.handleKeys(parseKeys('i <BS><Esc>'));
+    assert.equal(ed.buffer.text(), '');
+    assert.ok(!ed.isModified());
+    ed.handleKeys(parseKeys(':q<CR>'));
+    assert.ok(ed.quitRequested);
+});
+
+test('an emptied named file still has changes', () => {
+    const dir = tempDir('empty-named');
+    const file = path.join(dir, 't.txt');
+    fs.writeFileSync(file, 'x\n');
+    const ed = new Editor(new MemoryClipboard());
+    ed.openFile(file);
+    ed.handleKeys(parseKeys('x'));
+    assert.equal(ed.buffer.text(), '');
+    assert.ok(ed.isModified());
+    fs.rmSync(dir, { recursive: true });
 });
 
 test('counts, case and increment', () => {
