@@ -34,6 +34,10 @@ export interface AgentQuery extends AsyncIterable<sdk.SDKMessage> {
     getContextUsage(opts?: { detail?: 'summary' | 'full' }): Promise<ContextUsage>;
     /** The plan's usage limits (5-hour, weekly), when Claude Code can say. */
     getUsage?(): Promise<sdk.SDKControlGetUsageResponse>;
+    /** The process is being stopped before it took any message: forget the
+     * empty session a backend may have made for it. Returns whether it did
+     * (so the session's id no longer names anything). */
+    abandon?(): boolean;
     close(): void;
 }
 

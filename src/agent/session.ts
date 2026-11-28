@@ -259,6 +259,11 @@ export class AgentSession {
         return this.query !== undefined;
     }
 
+    /** The process is starting (a message waits for it). */
+    get booting(): boolean {
+        return this.starting !== undefined;
+    }
+
     private changed(): void {
         this.version++;
         this.opts.onChange();
@@ -315,24 +320,48 @@ export class AgentSession {
         }
         this.running = true;
         this.changed();
-        void this.ensureStarted().then((q) => {
-            // The session may have switched agents (or closed) while starting.
-            if (!q || this.query !== q) {
-                if (!q) {
+        const content: SDKUserMessage['message']['content'] =
+            images.length === 0
+                ? text
+                : [
+                      ...images.map((i) => ({ type: 'image' as const, source: { type: 'base64' as const, media_type: i.mime, data: i.data } })),
+                      ...(text.trim() === '' ? [] : [{ type: 'text' as const, text }]),
+                  ];
+        const message: SDKUserMessage = { type: 'user', message: { role: 'user', content }, parent_tool_use_id: null };
+        const deliver = (attempt: number): void => {
+            const epoch = this.epoch;
+            void this.ensureStarted().then((q) => {
+                if (this.closed) return;
+                if (q && this.query === q && this.input) {
+                    this.input.push(message);
+                    return;
+                }
+                if (q && q !== this.query) {
+                    // The process stopped (or another agent replaced it) before
+                    // the message could go in. Forget the empty session it may
+                    // have made at the backend.
+                    const abandoned = q.abandon?.() === true;
+                    q.close();
+                    // Its id names the session that was just deleted; a later
+                    // start must make a new one rather than resume nothing.
+                    if (abandoned && this.query === undefined) this.id = undefined;
+                }
+                // An agent switch takes the message to the new agent. A query
+                // that ended as soon as it started may just need starting
+                // again. Try a few times, then stop rather than leaving the
+                // session "working" forever.
+                const superseded = this.epoch !== epoch;
+                if (attempt < 2 && (superseded || q !== undefined)) {
+                    deliver(attempt + 1);
+                    return;
+                }
+                if (this.running) {
                     this.running = false;
                     this.changed();
                 }
-                return;
-            }
-            const content: SDKUserMessage['message']['content'] =
-                images.length === 0
-                    ? text
-                    : [
-                          ...images.map((i) => ({ type: 'image' as const, source: { type: 'base64' as const, media_type: i.mime, data: i.data } })),
-                          ...(text.trim() === '' ? [] : [{ type: 'text' as const, text }]),
-                      ];
-            this.input?.push({ type: 'user', message: { role: 'user', content }, parent_tool_use_id: null });
-        });
+            });
+        };
+        deliver(0);
     }
 
     /** Do `work` before the process starts, so a message sent while the
@@ -360,6 +389,12 @@ export class AgentSession {
 
     private async start(): Promise<AgentQuery | undefined> {
         await this.ready;
+        // A conversation with no history yet belongs to whatever project is
+        // open when its process actually starts. This covers Wim starting on
+        // the dashboard, where the session may be made before a project is
+        // chosen (and a send that switched projects while the models were
+        // looked up).
+        if (this.id === undefined) this.cwd = this.opts.currentCwd?.() ?? this.cwd;
         const input = new Channel<SDKUserMessage>();
         this.stderr = '';
         const epoch = this.epoch;
@@ -383,6 +418,7 @@ export class AgentSession {
             return undefined;
         }
         if (this.closed || epoch !== this.epoch) {
+            query.abandon?.();
             query.close();
             return undefined;
         }
@@ -871,6 +907,7 @@ export class AgentSession {
             this.contextTimer = undefined;
         }
         this.input?.end();
+        if (this.query?.abandon?.() === true) this.id = undefined;
         this.query?.close();
         this.input = undefined;
         this.query = undefined;

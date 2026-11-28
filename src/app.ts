@@ -2327,7 +2327,7 @@ export class WimApp {
     }
 
     /** Close the project folder, leaving Wim open with no tree or buffers,
-     * then ask which folder to work in next. */
+     * then go back to the starting dashboard. */
     private closeProject(): void {
         if (!this.projectOpen || !this.closeProjectBuffers()) return;
         this.projectOpen = false;
@@ -2336,8 +2336,8 @@ export class WimApp {
         this.terminalVisible = false;
         this.closeTreeWatch();
         this.focus = 'Editor';
-        this.editor.setMessage('Project folder closed; choose another with ,k');
-        this.openProjectFolder();
+        this.editor.setMessage('Project folder closed');
+        this.dashboardState = new Dashboard(projectItems(this.recents.list()));
     }
 
     /** Browse `start` for a project folder. Choosing a subdirectory browses

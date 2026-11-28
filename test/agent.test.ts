@@ -3,6 +3,7 @@
 // replaced by a fake that sends the SDK's messages.
 
 import assert from 'node:assert/strict';
+import { spawnSync } from 'node:child_process';
 import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
@@ -31,6 +32,7 @@ import { MemoryClipboard } from '../src/clipboard';
 import { Config, defaultConfig } from '../src/config';
 import { parseKeys, plain } from '../src/editor/keys';
 import { ClientMessage, DrawCmd } from '../src/protocol';
+import { MemoryRecentProjects } from '../src/recent';
 import { theme } from '../src/theme';
 
 const CLAUDE_MODELS: ModelInfo[] = [
@@ -60,6 +62,10 @@ class FakeQuery implements AgentQuery {
         maxTokens: 1000000,
         percentage: 3.4,
     } as unknown as ContextUsage;
+    /** The start was abandoned before it took a message. */
+    abandoned = false;
+    /** A message reached this query. */
+    prompted = false;
     private readonly queue: SDKMessage[] = [];
     private waiting: ((r: IteratorResult<SDKMessage>) => void) | undefined;
     private failure: Error | undefined;
@@ -67,6 +73,7 @@ class FakeQuery implements AgentQuery {
     constructor(readonly opts: StartOptions) {
         void (async () => {
             for await (const m of opts.prompt) {
+                this.prompted = true;
                 this.sent.push(String(m.message.content));
                 this.contents.push(m.message.content);
             }
@@ -149,6 +156,12 @@ class FakeQuery implements AgentQuery {
     close(): void {
         this.closed = true;
         this.waiting?.({ value: undefined, done: true });
+    }
+
+    abandon(): boolean {
+        if (this.prompted) return false;
+        this.abandoned = true;
+        return true;
     }
 }
 
@@ -712,6 +725,15 @@ test('the context is broken down by kind, and help lists the keys', async () => 
     assert.doesNotMatch(h.text(), /Keys in the agents panel/);
 });
 
+test('OpenCode adds Promise.withResolvers on older Node versions', () => {
+    // Wim's native app runs on Node 20, which predates it; OpenCode's client
+    // needs it for its event stream.
+    const module = path.resolve(__dirname, '..', 'src', 'agent', 'opencode');
+    const code = `delete Promise.withResolvers; require(${JSON.stringify(module)}); if (typeof Promise.withResolvers !== 'function') process.exit(1);`;
+    const result = spawnSync(process.execPath, ['-e', code], { encoding: 'utf8' });
+    assert.equal(result.status, 0, result.stderr);
+});
+
 test('OpenCode measures context from the last step, not the session totals', () => {
     // What message.list returns, newest first: one still streaming, then
     // the last steps. A session's totals add up every request it made.
@@ -1169,6 +1191,68 @@ test('the first message is not held up by an agent that never lists its models',
     assert.deepEqual(opencode.last.sent, ['hello']);
 });
 
+test('a message is not lost when the agent changes while it is starting', async () => {
+    const opencode = new FakeOpenCodeBackend();
+    const h = harness(undefined, [opencode], {
+        presets: {
+            low: { model: 'haiku', effort: 'low' },
+            medium: { model: 'haiku', effort: 'medium' },
+            high: { model: 'haiku', effort: 'high' },
+        },
+        defaultPreset: 'medium',
+    });
+    h.send({ t: 'command', name: 'agents' });
+    const session = h.app.agents.session!;
+    // Claude Code is chosen, but before its start finishes the session is
+    // switched to OpenCode. The first start is abandoned; the message must
+    // still go to the agent that replaced it.
+    const start = h.backend.start.bind(h.backend);
+    let switched = false;
+    h.backend.start = (opts: StartOptions) => {
+        if (!switched) {
+            switched = true;
+            session.switchBackend(opencode);
+        }
+        return start(opts);
+    };
+    h.type('hello<CR>');
+    await settle();
+    assert.equal(session.backend.id, 'opencode');
+    assert.deepEqual(opencode.last.sent, ['hello']);
+    assert.deepEqual(h.backend.last.sent, [], 'the abandoned start took no message');
+});
+
+test('a start replaced before its message is sent abandons its empty session', async () => {
+    const opencode = new FakeOpenCodeBackend();
+    const h = harness(undefined, [opencode], {
+        presets: {
+            low: { model: 'gpt-6', effort: 'low' },
+            medium: { model: 'gpt-6', effort: 'medium' },
+            high: { model: 'gpt-6', effort: 'high' },
+        },
+        defaultPreset: 'medium',
+    });
+    h.send({ t: 'command', name: 'agents' });
+    const session = h.app.agents.session!;
+    // OpenCode makes its session, then the agent changes before the message
+    // reaches it: that empty session is abandoned, and the message goes on
+    // to Claude Code.
+    const start = opencode.start.bind(opencode);
+    let switched = false;
+    opencode.start = (opts: StartOptions) => {
+        if (!switched) {
+            switched = true;
+            session.switchBackend(h.backend);
+        }
+        return start(opts);
+    };
+    h.type('hello<CR>');
+    await settle();
+    assert.equal(session.backend.id, 'claude');
+    assert.equal(opencode.queries[0].abandoned, true);
+    assert.deepEqual(h.backend.last.sent, ['hello']);
+});
+
 test("a new session's first message uses the project folder open at that time", async () => {
     const first = tempDir('agent-cwd-first');
     const second = tempDir('agent-cwd-second');
@@ -1194,6 +1278,50 @@ test("a new session's first message uses the project folder open at that time", 
         process.chdir(cwd);
         fs.rmSync(first, { recursive: true });
         fs.rmSync(second, { recursive: true });
+    }
+});
+
+test('bare Wim works in the project chosen on the dashboard', async () => {
+    const start = tempDir('agent-bare-start');
+    const project = tempDir('agent-bare-project');
+    const cwd = process.cwd();
+    process.chdir(start);
+    try {
+        const recents = new MemoryRecentProjects();
+        recents.add(project);
+        const backend = new FakeBackend();
+        const config = defaultConfig();
+        config.claude.enabled = true;
+        const frames: DrawCmd[][] = [];
+        const app = new WimApp({
+            dashboard: true,
+            icons: false,
+            clipboard: new MemoryClipboard(),
+            servers: [],
+            agents: backend,
+            config,
+            recentProjects: recents,
+            onFrame: (_t, _d, cmds) => frames.push(cmds),
+            onQuit: () => {},
+            openUrl: () => {},
+        });
+        const send = (msg: ClientMessage): void => app.handleMessage(msg);
+        send({ t: 'resize', width: 1400, height: 800, charW: 10, lineH: 20 });
+        // The dashboard lists the launch folder first, then the project.
+        send({ t: 'key', key: 'Down', ctrl: false, alt: false });
+        send({ t: 'key', key: 'Enter', ctrl: false, alt: false });
+        assert.equal(app.dashboard, undefined, 'the dashboard closes');
+        assert.equal(process.cwd(), project, 'the project is open');
+        send({ t: 'command', name: 'agents' });
+        for (const k of parseKeys('hello<CR>')) send({ t: 'key', key: k.key, ctrl: k.ctrl, alt: k.alt });
+        await settle();
+        assert.equal(backend.last.opts.cwd, project);
+        assert.deepEqual(backend.last.sent, ['hello']);
+        app.dispose();
+    } finally {
+        process.chdir(cwd);
+        fs.rmSync(start, { recursive: true });
+        fs.rmSync(project, { recursive: true });
     }
 });
 

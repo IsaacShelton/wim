@@ -6,6 +6,30 @@
 
 import { AccountBalance, AgentBackend, AgentQuery, ContextUsage, HistoryMessage, ModelInfo, PastSession, PermissionResult, SignIn, StartOptions, UsageInfo } from './backend';
 
+/** Wim runs on Node 20 too (its native app does), and OpenCode's client uses
+ * `Promise.withResolvers`, which only arrived in Node 22. Add it before the
+ * SDK is imported. */
+function addPromiseWithResolvers(): void {
+    const ctor = Promise as unknown as {
+        withResolvers?: <T>() => {
+            promise: Promise<T>;
+            resolve: (value: T | PromiseLike<T>) => void;
+            reject: (reason?: unknown) => void;
+        };
+    };
+    if (typeof ctor.withResolvers === 'function') return;
+    ctor.withResolvers = <T>() => {
+        let resolve!: (value: T | PromiseLike<T>) => void;
+        let reject!: (reason?: unknown) => void;
+        const promise = new Promise<T>((res, rej) => {
+            resolve = res;
+            reject = rej;
+        });
+        return { promise, resolve, reject };
+    };
+}
+addPromiseWithResolvers();
+
 /** The parts of the OpenCode client backend.ts uses. They are kept loose so
  * the SDK stays an optional dependency, imported only when OpenCode is on. */
 type Client = any;
@@ -370,6 +394,8 @@ class OpenCodeQuery implements AgentQuery {
     private cost = 0;
     /** A message is being worked on, until execution ends. */
     private turnOpen = false;
+    /** A message has been given to OpenCode, so the session isn't empty. */
+    private prompted = false;
 
     constructor(
         private readonly host: Client,
@@ -438,6 +464,7 @@ class OpenCodeQuery implements AgentQuery {
                 if (this.closed) break;
                 const { text, files } = promptContent(message.message?.content);
                 this.turnOpen = true;
+                this.prompted = true;
                 await this.host.session.prompt({
                     sessionID: this.sessionID,
                     text,
@@ -736,6 +763,15 @@ class OpenCodeQuery implements AgentQuery {
                 : null,
             behaviors: null,
         } as unknown as UsageInfo;
+    }
+
+    /** The session was made for a message that never reached it (a start
+     * that was replaced, say): delete the empty session instead of leaving
+     * `ses_...` behind in OpenCode's session list. */
+    abandon(): boolean {
+        if (this.prompted) return false;
+        void this.host.session.remove({ sessionID: this.sessionID }).catch(() => {});
+        return true;
     }
 
     close(): void {

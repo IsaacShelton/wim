@@ -228,8 +228,8 @@ most recent first, and choosing one switches to it. **Open Project Folder…** a
 folder chooser, Windows's folder browser, or zenity/kdialog on Linux; Wim browses inside its own
 window if none is available) and switches Wim to the chosen folder, closing the old project's
 buffers first. **Close Project Folder** closes those buffers and leaves Wim running with no
-tree; it then asks the system for the next folder, and canceling leaves Wim empty until `,k` is
-used again. **Open Configuration** opens Wim's own `wim.config.json`, beside `package.json`.
+tree, then returns to the starting dashboard to choose the next project. **Open Configuration**
+opens Wim's own `wim.config.json`, beside `package.json`.
 Recent projects are kept in `~/Library/Application Support/wim/recent-projects.json` on macOS,
 `%APPDATA%\wim` on Windows, and `$XDG_STATE_HOME/wim` (by default `~/.local/state/wim`) on Linux.
 

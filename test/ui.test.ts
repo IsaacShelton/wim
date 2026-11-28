@@ -1774,7 +1774,7 @@ test('launching without a path starts on the dashboard, and Esc leaves it', () =
     assert.equal(h.app.editor.buffer.text(), 'hello');
 });
 
-test('closing the project leaves Wim open and asks the system for another folder', async () => {
+test('closing the project returns to the starting dashboard', () => {
     const dir = tempDir('project-close');
     fs.writeFileSync(path.join(dir, 'a.txt'), 'alpha\n');
     const cwd = process.cwd();
@@ -1789,8 +1789,9 @@ test('closing the project leaves Wim open and asks the system for another folder
         });
         h.type(',k');
         h.type('<Down><CR>');
-        await until('the folder chooser', () => picks.length === 1);
-        assert.deepEqual(picks, [dir], 'the system folder chooser starts in the old project');
+        assert.ok(h.app.dashboard, 'the starting dashboard is shown');
+        assert.deepEqual(picks, [], 'no folder chooser is shown');
+        assert.ok(drawn(h).includes(path.basename(dir)), 'the closed project is on the dashboard');
         assert.equal(h.quit(), false, 'Wim stays open');
         assert.equal(h.app.editor.filePath, undefined);
         assert.equal(h.app.editor.buffer.text(), '');

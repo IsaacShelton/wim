@@ -578,6 +578,9 @@ export class AgentPanel {
         let stopped = false;
         const apply = (choice: ModelChoice | undefined, late = false): void => {
             if (stopped) return;
+            // A late model lookup must not pull the agent out from under a
+            // process that has already begun starting with the message.
+            if (late && s.booting) return;
             if (this.presetRuns.get(s) !== run || !this.sessions.includes(s)) return;
             // A model (or another preset) picked while the lists loaded wins.
             if (late && s.preset !== name) return;
